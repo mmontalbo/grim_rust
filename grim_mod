@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Utility to manage the Grim Fandango dev install and launch workflows."""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+ROOT_DIR = Path(__file__).resolve().parent
+DEV_INSTALL_DEFAULT = ROOT_DIR / "dev-install"
+SOURCE_DEFAULT = Path(
+    os.environ.get(
+        "GRIM_INSTALL_PATH",
+        Path.home() / ".local/share/Steam/steamapps/common/Grim Fandango Remastered",
+    )
+)
+DEFAULT_FLAGS = ["--classic", "--debuglevel", "1"]
+LOGFILE_NAME = "grim_dev.log"
+
+
+def info(message: str) -> None:
+    print(f"[grim_mod] {message}")
+
+
+def error(message: str, *, exit_code: int = 1) -> None:
+    print(f"[grim_mod] ERROR: {message}", file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def ensure_path(path: Path, description: str) -> None:
+    if not path.exists():
+        error(f"{description} not found at '{path}'.")
+
+
+def require_command(cmd: str, package_hint: Optional[str] = None) -> None:
+    if shutil.which(cmd) is None:
+        hint = f" Install {package_hint}." if package_hint else ""
+        error(f"Command '{cmd}' not found on PATH.{hint}")
+
+
+def rsync_tree(source: Path, destination: Path) -> None:
+    ensure_path(source, "Source install")
+    destination.mkdir(parents=True, exist_ok=True)
+    info(f"Syncing install from '{source}' -> '{destination}'")
+    source_str = str(source)
+    subprocess.run(
+        [
+            "rsync",
+            "-a",
+            "--delete",
+            f"{source_str.rstrip(os.sep)}/",
+            str(destination),
+        ],
+        check=True,
+    )
+    info("Sync complete.")
+
+
+def build_runtime_env(dev_install: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    ld_library_path = env.get("LD_LIBRARY_PATH")
+    dev_path = str(dev_install)
+    env["LD_LIBRARY_PATH"] = (
+        f"{dev_path}:{ld_library_path}" if ld_library_path else dev_path
+    )
+    return env
+
+
+def exec_steam_run(dev_install: Path, command: list[str]) -> None:
+    require_command("steam-run", "steam-run")
+    ensure_path(dev_install / "GrimFandango", "Game binary")
+
+    logfile = dev_install / LOGFILE_NAME
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+
+    env = build_runtime_env(dev_install)
+    os.chdir(dev_install)
+
+    os.execvpe("steam-run", ["steam-run", *command], env)
+
+
+def command_status(dev_install: Path, source: Path) -> None:
+    if dev_install.exists():
+        info(f"Dev install: {dev_install}")
+    else:
+        info(f"Dev install: (missing) -> {dev_install}")
+
+    if source.exists():
+        info(f"Source install: {source}")
+    else:
+        info(f"Source install: (missing) -> {source}")
+
+
+def command_ensure_install(dev_install: Path, source: Path) -> None:
+    rsync_tree(source, dev_install)
+
+
+def command_launch(dev_install: Path, game_args: list[str]) -> None:
+    logfile = dev_install / LOGFILE_NAME
+    runtime_args = [
+        "./GrimFandango",
+        *DEFAULT_FLAGS,
+        "--logfile",
+        str(logfile),
+        *game_args,
+    ]
+    info(f"Launching game via steam-run -> '{dev_install / 'GrimFandango'}'")
+    exec_steam_run(dev_install, runtime_args)
+
+
+def command_debug(dev_install: Path, game_args: list[str]) -> None:
+    require_command("gdb", "gdb")
+    logfile = dev_install / LOGFILE_NAME
+    args = [
+        "gdb",
+        "--args",
+        "./GrimFandango",
+        *DEFAULT_FLAGS,
+        "--logfile",
+        str(logfile),
+        *game_args,
+    ]
+    info("Launching GDB via steam-run")
+    exec_steam_run(dev_install, args)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source",
+        default=str(SOURCE_DEFAULT),
+        help="Path to the pristine Grim install to copy from",
+    )
+    parser.add_argument(
+        "--dev-install",
+        default=str(DEV_INSTALL_DEFAULT),
+        help="Destination for the writable development install",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("status", help="Show configured source/dev paths")
+    subparsers.add_parser(
+        "ensure-install",
+        help="Sync the source install into the dev directory",
+    )
+
+    launch_parser = subparsers.add_parser(
+        "launch", help="Run the dev copy under steam-run with debug flags"
+    )
+    launch_parser.add_argument(
+        "game_args",
+        nargs=argparse.REMAINDER,
+        help="Additional arguments passed to the game after '--'",
+    )
+
+    debug_parser = subparsers.add_parser(
+        "debug", help="Start GDB under steam-run with the dev copy"
+    )
+    debug_parser.add_argument(
+        "game_args",
+        nargs=argparse.REMAINDER,
+        help="Additional arguments passed to the game after '--'",
+    )
+
+    return parser.parse_args()
+
+
+def normalized_args(raw_args: list[str]) -> list[str]:
+    if raw_args and raw_args[0] == "--":
+        return raw_args[1:]
+    return raw_args
+
+
+def main() -> None:
+    args = parse_args()
+    dev_install = Path(args.dev_install).resolve()
+    source = Path(args.source).resolve()
+
+    if args.command == "status":
+        command_status(dev_install, source)
+    elif args.command == "ensure-install":
+        command_ensure_install(dev_install, source)
+    elif args.command == "launch":
+        game_args = normalized_args(args.game_args or [])
+        command_launch(dev_install, game_args)
+    elif args.command == "debug":
+        game_args = normalized_args(args.game_args or [])
+        command_debug(dev_install, game_args)
+    else:
+        error(f"Unknown command '{args.command}'")
+if __name__ == "__main__":
+    main()
