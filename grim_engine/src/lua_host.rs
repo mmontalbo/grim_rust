@@ -51,6 +51,9 @@ struct ActorSnapshot {
 #[derive(Debug, Default, Clone)]
 struct MenuState {
     visible: bool,
+    auto_freeze: bool,
+    last_run_mode: Option<String>,
+    last_action: Option<String>,
 }
 
 #[derive(Debug)]
@@ -67,6 +70,7 @@ struct EngineContext {
     loaded_sets: BTreeSet<String>,
     inventory: BTreeSet<String>,
     inventory_rooms: BTreeSet<String>,
+    menus: BTreeMap<String, Rc<RefCell<MenuState>>>,
     actor_labels: BTreeMap<String, String>,
     actor_handles: BTreeMap<u32, String>,
     next_actor_handle: u32,
@@ -99,6 +103,7 @@ impl EngineContext {
             loaded_sets: BTreeSet::new(),
             inventory: BTreeSet::new(),
             inventory_rooms: BTreeSet::new(),
+            menus: BTreeMap::new(),
             actor_labels: BTreeMap::new(),
             actor_handles: BTreeMap::new(),
             next_actor_handle: 1100,
@@ -108,6 +113,13 @@ impl EngineContext {
 
     fn log_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
+    }
+
+    fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
+        self.menus
+            .entry(name.to_string())
+            .or_insert_with(|| Rc::new(RefCell::new(MenuState::default())))
+            .clone()
     }
 
     fn start_script(&mut self, label: String) -> u32 {
@@ -1495,7 +1507,13 @@ fn install_loading_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Resul
     let menu = build_menu_instance(lua, context.clone(), Some("loading".to_string()))?;
     menu.set("autoFreeze", false)?;
 
+    let loading_state = {
+        let mut ctx = context.borrow_mut();
+        ctx.ensure_menu_state("loading")
+    };
+
     let run_context = context.clone();
+    let run_state = loading_state.clone();
     let run = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
         let (self_table, values) = split_self(args);
         if let Some(table) = self_table {
@@ -1523,6 +1541,18 @@ fn install_loading_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Resul
                 }
             }
 
+            {
+                let mut state = run_state.borrow_mut();
+                state.auto_freeze = auto_freeze;
+                state.last_run_mode = Some(if auto_freeze {
+                    "auto".to_string()
+                } else {
+                    "manual".to_string()
+                });
+                state.visible = true;
+                state.last_action = Some("run".to_string());
+            }
+
             run_context.borrow_mut().log_event(format!(
                 "loading_menu.run {}",
                 if auto_freeze { "auto" } else { "manual" }
@@ -1533,6 +1563,7 @@ fn install_loading_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Resul
     menu.set("run", run)?;
 
     let freeze_context = context.clone();
+    let freeze_state = loading_state.clone();
     let freeze = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
         let (self_table, _values) = split_self(args);
         if let Some(table) = self_table {
@@ -1553,12 +1584,19 @@ fn install_loading_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Resul
             set_mode.call::<_, ()>(("exit",))?;
         }
 
+        {
+            let mut state = freeze_state.borrow_mut();
+            state.visible = false;
+            state.last_action = Some("freeze".to_string());
+        }
+
         freeze_context.borrow_mut().log_event("loading_menu.freeze");
         Ok(())
     })?;
     menu.set("freeze", freeze)?;
 
     let close_context = context.clone();
+    let close_state = loading_state.clone();
     let close = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
         let (self_table, _values) = split_self(args);
         if let Some(table) = self_table {
@@ -1573,6 +1611,12 @@ fn install_loading_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Resul
             if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
                 pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
             }
+        }
+
+        {
+            let mut state = close_state.borrow_mut();
+            state.visible = false;
+            state.last_action = Some("close".to_string());
         }
 
         close_context.borrow_mut().log_event("loading_menu.close");
@@ -1595,7 +1639,13 @@ fn install_boot_warning_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> 
 
     let menu = build_menu_instance(lua, context.clone(), Some("boot_warning".to_string()))?;
 
+    let boot_state = {
+        let mut ctx = context.borrow_mut();
+        ctx.ensure_menu_state("boot_warning")
+    };
+
     let run_context = context.clone();
+    let run_state = boot_state.clone();
     let run = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
         let (self_table, _values) = split_self(args);
         if let Some(table) = self_table {
@@ -1608,12 +1658,19 @@ fn install_boot_warning_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> 
             }
         }
 
+        {
+            let mut state = run_state.borrow_mut();
+            state.visible = true;
+            state.last_action = Some("run".to_string());
+        }
+
         run_context.borrow_mut().log_event("boot_warning_menu.run");
         Ok(())
     })?;
     menu.set("run", run)?;
 
     let close_context = context.clone();
+    let close_state = boot_state.clone();
     let close = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
         let (self_table, _values) = split_self(args);
         if let Some(table) = self_table {
@@ -1626,6 +1683,12 @@ fn install_boot_warning_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> 
             }
         }
 
+        {
+            let mut state = close_state.borrow_mut();
+            state.visible = false;
+            state.last_action = Some("close".to_string());
+        }
+
         close_context
             .borrow_mut()
             .log_event("boot_warning_menu.close");
@@ -1634,6 +1697,7 @@ fn install_boot_warning_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> 
     menu.set("close", close)?;
 
     let check_context = context.clone();
+    let check_state = boot_state.clone();
     let check = lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
         let (self_table, _values) = split_self(args);
         if let Some(table) = self_table {
@@ -1642,6 +1706,10 @@ fn install_boot_warning_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> 
             } else {
                 table.set("is_visible", false)?;
             }
+        }
+        {
+            let mut state = check_state.borrow_mut();
+            state.last_action = Some("check_timeout".to_string());
         }
         check_context
             .borrow_mut()
@@ -2230,10 +2298,19 @@ fn build_menu_instance<'lua>(
     menu.set("name", label.clone())?;
     menu.set("is_visible", false)?;
 
-    let state = Rc::new(RefCell::new(MenuState::default()));
-    context
-        .borrow_mut()
-        .log_event(format!("menu.create {label}"));
+    let state = {
+        let mut ctx = context.borrow_mut();
+        ctx.log_event(format!("menu.create {label}"));
+        let handle = ctx.ensure_menu_state(&label);
+        {
+            let mut guard = handle.borrow_mut();
+            guard.visible = false;
+            guard.auto_freeze = false;
+            guard.last_run_mode = None;
+            guard.last_action = Some("create".to_string());
+        }
+        handle
+    };
 
     let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
 
@@ -2247,7 +2324,11 @@ fn build_menu_instance<'lua>(
             if let Some(table) = self_table {
                 table.set("is_visible", true)?;
             }
-            show_state.borrow_mut().visible = true;
+            {
+                let mut menu_state = show_state.borrow_mut();
+                menu_state.visible = true;
+                menu_state.last_action = Some("show".to_string());
+            }
             show_context
                 .borrow_mut()
                 .log_event(format!("menu.show {show_label}"));
@@ -2265,7 +2346,11 @@ fn build_menu_instance<'lua>(
             if let Some(table) = self_table {
                 table.set("is_visible", false)?;
             }
-            hide_state.borrow_mut().visible = false;
+            {
+                let mut menu_state = hide_state.borrow_mut();
+                menu_state.visible = false;
+                menu_state.last_action = Some("hide".to_string());
+            }
             hide_context
                 .borrow_mut()
                 .log_event(format!("menu.hide {hide_label}"));
@@ -2273,12 +2358,17 @@ fn build_menu_instance<'lua>(
         })?,
     )?;
 
+    let freeze_state = state.clone();
     let freeze_context = context.clone();
     let freeze_label = label.clone();
     menu.set(
         "freeze",
         lua_ctx.create_function(move |_, args: Variadic<Value>| {
             let (_self_table, _values) = split_self(args);
+            {
+                let mut menu_state = freeze_state.borrow_mut();
+                menu_state.last_action = Some("freeze".to_string());
+            }
             freeze_context
                 .borrow_mut()
                 .log_event(format!("menu.freeze {freeze_label}"));
@@ -2286,6 +2376,7 @@ fn build_menu_instance<'lua>(
         })?,
     )?;
 
+    let close_state = state.clone();
     let close_context = context.clone();
     let close_label = label.clone();
     menu.set(
@@ -2295,6 +2386,11 @@ fn build_menu_instance<'lua>(
             if let Some(table) = self_table {
                 table.set("is_visible", false)?;
             }
+            {
+                let mut menu_state = close_state.borrow_mut();
+                menu_state.visible = false;
+                menu_state.last_action = Some("close".to_string());
+            }
             close_context
                 .borrow_mut()
                 .log_event(format!("menu.close {close_label}"));
@@ -2302,12 +2398,17 @@ fn build_menu_instance<'lua>(
         })?,
     )?;
 
+    let cleanup_state = state.clone();
     let cleanup_context = context.clone();
     let cleanup_label = label.clone();
     menu.set(
         "cleanup",
         lua_ctx.create_function(move |_, args: Variadic<Value>| {
             let (_self_table, _values) = split_self(args);
+            {
+                let mut menu_state = cleanup_state.borrow_mut();
+                menu_state.last_action = Some("cleanup".to_string());
+            }
             cleanup_context
                 .borrow_mut()
                 .log_event(format!("menu.cleanup {cleanup_label}"));
@@ -2400,6 +2501,33 @@ fn dump_runtime_summary(state: &EngineContext) {
             .collect::<Vec<_>>()
             .join(", ");
         println!("  Inventory rooms: {}", display);
+    }
+    if !state.menus.is_empty() {
+        println!("  Menus:");
+        for (name, menu_state) in &state.menus {
+            let snapshot = menu_state.borrow();
+            let visibility = if snapshot.visible {
+                "visible"
+            } else {
+                "hidden"
+            };
+            let mut details = Vec::new();
+            if snapshot.auto_freeze {
+                details.push("autoFreeze".to_string());
+            }
+            if let Some(mode) = &snapshot.last_run_mode {
+                details.push(format!("run={mode}"));
+            }
+            if let Some(action) = &snapshot.last_action {
+                details.push(format!("last={action}"));
+            }
+            let extra = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", details.join(", "))
+            };
+            println!("    - {}: {}{}", name, visibility, extra);
+        }
     }
     if !state.scripts.is_empty() {
         println!("  Pending scripts:");
