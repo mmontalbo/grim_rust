@@ -417,6 +417,26 @@ fn handle_special_dofile<'lua>(
                 install_actor_scaffold(lua, context, system_key.clone())?;
                 return Ok(Some(Value::Nil));
             }
+            "menu_loading.lua" | "menu_loading.decompiled.lua" => {
+                install_loading_menu(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "menu_boot_warning.lua" | "menu_boot_warning.decompiled.lua" => {
+                install_boot_warning_menu(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "menu_dialog.lua" | "menu_dialog.decompiled.lua" => {
+                install_menu_dialog_stub(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "menu_common.lua" | "menu_common.decompiled.lua" => {
+                install_menu_common_stub(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "menu_remap_keys.lua" | "menu_remap_keys.decompiled.lua" => {
+                install_menu_remap_stub(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
             _ => {}
         }
     }
@@ -660,6 +680,8 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         "LockCursor",
         lua.create_function(|_, name: String| Ok(format!("cursor::{name}")))?,
     )?;
+    globals.set("TRUE", true)?;
+    globals.set("FALSE", false)?;
     globals.set("SetSayLineDefaults", noop.clone())?;
     globals.set("GetPlatform", lua.create_function(|_, ()| Ok(1))?)?; // PLATFORM_PC_WIN
     globals.set("ReadRegistryValue", nil_return.clone())?;
@@ -729,30 +751,6 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         "Load",
         lua.create_function(|_, _args: Variadic<Value>| Ok(()))?,
     )?;
-
-    let loading_menu = lua.create_table()?;
-    let loading_visible = Rc::new(RefCell::new(false));
-    let visible_clone = loading_visible.clone();
-    let run_fn = lua.create_function(move |_, _args: Variadic<Value>| {
-        *visible_clone.borrow_mut() = true;
-        Ok(())
-    })?;
-    loading_menu.set("run", run_fn)?;
-    let visible_clone = loading_visible.clone();
-    let close_fn = lua.create_function(move |_, ()| {
-        *visible_clone.borrow_mut() = false;
-        Ok(())
-    })?;
-    loading_menu.set("close", close_fn)?;
-    let visible_clone = loading_visible.clone();
-    let is_visible_fn = lua.create_function(move |_, ()| Ok(*visible_clone.borrow()))?;
-    loading_menu.set("is_visible", is_visible_fn)?;
-    globals.set("loading_menu", loading_menu)?;
-
-    let boot_menu = lua.create_table()?;
-    boot_menu.set("run", noop.clone())?;
-    boot_menu.set("check_timeout", lua.create_function(|_, ()| Ok(()))?)?;
-    globals.set("boot_warning_menu", boot_menu)?;
 
     let prefs = lua.create_table()?;
     prefs.set("init", noop.clone())?;
@@ -1444,6 +1442,249 @@ fn install_menu_infrastructure(lua: &Lua, context: Rc<RefCell<EngineContext>>) -
     Ok(())
 }
 
+fn install_loading_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("loading_menu"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let menu = build_menu_instance(lua, context.clone(), Some("loading".to_string()))?;
+    menu.set("autoFreeze", false)?;
+
+    let run_context = context.clone();
+    let run = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        let (self_table, values) = split_self(args);
+        if let Some(table) = self_table {
+            let auto_freeze = values.get(0).map(value_to_bool).unwrap_or(false);
+            table.set("autoFreeze", auto_freeze)?;
+
+            if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
+                if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
+                    pause_fn.call::<_, ()>((game_pauser.clone(), true))?;
+                }
+            }
+
+            if let Ok(show_fn) = table.get::<_, Function>("show") {
+                show_fn.call::<_, ()>((table.clone(),))?;
+            } else {
+                table.set("is_visible", true)?;
+            }
+
+            if auto_freeze {
+                if let Ok(single_start) =
+                    lua_ctx.globals().get::<_, Function>("single_start_script")
+                {
+                    let freeze_fn: Function = table.get("freeze")?;
+                    single_start.call::<_, u32>((freeze_fn, table.clone()))?;
+                }
+            }
+
+            run_context.borrow_mut().log_event(format!(
+                "loading_menu.run {}",
+                if auto_freeze { "auto" } else { "manual" }
+            ));
+        }
+        Ok(())
+    })?;
+    menu.set("run", run)?;
+
+    let freeze_context = context.clone();
+    let freeze = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        let (self_table, _values) = split_self(args);
+        if let Some(table) = self_table {
+            if let Ok(hide_fn) = table.get::<_, Function>("hide") {
+                hide_fn.call::<_, ()>((table.clone(),))?;
+            } else {
+                table.set("is_visible", false)?;
+            }
+        }
+
+        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
+            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
+                pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
+            }
+        }
+
+        if let Ok(set_mode) = lua_ctx.globals().get::<_, Function>("SetGameRenderMode") {
+            set_mode.call::<_, ()>(("exit",))?;
+        }
+
+        freeze_context.borrow_mut().log_event("loading_menu.freeze");
+        Ok(())
+    })?;
+    menu.set("freeze", freeze)?;
+
+    let close_context = context.clone();
+    let close = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        let (self_table, _values) = split_self(args);
+        if let Some(table) = self_table {
+            if let Ok(hide_fn) = table.get::<_, Function>("hide") {
+                hide_fn.call::<_, ()>((table.clone(),))?;
+            } else {
+                table.set("is_visible", false)?;
+            }
+        }
+
+        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
+            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
+                pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
+            }
+        }
+
+        close_context.borrow_mut().log_event("loading_menu.close");
+        Ok(())
+    })?;
+    menu.set("close", close)?;
+
+    globals.set("loading_menu", menu)?;
+    Ok(())
+}
+
+fn install_boot_warning_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(
+        globals.get::<_, Value>("boot_warning_menu"),
+        Ok(Value::Table(_))
+    ) {
+        return Ok(());
+    }
+
+    let menu = build_menu_instance(lua, context.clone(), Some("boot_warning".to_string()))?;
+
+    let run_context = context.clone();
+    let run = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        let (self_table, _values) = split_self(args);
+        if let Some(table) = self_table {
+            table.set("is_visible", true)?;
+        }
+
+        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
+            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
+                pause_fn.call::<_, ()>((game_pauser.clone(), true))?;
+            }
+        }
+
+        run_context.borrow_mut().log_event("boot_warning_menu.run");
+        Ok(())
+    })?;
+    menu.set("run", run)?;
+
+    let close_context = context.clone();
+    let close = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        let (self_table, _values) = split_self(args);
+        if let Some(table) = self_table {
+            table.set("is_visible", false)?;
+        }
+
+        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
+            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
+                pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
+            }
+        }
+
+        close_context
+            .borrow_mut()
+            .log_event("boot_warning_menu.close");
+        Ok(())
+    })?;
+    menu.set("close", close)?;
+
+    let check_context = context.clone();
+    let check = lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
+        let (self_table, _values) = split_self(args);
+        if let Some(table) = self_table {
+            if let Ok(close_fn) = table.get::<_, Function>("close") {
+                close_fn.call::<_, ()>((table.clone(),))?;
+            } else {
+                table.set("is_visible", false)?;
+            }
+        }
+        check_context
+            .borrow_mut()
+            .log_event("boot_warning_menu.check_timeout");
+        Ok(())
+    })?;
+    menu.set("check_timeout", check)?;
+
+    globals.set("boot_warning_menu", menu)?;
+    Ok(())
+}
+
+fn install_menu_dialog_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("menu_dialog"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let table = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("menu_dialog.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    table.set_metatable(Some(metatable));
+    globals.set("menu_dialog", table)?;
+    Ok(())
+}
+
+fn install_menu_common_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("menu_common"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let table = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("menu_common.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    table.set_metatable(Some(metatable));
+    globals.set("menu_common", table)?;
+    Ok(())
+}
+
+fn install_menu_remap_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(
+        globals.get::<_, Value>("menu_remap_keys"),
+        Ok(Value::Table(_))
+    ) {
+        return Ok(());
+    }
+
+    let table = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("menu_remap_keys.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    table.set_metatable(Some(metatable));
+    globals.set("menu_remap_keys", table)?;
+    Ok(())
+}
+
 fn install_menu_constants(lua: &Lua) -> Result<()> {
     let globals = lua.globals();
     globals.set("CACHE_PERSISTENT", 2)?;
@@ -1647,6 +1888,7 @@ fn build_menu_instance<'lua>(
     let label = name.unwrap_or_else(|| "menu".to_string());
     let menu = lua_ctx.create_table()?;
     menu.set("name", label.clone())?;
+    menu.set("is_visible", false)?;
 
     let state = Rc::new(RefCell::new(MenuState::default()));
     context
@@ -1660,7 +1902,11 @@ fn build_menu_instance<'lua>(
     let show_label = label.clone();
     menu.set(
         "show",
-        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+        lua_ctx.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                table.set("is_visible", true)?;
+            }
             show_state.borrow_mut().visible = true;
             show_context
                 .borrow_mut()
@@ -1674,7 +1920,11 @@ fn build_menu_instance<'lua>(
     let hide_label = label.clone();
     menu.set(
         "hide",
-        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+        lua_ctx.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                table.set("is_visible", false)?;
+            }
             hide_state.borrow_mut().visible = false;
             hide_context
                 .borrow_mut()
@@ -1687,7 +1937,8 @@ fn build_menu_instance<'lua>(
     let freeze_label = label.clone();
     menu.set(
         "freeze",
-        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+        lua_ctx.create_function(move |_, args: Variadic<Value>| {
+            let (_self_table, _values) = split_self(args);
             freeze_context
                 .borrow_mut()
                 .log_event(format!("menu.freeze {freeze_label}"));
@@ -1699,7 +1950,11 @@ fn build_menu_instance<'lua>(
     let close_label = label.clone();
     menu.set(
         "close",
-        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+        lua_ctx.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                table.set("is_visible", false)?;
+            }
             close_context
                 .borrow_mut()
                 .log_event(format!("menu.close {close_label}"));
@@ -1711,19 +1966,13 @@ fn build_menu_instance<'lua>(
     let cleanup_label = label.clone();
     menu.set(
         "cleanup",
-        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+        lua_ctx.create_function(move |_, args: Variadic<Value>| {
+            let (_self_table, _values) = split_self(args);
             cleanup_context
                 .borrow_mut()
                 .log_event(format!("menu.cleanup {cleanup_label}"));
             Ok(())
         })?,
-    )?;
-
-    let visible_state = state.clone();
-    menu.set(
-        "is_visible",
-        lua_ctx
-            .create_function(move |_, _args: Variadic<Value>| Ok(visible_state.borrow().visible))?,
     )?;
 
     menu.set("add_image", noop.clone())?;
@@ -1735,6 +1984,7 @@ fn build_menu_instance<'lua>(
     menu.set("add_button", noop.clone())?;
     menu.set("add_slider", noop.clone())?;
     menu.set("add_toggle", noop.clone())?;
+    menu.set("autoFreeze", noop.clone())?;
 
     let fallback = {
         let fallback_context = context.clone();
