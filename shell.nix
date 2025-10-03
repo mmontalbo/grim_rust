@@ -41,14 +41,19 @@ let
 
 in pkgs.mkShell {
   packages = with pkgs; [
-    scummvmTools      # provides grim tools for LAB/CLX extraction and repacking
-    lua5_1             # classic scripts target Lua 5.1 semantics
-    python3            # helper scripting for asset automation
-    p7zip              # archive support when unpacking user mods
-    ripgrep            # fast search across extracted scripts
+    scummvmTools      # extraction tooling for reference data
+    lua5_1            # many scripts target classic Lua semantics
+    python3           # quick one-off analysis helpers
+    p7zip             # archive handling when spelunking assets
+    ripgrep           # fast code/asset search
+    jq                # lightweight JSON inspection for reports
     git
-    gdb
     rsync
+    rustc
+    cargo
+    rustfmt
+    rust-analyzer
+    pkg-config
   ];
 
   shellHook = ''

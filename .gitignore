@@ -2,3 +2,8 @@ dev-install/
 Saves/
 *.log
 .DS_Store
+patches/build/
+target/
+**/target/
+artifacts/
+*.zip
