@@ -1,0 +1,89 @@
+{
+  "scripts": [
+    {
+      "name": "cut_scene.intro",
+      "triggered_by": {
+        "name": "enter",
+        "kind": "Enter",
+        "defined_in": "mo.decompiled.lua",
+        "defined_at_line": 64,
+        "stage": {
+          "index": 9,
+          "label": "Finalize boot inside mo.set",
+          "stage": {
+            "FinalizeBoot": {
+              "set": "mo.set"
+            }
+          },
+          "prerequisites": [
+            "Load system fonts",
+            "Preload mouse cursors",
+            "Initialize system preferences",
+            "Enable joystick + mouse controls",
+            "Select default set mo.set for new game",
+            "Load achievement tables",
+            "Queue SHOWLOGO sequence",
+            "Load year, menu, and room scripts"
+          ]
+        }
+      }
+    },
+    {
+      "name": "meche.new_run_idle",
+      "triggered_by": {
+        "name": "set_up_meche",
+        "kind": "Setup",
+        "defined_in": "mo.decompiled.lua",
+        "defined_at_line": 20,
+        "stage": {
+          "index": 9,
+          "label": "Finalize boot inside mo.set",
+          "stage": {
+            "FinalizeBoot": {
+              "set": "mo.set"
+            }
+          },
+          "prerequisites": [
+            "Load system fonts",
+            "Preload mouse cursors",
+            "Initialize system preferences",
+            "Enable joystick + mouse controls",
+            "Select default set mo.set for new game",
+            "Load achievement tables",
+            "Queue SHOWLOGO sequence",
+            "Load year, menu, and room scripts"
+          ]
+        }
+      }
+    },
+    {
+      "name": "mo.meche_looks_at_manny_when_he_talks",
+      "triggered_by": {
+        "name": "set_up_meche",
+        "kind": "Setup",
+        "defined_in": "mo.decompiled.lua",
+        "defined_at_line": 20,
+        "stage": {
+          "index": 9,
+          "label": "Finalize boot inside mo.set",
+          "stage": {
+            "FinalizeBoot": {
+              "set": "mo.set"
+            }
+          },
+          "prerequisites": [
+            "Load system fonts",
+            "Preload mouse cursors",
+            "Initialize system preferences",
+            "Enable joystick + mouse controls",
+            "Select default set mo.set for new game",
+            "Load achievement tables",
+            "Queue SHOWLOGO sequence",
+            "Load year, menu, and room scripts"
+          ]
+        }
+      }
+    }
+  ],
+  "movies": []
+}

@@ -15,6 +15,7 @@ pub struct FunctionSimulation {
     pub created_actors: Vec<String>,
     pub method_calls: BTreeMap<String, BTreeMap<String, usize>>,
     pub stateful_calls: BTreeMap<StateSubsystem, BTreeMap<String, BTreeMap<String, usize>>>,
+    pub stateful_call_events: Vec<StatefulCallEvent>,
     pub started_scripts: Vec<String>,
     pub movie_calls: Vec<String>,
 }
@@ -30,6 +31,7 @@ struct FunctionSimulationBuilder {
     created_actors: BTreeSet<String>,
     method_calls: BTreeMap<String, BTreeMap<String, usize>>,
     stateful_calls: BTreeMap<StateSubsystem, BTreeMap<String, BTreeMap<String, usize>>>,
+    stateful_call_events: Vec<StatefulCallEvent>,
     started_scripts_seen: BTreeSet<String>,
     started_scripts: Vec<String>,
     movie_calls_seen: BTreeSet<String>,
@@ -41,16 +43,22 @@ impl FunctionSimulationBuilder {
         self.created_actors.insert(name.into());
     }
 
-    fn record_method_call<S: Into<String>>(&mut self, target: S, method: S) {
-        let target_key = target.into();
-        let method_key = method.into();
+    fn record_method_call(&mut self, invocation: MethodInvocation) {
+        let MethodInvocation {
+            target,
+            method,
+            args,
+        } = invocation;
+
+        let target_key = target;
+        let method_key = method;
 
         if should_ignore_method_call(&target_key, &method_key) {
             return;
         }
 
         if let Some(subsystem) = classify_stateful_method(&target_key, &method_key) {
-            self.record_stateful_call(subsystem, target_key, method_key);
+            self.record_stateful_call(subsystem, target_key, method_key, args);
             return;
         }
 
@@ -58,13 +66,26 @@ impl FunctionSimulationBuilder {
         *entry.entry(method_key).or_insert(0) += 1;
     }
 
-    fn record_stateful_call(&mut self, subsystem: StateSubsystem, target: String, method: String) {
+    fn record_stateful_call(
+        &mut self,
+        subsystem: StateSubsystem,
+        target: String,
+        method: String,
+        args: Vec<String>,
+    ) {
         let subsystem_entry = self
             .stateful_calls
             .entry(subsystem)
             .or_insert_with(BTreeMap::new);
-        let target_entry = subsystem_entry.entry(target).or_default();
-        *target_entry.entry(method).or_insert(0) += 1;
+        let target_entry = subsystem_entry.entry(target.clone()).or_default();
+        *target_entry.entry(method.clone()).or_insert(0) += 1;
+
+        self.stateful_call_events.push(StatefulCallEvent {
+            subsystem,
+            target,
+            method,
+            arguments: args,
+        });
     }
 
     fn record_started_script<S: Into<String>>(&mut self, script: S) {
@@ -86,6 +107,7 @@ impl FunctionSimulationBuilder {
             created_actors: self.created_actors.into_iter().collect(),
             method_calls: self.method_calls,
             stateful_calls: self.stateful_calls,
+            stateful_call_events: self.stateful_call_events,
             started_scripts: self.started_scripts,
             movie_calls: self.movie_calls,
         }
@@ -299,7 +321,7 @@ fn analyze_function_call(builder: &mut FunctionSimulationBuilder, call: &Functio
         analyze_expression(builder, expr);
     }
     if let Some(invocation) = method_invocation(call) {
-        builder.record_method_call(invocation.target, invocation.method);
+        builder.record_method_call(invocation);
     }
 
     for suffix in call.suffixes() {
@@ -375,6 +397,18 @@ fn analyze_function_args(builder: &mut FunctionSimulationBuilder, args: &Functio
     }
 }
 
+fn function_args_to_strings(args: &FunctionArgs) -> Vec<String> {
+    match args {
+        FunctionArgs::Parentheses { arguments, .. } => arguments
+            .iter()
+            .map(|expr| expression_to_argument_repr(expr))
+            .collect(),
+        FunctionArgs::TableConstructor(_) => vec!["<table>".to_string()],
+        FunctionArgs::String(token) => vec![strip_matching_quotes(token.token().to_string())],
+        _ => Vec::new(),
+    }
+}
+
 fn is_actor_creation(expr: &Expression) -> bool {
     if let Some(call) = expression_to_function_call(expr) {
         if let Some(invocation) = method_invocation(call) {
@@ -399,9 +433,11 @@ fn expression_to_function_call(expr: &Expression) -> Option<&FunctionCall> {
     }
 }
 
+#[derive(Clone)]
 struct MethodInvocation {
     target: String,
     method: String,
+    args: Vec<String>,
 }
 
 fn method_invocation(call: &FunctionCall) -> Option<MethodInvocation> {
@@ -429,12 +465,21 @@ fn method_invocation(call: &FunctionCall) -> Option<MethodInvocation> {
                 return Some(MethodInvocation {
                     target,
                     method: method_call.name().token().to_string(),
+                    args: function_args_to_strings(method_call.args()),
                 });
             }
             _ => {}
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StatefulCallEvent {
+    pub subsystem: StateSubsystem,
+    pub target: String,
+    pub method: String,
+    pub arguments: Vec<String>,
 }
 
 fn prefix_to_string(prefix: &Prefix) -> Option<String> {
@@ -460,6 +505,26 @@ fn expression_to_string(expr: &Expression) -> Option<String> {
         },
         _ => None,
     }
+}
+
+fn expression_to_argument_repr(expr: &Expression) -> String {
+    if let Expression::Value { value, .. } = expr {
+        match value.as_ref() {
+            Value::String(token) => return strip_matching_quotes(token.token().to_string()),
+            Value::Number(token) => return token.token().to_string(),
+            Value::Symbol(token) => return token.token().to_string(),
+            Value::Var(var) => {
+                if let Some(text) = var_to_string(var) {
+                    return text;
+                }
+            }
+            Value::ParenthesesExpression(inner) => {
+                return expression_to_argument_repr(inner);
+            }
+            _ => {}
+        }
+    }
+    expression_to_string(expr).unwrap_or_else(|| "<expr>".to_string())
 }
 
 fn var_to_string(var: &Var) -> Option<String> {

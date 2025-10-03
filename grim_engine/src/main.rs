@@ -10,21 +10,32 @@ use grim_analysis::boot::{run_boot_pipeline, BootRequest};
 use grim_analysis::registry::Registry;
 use grim_analysis::resources::ResourceGraph;
 use grim_analysis::runtime::build_runtime_model;
-use grim_analysis::simulation::FunctionSimulation;
+use grim_analysis::simulation::{FunctionSimulation, StateSubsystem};
 use grim_analysis::timeline::{build_boot_timeline, BootTimeline, HookKind, HookTimelineEntry};
 use serde::Serialize;
 
 mod assets;
 mod lab_collection;
+mod scheduler;
 mod state;
 use assets::MANNY_OFFICE_ASSETS;
-use lab_collection::{collect_assets, AssetReport, LabCollection};
-use state::{EngineState, HookApplication, HookReference, SetState};
+use lab_collection::{collect_assets, AssetMetadata, AssetReport, LabCollection};
+use scheduler::{MovieQueue, ScriptScheduler};
+use state::{
+    EngineState, HookApplication, HookReference, MovieEvent, ScriptEvent, SetState,
+    SubsystemReplaySnapshot, SubsystemState,
+};
 
 #[derive(Serialize)]
 struct TimelineManifest<'a> {
     timeline: &'a BootTimeline,
     engine_state: &'a EngineState,
+}
+
+#[derive(Serialize)]
+struct SchedulerManifest<'a> {
+    scripts: &'a [ScriptEvent],
+    movies: &'a [MovieEvent],
 }
 
 /// Minimal host prototype that leans on the shared analysis layer.
@@ -61,6 +72,14 @@ struct Args {
     /// Path to write the Manny's Office asset scan JSON manifest
     #[arg(long)]
     asset_manifest: Option<PathBuf>,
+
+    /// Simulate the boot-time scheduler to show execution cadence
+    #[arg(long)]
+    simulate_scheduler: bool,
+
+    /// Path to write the boot-time scheduler queues as JSON
+    #[arg(long)]
+    scheduler_json: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -89,6 +108,18 @@ fn main() -> Result<()> {
         fs::write(path, json)
             .with_context(|| format!("writing timeline JSON to {}", path.display()))?;
         println!("Saved boot timeline JSON to {}", path.display());
+    }
+
+    if let Some(path) = args.scheduler_json.as_ref() {
+        let manifest = SchedulerManifest {
+            scripts: &engine_state.queued_scripts,
+            movies: &engine_state.queued_movies,
+        };
+        let json = serde_json::to_string_pretty(&manifest)
+            .context("serializing scheduler manifest to JSON")?;
+        fs::write(path, json)
+            .with_context(|| format!("writing scheduler JSON to {}", path.display()))?;
+        println!("Saved scheduler manifest to {}", path.display());
     }
 
     registry.save()?;
@@ -133,12 +164,30 @@ fn main() -> Result<()> {
                         }
                         println!("\nManny's office asset scan ({})", lab_root.display());
                         for entry in &report.found {
+                            let meta = match &entry.metadata {
+                                Some(AssetMetadata::Bitmap {
+                                    width,
+                                    height,
+                                    bits_per_pixel,
+                                    codec,
+                                    frames,
+                                    supported,
+                                }) => {
+                                    let status = if *supported { "classic" } else { "unsupported" };
+                                    format!(
+                                        " [{}x{} {}bpp codec {codec} frames {} {status}]",
+                                        width, height, bits_per_pixel, frames
+                                    )
+                                }
+                                None => String::new(),
+                            };
                             println!(
-                                "  - {name:<24} {size:>8} bytes @ 0x{offset:08X} <= {archive}",
+                                "  - {name:<24} {size:>8} bytes @ 0x{offset:08X} <= {archive}{meta}",
                                 name = entry.asset_name,
                                 size = entry.size,
                                 offset = entry.offset,
-                                archive = entry.archive_path.display()
+                                archive = entry.archive_path.display(),
+                                meta = meta
                             );
                         }
                         if !report.missing.is_empty() {
@@ -187,6 +236,13 @@ fn main() -> Result<()> {
         }
     }
 
+    print_subsystem_delta_events(&engine_state, args.verbose);
+    print_replayed_subsystem_snapshot(&engine_state.replay_snapshot, args.verbose);
+
+    if args.simulate_scheduler {
+        simulate_scheduler(&engine_state);
+    }
+
     Ok(())
 }
 
@@ -233,20 +289,147 @@ fn describe_starting_set(set: &SetState, verbose: bool) {
     print_dependency_rollup("Other scripts", &rollup.helper_scripts);
     print_dependency_rollup("Movies", &rollup.movies);
 }
+
+fn simulate_scheduler(state: &EngineState) {
+    println!("\nSimulating boot-time scheduler:\n");
+    let mut script_scheduler = ScriptScheduler::from_engine_state(state);
+    if script_scheduler.is_empty() {
+        println!("  (no scripts queued)");
+    } else {
+        println!("  Script queue:");
+        while let Some(event) = script_scheduler.next() {
+            println!(
+                "    -> {} ({} remaining)",
+                event.name,
+                script_scheduler.len()
+            );
+            println!(
+                "       triggered by {}",
+                format_reference(&event.triggered_by)
+            );
+        }
+    }
+
+    let mut movie_queue = MovieQueue::from_engine_state(state);
+    if movie_queue.is_empty() {
+        println!("\n  No movies queued.");
+    } else {
+        println!("\n  Movie queue:");
+        while let Some(event) = movie_queue.next() {
+            println!("    -> {} ({} remaining)", event.name, movie_queue.len());
+            println!(
+                "       triggered by {}",
+                format_reference(&event.triggered_by)
+            );
+        }
+    }
+}
+
+fn print_subsystem_delta_events(state: &EngineState, verbose: bool) {
+    if state.subsystem_delta_events.is_empty() {
+        return;
+    }
+
+    println!("\nOrdered subsystem delta events:");
+    let event_count = state.subsystem_delta_events.len();
+    let display_limit = if verbose {
+        event_count
+    } else {
+        event_count.min(12)
+    };
+
+    for event in state.subsystem_delta_events.iter().take(display_limit) {
+        let argument_suffix = if event.arguments.is_empty() {
+            String::new()
+        } else {
+            format!("({})", event.arguments.join(", "))
+        };
+        let method_label = if event.count > 1 && event.arguments.is_empty() {
+            format!("{} x{}", event.method, event.count)
+        } else {
+            format!("{}{}", event.method, argument_suffix)
+        };
+        println!(
+            "  [{subsystem}] {target}: {method} <= {trigger} (hook #{sequence})",
+            subsystem = event.subsystem,
+            target = event.target,
+            method = method_label,
+            trigger = format_reference(&event.triggered_by),
+            sequence = event.trigger_sequence
+        );
+    }
+
+    if !verbose && event_count > display_limit {
+        println!("  ... +{} more events", event_count - display_limit);
+    }
+}
+
 fn print_subsystem_states(set: &SetState, verbose: bool) {
     if set.subsystems.is_empty() {
         return;
     }
 
     println!("\nBoot-time subsystem mutations:");
-    for (subsystem, state) in &set.subsystems {
-        println!("  [{}]", subsystem);
+    print_subsystem_map(&set.subsystems, verbose, "  ");
+}
+
+fn print_replayed_subsystem_snapshot(snapshot: &SubsystemReplaySnapshot, verbose: bool) {
+    if snapshot.actors.is_empty() && snapshot.subsystems.is_empty() {
+        return;
+    }
+
+    println!("\nReplayed subsystem snapshot (delta consumer):");
+
+    if !snapshot.actors.is_empty() {
+        let actor_total = snapshot.actors.len();
+        let display_limit = if verbose {
+            actor_total
+        } else {
+            actor_total.min(4)
+        };
+
+        for actor in snapshot.actors.values().take(display_limit) {
+            let summary = summarise_method_counts(&actor.method_totals);
+            println!(
+                "  actor {name}: {summary} (first touched by {hook})",
+                name = actor.name,
+                hook = format_reference(&actor.created_by)
+            );
+        }
+
+        if !verbose && actor_total > display_limit {
+            println!("  ... +{} more actors", actor_total - display_limit);
+        }
+    }
+
+    if !snapshot.subsystems.is_empty() {
+        if snapshot.actors.is_empty() {
+            println!("  subsystems:");
+        } else {
+            println!("\n  subsystems:");
+        }
+        print_subsystem_map(&snapshot.subsystems, verbose, "    ");
+    }
+}
+
+fn print_subsystem_map(
+    map: &BTreeMap<StateSubsystem, SubsystemState>,
+    verbose: bool,
+    indent: &str,
+) {
+    for (subsystem, state) in map {
+        println!(
+            "{indent}[{subsystem}]",
+            indent = indent,
+            subsystem = subsystem
+        );
         let target_count = state.targets.len();
         let limit = if verbose {
             target_count
         } else {
             target_count.min(5)
         };
+
         for target in state.targets.values().take(limit) {
             let summary = summarise_method_counts(&target.method_totals);
             if let Some(invocation) = target.method_history.last() {
@@ -256,17 +439,28 @@ fn print_subsystem_states(set: &SetState, verbose: bool) {
                     invocation.method.clone()
                 };
                 println!(
-                    "    {name}: {summary} <= {hook} via {method}",
+                    "{indent}  {name}: {summary} <= {hook} via {method}",
+                    indent = indent,
                     name = target.name,
                     hook = format_reference(&invocation.triggered_by),
                     method = method_label
                 );
             } else {
-                println!("    {}: {}", target.name, summary);
+                println!(
+                    "{indent}  {name}: {summary}",
+                    indent = indent,
+                    name = target.name,
+                    summary = summary
+                );
             }
         }
+
         if !verbose && target_count > limit {
-            println!("    ... +{} more targets", target_count - limit);
+            println!(
+                "{indent}  ... +{} more targets",
+                target_count - limit,
+                indent = indent
+            );
         }
     }
 }
@@ -284,6 +478,171 @@ fn print_hook_summary(idx: usize, application: &HookApplication) {
     }
     print_function_signature(hook);
     print_simulation_details(&hook.simulation);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::{fs, path::PathBuf, sync::OnceLock};
+
+    static BOOT_FIXTURE: OnceLock<(BootTimeline, EngineState)> = OnceLock::new();
+
+    fn boot_fixture() -> &'static (BootTimeline, EngineState) {
+        BOOT_FIXTURE.get_or_init(|| {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let data_root = manifest_dir.join("../extracted/DATA000");
+            assert!(
+                data_root.exists(),
+                "expected extracted data directory at {}",
+                data_root.display()
+            );
+
+            let mut registry = Registry::default();
+            let resources = ResourceGraph::from_data_root(&data_root)
+                .expect("failed to load resource graph for test fixture");
+            let runtime_model = build_runtime_model(&resources);
+            let summary = run_boot_pipeline(
+                &mut registry,
+                BootRequest { resume_save: false },
+                &resources,
+            );
+            let timeline = build_boot_timeline(&summary, &runtime_model);
+            let engine_state = EngineState::from_timeline(&timeline);
+            (timeline, engine_state)
+        })
+    }
+
+    fn dummy_reference(name: &str) -> HookReference {
+        HookReference {
+            name: name.to_string(),
+            kind: HookKind::Other,
+            defined_in: "dummy.lua".to_string(),
+            defined_at_line: Some(12),
+            stage: None,
+        }
+    }
+
+    #[test]
+    fn timeline_manifest_serializes_as_expected() {
+        let timeline = BootTimeline {
+            stages: Vec::new(),
+            default_set: None,
+        };
+        let engine_state = EngineState::default();
+        let manifest = TimelineManifest {
+            timeline: &timeline,
+            engine_state: &engine_state,
+        };
+
+        let value = serde_json::to_value(manifest).expect("manifest serialization");
+        let expected = json!({
+            "timeline": {
+                "stages": [],
+                "default_set": null
+            },
+            "engine_state": {
+                "set": null,
+                "queued_scripts": [],
+                "queued_movies": [],
+                "subsystem_deltas": {},
+                "subsystem_delta_events": [],
+                "replay_snapshot": {
+                    "actors": {},
+                    "subsystems": {}
+                }
+            }
+        });
+
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn timeline_manifest_matches_fixture() {
+        let fixture = boot_fixture();
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_path = manifest_dir.join("tests/fixtures/timeline_manifest_mo.json");
+
+        let expected: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&fixture_path).expect("failed to read timeline manifest fixture"),
+        )
+        .expect("invalid JSON in timeline manifest fixture");
+
+        let timeline_manifest = TimelineManifest {
+            timeline: &fixture.0,
+            engine_state: &fixture.1,
+        };
+        let actual = serde_json::to_value(timeline_manifest)
+            .expect("timeline manifest serialization failed");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn scheduler_manifest_serializes_as_expected() {
+        let reference = dummy_reference("hook");
+        let manifest = SchedulerManifest {
+            scripts: &[ScriptEvent {
+                name: "foo".to_string(),
+                triggered_by: reference.clone(),
+            }],
+            movies: &[MovieEvent {
+                name: "intro".to_string(),
+                triggered_by: reference.clone(),
+            }],
+        };
+
+        let value = serde_json::to_value(manifest).expect("scheduler serialization");
+        let expected = json!({
+            "scripts": [
+                {
+                    "name": "foo",
+                    "triggered_by": {
+                        "name": "hook",
+                        "kind": "Other",
+                        "defined_in": "dummy.lua",
+                        "defined_at_line": 12,
+                        "stage": null
+                    }
+                }
+            ],
+            "movies": [
+                {
+                    "name": "intro",
+                    "triggered_by": {
+                        "name": "hook",
+                        "kind": "Other",
+                        "defined_in": "dummy.lua",
+                        "defined_at_line": 12,
+                        "stage": null
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn scheduler_manifest_matches_fixture() {
+        let fixture = boot_fixture();
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_path = manifest_dir.join("tests/fixtures/scheduler_manifest_mo.json");
+
+        let expected: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&fixture_path).expect("failed to read scheduler manifest fixture"),
+        )
+        .expect("invalid JSON in scheduler manifest fixture");
+
+        let manifest = SchedulerManifest {
+            scripts: &fixture.1.queued_scripts,
+            movies: &fixture.1.queued_movies,
+        };
+        let actual =
+            serde_json::to_value(manifest).expect("scheduler manifest serialization failed");
+
+        assert_eq!(actual, expected);
+    }
 }
 
 fn describe_hook_kind(kind: HookKind) -> &'static str {

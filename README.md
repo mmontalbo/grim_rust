@@ -125,7 +125,12 @@ for manual inspection.
 
 Pass `--simulate-scheduler` to replay the boot-time script and movie queues in
 order. The prototype scheduler reports the trigger hook for each entry, giving a
-preview of the execution cadence the eventual Rust runtime must support.
+preview of the execution cadence the eventual Rust runtime must support. Pair it
+with `--scheduler-json <file>` to persist the queues verbatim so downstream
+tooling can consume the same ordering without scraping stdout. Snapshot fixtures
+under `grim_engine/tests/fixtures` exercise both exports using the real Manny
+bootstrap data, so schema changes trip a failing test before the CLI output
+drifts out of sync with downstream consumers.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
@@ -149,6 +154,9 @@ Unit coverage lives in the analysis crate. Run the suite with:
 ```bash
 cargo test --manifest-path grim_analysis/Cargo.toml
 ```
+
+The engine crate reuses the real Manny fixtures during `cargo test` so timeline
+and scheduler schema changes are caught automatically.
 
 ## Current Focus
 1. Harden the legacy-Lua normaliser so additional constructs keep parsing under

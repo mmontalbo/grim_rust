@@ -22,7 +22,9 @@
 - `grim_engine` consumes the shared analysis layer, materialises the stage-aware
   boot timeline, and now exports per-subsystem deltas alongside an ordered list
   of subsystem delta events so runtime services can replay mutations without
-  re-parsing Lua.
+  re-parsing Lua. The replay snapshot now tracks actor transforms (position,
+  rotation, facing) plus basic chore state/history, and the timeline manifest
+  fixtures cover the richer schema so downstream tools can rely on it.
 - Asset manifests now tag bitmap entries as `classic` vs `unsupported` so the
   tooling can skip remastered-only surfaces until the codec 3 decompressor
   exists.
@@ -31,7 +33,8 @@
   missing (older manifests) while we finish reversing the remastered payloads.
 - Added a lightweight script/movie scheduler in `grim_engine`; the CLI's
   `--simulate-scheduler` switch replays the boot queues using that iterator so
-  we can reason about execution order without Lua.
+  we can reason about execution order without Lua, and `--scheduler-json`
+  persists the exact boot queue order for downstream tooling.
 
 ## Next Steps
 1. Keep widening the legacy normalisation pass (additional helper keywords,
