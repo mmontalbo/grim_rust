@@ -39,20 +39,19 @@
   we can reason about execution order without Lua, and `--scheduler-json`
   persists the exact boot queue order for downstream tooling.
 - Embedded Lua host: `grim_engine --run-lua` now boots an `mlua` VM backed by a
-  shared `EngineContext`, tracking Manny's selection, set switches, and starter
-  scripts. The host skips legacy scaffolding (`setfallback`, `_actors`, menu
-  helpers) until the corresponding Rust services land, logging each skipped file
-  so we know which bindings to implement next. Manny's transforms and inventory
-  changes now surface in the runtime summary even when the menu scripts bail
-  early.
+  shared `EngineContext`, letting the stock `_actors.lua` and `_objects.lua`
+  scripts execute so Manny's Office uses the real object tables. Actor selection,
+  set switches, object state mutations, and inventory changes are logged for
+  comparison against the static analysis. Menu helpers, `_colors`, `_sfx`, and
+  `_controls` are still stubbed, so verbose runs expose which bindings we need
+  to implement next.
 
 ## Next Steps
-1. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
+1. Unblock the remaining boot scaffolding (`_colors`, `_sfx`, `_controls`, menu
+   helpers) so the embedded runtime can march further into Manny's Office.
+2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
-2. Start mapping the ordered subsystem deltas into a reusable runtime service
-   so we can replay boot mutations without re-simulating Lua (foundation for
-   actor/object state machines).
 3. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
 
@@ -94,3 +93,7 @@
   wraps the viewer in headless mode through `steam-run`, so CI (or this
   assistant) can diff decoded vs rendered frames without a real window while
   borrowing Steam's GPU runtime.
+- Runtime spike: allow `_actors.lua` and `_objects.lua` to execute inside the
+  embedded host so Manny boots with the real object tables; log the resulting
+  actor/object mutations to guide the next round of bindings for menu helpers
+  and control globals.

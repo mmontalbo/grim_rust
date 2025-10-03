@@ -133,16 +133,19 @@ bootstrap data, so schema changes trip a failing test before the CLI output
 drifts out of sync with downstream consumers.
 
 Experimental Lua execution is available via `--run-lua`. This spins up an
-embedded `mlua` interpreter, wires a minimal `EngineContext` through the
-existing boot analysis APIs, and records actor/set mutations as the scripts run.
-Verbose runs (`--run-lua --verbose`) echo every loaded script plus the
-engine-side events (actor selection, Manny's position/costume changes, inventory
-mutations). The host currently skips legacy scaffolding such as
-`setfallback.lua` and `_actors.lua` until the matching Rust services land, so
-expect the mode to bail out once the menu boot scripts request functionality we
-have not reimplemented yet. The summary still captures the state we do manage to
-mutate—active set, queued scripts, Manny's transforms—so we can diff real Lua
-behaviour against the static analysis when filling in the missing services.
+embedded `mlua` interpreter, wires a minimal `EngineContext` through the shared
+analysis APIs, and now lets the stock `_actors` and `_objects` scaffolding run in
+place. The host registers actors with stable handles, mirrors Manny's boot-time
+set switches, and records actor/object mutations as the scripts execute.
+Verbose runs (`--run-lua --verbose`) echo each loaded script plus the
+engine-side events (actor selection, Manny's position/costume changes, object
+state updates, inventory mutations). The mode still stubs the broader boot
+scaffolding—`_colors`, `_sfx`, `_controls`, and menu helpers—so expect it to
+pause once those bindings are required, but Manny's Office now boots using the
+real object tables emitted by `_objects.lua`. The runtime summary captures the
+state we do manage to mutate—active set, queued scripts, Manny's transforms,
+inventory contents—so we can diff real Lua behaviour against the static
+analysis while we fill in the missing services.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
@@ -209,10 +212,10 @@ tools/grim_viewer.py verify --use-binary --steam-run --timeline artifacts/boot_t
 ```
 
 ## Current Focus
-1. Harden the legacy-Lua normaliser so additional constructs keep parsing under
+1. Expand the embedded runtime bindings (menus, controls, colour/sfx globals)
+   so Manny's Office can progress past the current stubs.
+2. Harden the legacy-Lua normaliser so additional constructs keep parsing under
    `full_moon`.
-2. Expand the static simulator with more subsystem coverage and regression
-   tests.
-3. Outline the services (cutscene player, script scheduler, registry) that a
-   future Rust runtime must provide so the Lua boot sequence can execute without
-   the original binary.
+3. Broaden the static simulator's subsystem coverage and regression
+   instrumentation while we map out the services the Rust runtime will need
+   long-term.
