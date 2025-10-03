@@ -6,8 +6,9 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use grim_formats::decode_bm;
 use pollster::FutureExt;
 #[cfg(feature = "audio")]
 use rodio::OutputStream;
@@ -29,7 +30,7 @@ struct Args {
     manifest: PathBuf,
 
     /// Asset to load from the LAB archives for inspection
-    #[arg(long, default_value = "mo_tube_can_comp.bm")]
+    #[arg(long, default_value = "mo_tube_balloon.zbm")]
     asset: String,
 }
 
@@ -60,7 +61,7 @@ fn main() -> Result<()> {
             .context("creating viewer window")?,
     );
 
-    let mut state = ViewerState::new(window, asset_bytes).block_on()?;
+    let mut state = ViewerState::new(window, &asset_name, asset_bytes).block_on()?;
 
     event_loop
         .run(move |event, target| {
@@ -108,6 +109,22 @@ struct AssetManifestEntry {
     archive_path: PathBuf,
     offset: u64,
     size: u32,
+    #[serde(default)]
+    metadata: Option<AssetMetadataSummary>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AssetMetadataSummary {
+    Bitmap {
+        codec: u32,
+        bits_per_pixel: u32,
+        frames: u32,
+        width: u32,
+        height: u32,
+        supported: bool,
+    },
 }
 
 fn load_asset_bytes(manifest_path: &Path, asset: &str) -> Result<(String, Vec<u8>, PathBuf)> {
@@ -128,6 +145,19 @@ fn load_asset_bytes(manifest_path: &Path, asset: &str) -> Result<(String, Vec<u8
             )
         })?;
 
+    if let Some(AssetMetadataSummary::Bitmap {
+        codec, supported, ..
+    }) = &entry.metadata
+    {
+        if !supported {
+            bail!(
+                "asset '{}' (codec {}) is not yet supported by the viewer; pick a classic-surface entry",
+                entry.asset_name,
+                codec
+            );
+        }
+    }
+
     let archive_path = resolve_archive_path(manifest_path, &entry.archive_path);
     let bytes = read_asset_slice(&archive_path, entry.offset, entry.size).with_context(|| {
         format!(
@@ -145,10 +175,19 @@ fn resolve_archive_path(manifest_path: &Path, archive_path: &Path) -> PathBuf {
         return archive_path.to_path_buf();
     }
 
-    manifest_path
+    let from_manifest = manifest_path
         .parent()
         .map(|parent| parent.join(archive_path))
-        .unwrap_or_else(|| archive_path.to_path_buf())
+        .unwrap_or_else(|| archive_path.to_path_buf());
+    if from_manifest.exists() {
+        return from_manifest;
+    }
+
+    if archive_path.exists() {
+        return archive_path.to_path_buf();
+    }
+
+    from_manifest
 }
 
 fn read_asset_slice(path: &Path, offset: u64, size: u32) -> Result<Vec<u8>> {
@@ -178,7 +217,7 @@ struct ViewerState {
 }
 
 impl ViewerState {
-    async fn new(window: Arc<Window>, asset_bytes: Vec<u8>) -> Result<Self> {
+    async fn new(window: Arc<Window>, asset_name: &str, asset_bytes: Vec<u8>) -> Result<Self> {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::default();
@@ -227,8 +266,24 @@ impl ViewerState {
             .copied()
             .unwrap_or(wgpu::CompositeAlphaMode::Opaque);
 
-        let background = preview_color(&asset_bytes);
-        let (texture_data, texture_width, texture_height) = bake_texture_data(&asset_bytes);
+        let decoded = decode_asset_texture(asset_name, &asset_bytes);
+        let (preview, background) = match decoded {
+            Ok(texture) => {
+                println!(
+                    "Decoded BM frame: {}x{} ({} frames, codec {})",
+                    texture.width, texture.height, texture.frame_count, texture.codec
+                );
+                (texture, wgpu::Color::BLACK)
+            }
+            Err(err) => {
+                eprintln!("[grim_viewer] falling back to placeholder texture: {err:?}");
+                let placeholder = generate_placeholder_texture(&asset_bytes, asset_name);
+                let color = preview_color(&asset_bytes);
+                (placeholder, color)
+            }
+        };
+        let texture_width = preview.width;
+        let texture_height = preview.height;
         let texture_extent = wgpu::Extent3d {
             width: texture_width,
             height: texture_height,
@@ -259,7 +314,7 @@ impl ViewerState {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &texture_data,
+            &preview.data,
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * texture_width),
@@ -434,32 +489,63 @@ impl ViewerState {
         Ok(())
     }
 }
-fn bake_texture_data(bytes: &[u8]) -> (Vec<u8>, u32, u32) {
+struct PreviewTexture {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    codec: u32,
+}
+
+fn decode_asset_texture(asset_name: &str, bytes: &[u8]) -> Result<PreviewTexture> {
+    let lower = asset_name.to_ascii_lowercase();
+    if !(lower.ends_with(".bm") || lower.ends_with(".zbm")) {
+        bail!("asset {asset_name} is not a BM surface");
+    }
+
+    let bm = decode_bm(bytes)?;
+    let frame = bm
+        .frames
+        .first()
+        .ok_or_else(|| anyhow!("BM surface has no frames"))?;
+    let rgba = frame.as_rgba8888(bm.bits_per_pixel)?;
+    Ok(PreviewTexture {
+        data: rgba,
+        width: frame.width,
+        height: frame.height,
+        frame_count: bm.image_count,
+        codec: bm.codec,
+    })
+}
+
+fn generate_placeholder_texture(bytes: &[u8], asset_name: &str) -> PreviewTexture {
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 256;
-    let pixel_count = (WIDTH * HEIGHT) as usize;
-    let mut data = vec![0u8; pixel_count * 4];
-    let width_usize = WIDTH as usize;
+    let mut data = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+    let len = bytes.len().max(1);
+    let seed = asset_name
+        .as_bytes()
+        .iter()
+        .fold(0u8, |acc, &b| acc.wrapping_add(b));
 
-    if bytes.is_empty() {
-        for pixel in data.chunks_mut(4) {
-            pixel[3] = 255;
-        }
-        return (data, WIDTH, HEIGHT);
-    }
-
-    let len = bytes.len();
     for (idx, pixel) in data.chunks_mut(4).enumerate() {
-        let base = idx % len;
-        let x = idx % width_usize;
-        let y = (idx / width_usize) % len;
-        pixel[0] = bytes[base];
-        pixel[1] = bytes[(base + x) % len];
-        pixel[2] = bytes[(base + y) % len];
-        pixel[3] = 255;
+        let base = (idx + seed as usize) % len;
+        let r = bytes.get(base).copied().unwrap_or(seed);
+        let g = bytes.get((base + 17) % len).copied().unwrap_or(r);
+        let b = bytes.get((base + 43) % len).copied().unwrap_or(g);
+        pixel[0] = r;
+        pixel[1] = g;
+        pixel[2] = b;
+        pixel[3] = 0xFF;
     }
 
-    (data, WIDTH, HEIGHT)
+    PreviewTexture {
+        data,
+        width: WIDTH,
+        height: HEIGHT,
+        frame_count: 0,
+        codec: 0,
+    }
 }
 
 const SHADER_SOURCE: &str = r#"

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use grim_formats::{LabArchive, LabEntry};
+use grim_formats::{decode_bm, peek_bm_metadata, LabArchive, LabEntry};
 use serde::Serialize;
 
 pub struct LabCollection {
@@ -67,6 +67,8 @@ pub struct AssetReportEntry {
     pub archive_path: PathBuf,
     pub offset: u64,
     pub size: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<AssetMetadata>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -110,11 +112,13 @@ pub fn collect_assets(
                         .with_context(|| format!("extracting {}", asset))?;
                 }
 
+                let metadata = analyze_asset_metadata(asset, archive, entry);
                 report.found.push(AssetReportEntry {
                     asset_name: asset.to_string(),
                     archive_path: archive.path().to_path_buf(),
                     offset: entry.offset,
                     size: entry.size,
+                    metadata,
                 });
             }
             None => report.missing.push(asset.to_string()),
@@ -122,4 +126,69 @@ pub fn collect_assets(
     }
 
     Ok(report)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AssetMetadata {
+    Bitmap {
+        codec: u32,
+        bits_per_pixel: u32,
+        frames: u32,
+        width: u32,
+        height: u32,
+        supported: bool,
+    },
+}
+
+fn analyze_asset_metadata(
+    asset: &str,
+    archive: &LabArchive,
+    entry: &LabEntry,
+) -> Option<AssetMetadata> {
+    let lower = asset.to_ascii_lowercase();
+    if !(lower.ends_with(".bm") || lower.ends_with(".zbm")) {
+        return None;
+    }
+
+    let bytes = archive.read_entry_bytes(entry);
+    match peek_bm_metadata(bytes) {
+        Ok(metadata) => {
+            let mut supported = matches!(metadata.codec, 0 | 3);
+            if supported {
+                if let Err(err) = decode_bm(bytes) {
+                    eprintln!(
+                        "[grim_engine] warning: failed to decode bitmap {} from {}: {:?}",
+                        asset,
+                        archive.path().display(),
+                        err
+                    );
+                    supported = false;
+                }
+            } else {
+                eprintln!(
+                    "[grim_engine] info: skipping unsupported bitmap {} (codec {})",
+                    asset, metadata.codec
+                );
+            }
+
+            Some(AssetMetadata::Bitmap {
+                codec: metadata.codec,
+                bits_per_pixel: metadata.bits_per_pixel,
+                frames: metadata.image_count,
+                width: metadata.width,
+                height: metadata.height,
+                supported,
+            })
+        }
+        Err(err) => {
+            eprintln!(
+                "[grim_engine] warning: failed to parse bitmap header {} from {}: {:?}",
+                asset,
+                archive.path().display(),
+                err
+            );
+            None
+        }
+    }
 }

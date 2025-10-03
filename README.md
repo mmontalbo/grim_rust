@@ -109,23 +109,38 @@ overview that lists the first few entries and a roll-up of queued cutscenes,
 helper scripts, and fullscreen movies. Pass `--timeline-json timeline.json` to
 persist a prettified export that bundles both the boot stages and the resulting
 `EngineState`, giving downstream tooling a single manifest with hook
-simulations, prerequisites, and the post-boot snapshot.
+simulations, prerequisites, and the post-boot snapshot (including per-subsystem
+mutation deltas for actors, objects, inventory, etc.). Ordered
+`subsystem_delta_events` record each method invocation alongside the hook index,
+making it trivial for upcoming Rust runtime services to replay boot-time
+mutations in sequence.
 
 When pointed at a retail install (`--lab-root`), the host probes the LAB
 archives and reports whether the Manny's Office assets we rely on are present.
 `--asset-manifest <file>` writes that scan as JSON so other tools can reuse
-offsets/sizes without rerunning lookups, and `--extract-assets <dir>` copies the
-matching binaries into a workspace folder for manual inspection.
+offsets/sizes without rerunning lookups; bitmap entries now include codec,
+frame count, and dimensions extracted by the shared decoder. Use
+`--extract-assets <dir>` to copy the matching binaries into a workspace folder
+for manual inspection.
+
+Pass `--simulate-scheduler` to replay the boot-time script and movie queues in
+order. The prototype scheduler reports the trigger hook for each entry, giving a
+preview of the execution cadence the eventual Rust runtime must support.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
 emitted by `grim_engine`, and reads assets straight from their LAB offsets to
-render a simple RGBA preview (instead of a blank clear colour). Enable the
-optional `audio` feature to spin up a rodio output stream so the audio plumbing
-is ready when we begin playing sounds. Run it with:
+decode and display BM surfaces (first frame, converted to RGBA). The shared
+loader now supports both codec 0 and codec 3 payloads, so Manny's Office camera
+plates and overlays render correctly without pre-extracting PNGs; only a few
+oddball resources (e.g. `mo_6_mnycu.zbm`, which appears to be a secondary copy
+of the close-up) are still flagged as unsupported pending further format
+research.
+Enable the optional `audio` feature to spin up a rodio output stream so the
+audio plumbing is ready when we begin playing sounds. Run it with:
 
 ```bash
-cargo run -p grim_viewer -- --manifest artifacts/manny_office_assets.json --asset mo_tube_can_comp.bm
+cargo run -p grim_viewer -- --manifest artifacts/manny_office_assets.json --asset mo_tube_balloon.zbm
 ```
 
 ## Testing
