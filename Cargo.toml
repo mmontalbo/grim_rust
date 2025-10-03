@@ -1,5 +1,6 @@
 [workspace]
 members = [
   "grim_analysis",
+  "grim_formats",
 ]
 resolver = "2"

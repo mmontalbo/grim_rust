@@ -17,11 +17,13 @@
   method calls, helping us track coverage gaps over time.
 - Registry shim reads/writes JSON snapshots so repeated runs mimic the original
   engine's registry mutations (e.g., `GrimLastSet`).
+- `grim_formats` now exposes a reusable `LabArchive` reader and `lab_dump`
+  example so we can inspect LAB contents without shell scripts.
 
 ## Next Steps
 1. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
-2. Add unit tests that exercise the simulator on tricky hooks (mixed method
-   chains, nested tables) to lock in behaviour.
+2. Expand unit tests for both the simulator and the LAB parser so regressions
+   surface quickly.
 3. Sketch the services a Rust host will need—script scheduler, cutscene
    playback, save/load—before we begin porting logic out of Lua.

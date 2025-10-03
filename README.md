@@ -13,6 +13,8 @@ behaviour in Rust step by step.
   comparing behaviour but no longer managed by scripts in this repo.
 - `grim_analysis/` – Rust crate that parses the decompiled Lua, normalises
   legacy syntax, and reports on the boot flow.
+- `grim_formats/` – low-level format helpers (currently includes the LAB
+  archive reader and utilities).
 
 ## Development Environment
 Enter the Nix shell to get the required tooling (Rust, scummvm-tools, Lua 5.1,
@@ -76,6 +78,18 @@ expand classification coverage over time.
 
 Registry snapshots are simple JSON documents; keeping them in a single format
 avoids extra dependencies and makes diffs easy to read in version control.
+
+## LAB Format Helpers
+`grim_formats` supplies a reusable `LabArchive` reader plus a tiny CLI for quick
+inspection. Open a LAB and print its table of contents with:
+
+```bash
+cargo run -p grim_formats --bin lab_dump -- dev-install/DATA000.LAB | head
+```
+
+The `LabArchive` API lets other tools map entries, stream individual assets, or
+extract them to disk. Unit tests cover the parser with synthetic archives so we
+notice regressions before pointing at the real game data.
 
 ## Testing
 Unit coverage lives in the analysis crate. Run the suite with:
