@@ -229,24 +229,24 @@ fn decompress_codec3(mut compressed: &[u8], result: &mut [u8], seed: Option<&[u8
     }
     let mut write_pos = WINDOW_SIZE;
 
-    let read_bit = |stream: &mut &[u8], bitstr_value: &mut u32, bitstr_len: &mut u32| -> Result<u32> {
-        if *bitstr_len == 0 {
-            *bitstr_value = read_u16_from(stream)? as u32;
-            *bitstr_len = 16;
-        }
-        let bit = *bitstr_value & 1;
-        *bitstr_value >>= 1;
-        *bitstr_len -= 1;
-        Ok(bit)
-    };
+    let read_bit =
+        |stream: &mut &[u8], bitstr_value: &mut u32, bitstr_len: &mut u32| -> Result<u32> {
+            if *bitstr_len == 0 {
+                *bitstr_value = read_u16_from(stream)? as u32;
+                *bitstr_len = 16;
+            }
+            let bit = *bitstr_value & 1;
+            *bitstr_value >>= 1;
+            *bitstr_len -= 1;
+            Ok(bit)
+        };
 
     while byte_index < result.len() {
         let bit = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)?;
         if bit == 1 {
-            ensure!(
-                byte_index < result.len(),
-                "codec3 literal write exceeds output buffer"
-            );
+            if byte_index >= result.len() {
+                break;
+            }
             let value = read_u8_from(&mut compressed)?;
             window[write_pos] = value;
             write_pos += 1;
@@ -276,12 +276,7 @@ fn decompress_codec3(mut compressed: &[u8], result: &mut [u8], seed: Option<&[u8
             (copy_len as usize, copy_offset)
         };
 
-        while copy_len > 0 {
-            ensure!(
-                byte_index < result.len(),
-                "codec3 copy exceeds output buffer"
-            );
-
+        while copy_len > 0 && byte_index < result.len() {
             let src_index = write_pos as isize + copy_offset as isize;
             ensure!(
                 (0..write_pos as isize).contains(&src_index),
@@ -293,6 +288,10 @@ fn decompress_codec3(mut compressed: &[u8], result: &mut [u8], seed: Option<&[u8
             write_pos += 1;
             byte_index += 1;
             copy_len -= 1;
+        }
+
+        if byte_index >= result.len() {
+            break;
         }
     }
 

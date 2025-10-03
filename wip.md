@@ -31,18 +31,23 @@
 - `grim_viewer` consumes the manifest, decodes codec 0 BM surfaces with the
   shared loader, and only falls back to a hashed preview when metadata is
   missing (older manifests) while we finish reversing the remastered payloads.
+  It can now ingest the boot timeline manifest, surface the actors staged during
+  boot, and lets you cycle through them in the viewer (prepping for placements
+  once geometry decoding lands).
 - Added a lightweight script/movie scheduler in `grim_engine`; the CLI's
   `--simulate-scheduler` switch replays the boot queues using that iterator so
   we can reason about execution order without Lua, and `--scheduler-json`
   persists the exact boot queue order for downstream tooling.
 
 ## Next Steps
-1. Keep widening the legacy normalisation pass (additional helper keywords,
+1. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
+   machine-readable placement log) so other tooling can validate set geometry
+   without parsing console output.
+2. Start mapping the ordered subsystem deltas into a reusable runtime service
+   so we can replay boot mutations without re-simulating Lua (foundation for
+   actor/object state machines).
+3. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
-2. Start mapping scheduler output into concrete runtime services (actor state
-   machines, script stubs) so we can drive early cutscene playback in Rust.
-3. Broaden the asset pipeline: add ZBM/geometry decoding, extend manifest
-   metadata, and cover the new exporters with regression tests.
 
 ## Current Iteration — Manny's Office Prototype
 - Objective: render an authentic Manny's Office background using the classic
@@ -57,6 +62,8 @@
   previous frame's pixels to satisfy the differential encodes used by overlays.
 - Timeline link: read the default `mo_mcecu` setup selection from the boot
   timeline so the viewer knows which background to load first without hard
-  coding the index.
+  coding the index, and surface the boot-time actors in the viewer so we can
+  start planning placements.
 - Viewer spike: add a simple full-screen quad render path that blits the decoded
-  background while we work toward real room geometry.
+  background while we work toward real room geometry, and overlay actor
+  placement markers derived from the new replay snapshot data.

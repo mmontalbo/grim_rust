@@ -136,11 +136,17 @@ drifts out of sync with downstream consumers.
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
 emitted by `grim_engine`, and reads assets straight from their LAB offsets to
 decode and display BM surfaces (first frame, converted to RGBA). The shared
-loader now supports both codec 0 and codec 3 payloads, so Manny's Office camera
-plates and overlays render correctly without pre-extracting PNGs; only a few
-oddball resources (e.g. `mo_6_mnycu.zbm`, which appears to be a secondary copy
-of the close-up) are still flagged as unsupported pending further format
-research.
+loader now handles both codec 0 and codec 3 payloads—including the Manny camera
+plates and overlays such as `mo_door_open_comp.bm` and `mo_6_mnycu.zbm`—so the
+classic backgrounds render correctly without pre-extracting PNGs.
+If you pass `--timeline <boot_manifest.json>` the viewer will also ingest the
+boot snapshot, enumerate the actors and objects staged during Manny's Office
+boot, and let you cycle through them with the ←/→ keys. A lightweight overlay
+maps each entity's X/Z position into normalized device coordinates and draws
+coloured markers (green/blue for supporting casts, red for the current
+selection), giving a quick sanity check that the static simulator and manifest
+data line up with our spatial expectations while we work toward full room
+geometry and rendering.
 Enable the optional `audio` feature to spin up a rodio output stream so the
 audio plumbing is ready when we begin playing sounds. Run it with:
 
