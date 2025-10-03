@@ -4,19 +4,23 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytemuck::{Pod, Zeroable, cast_slice};
 use clap::Parser;
 use grim_formats::decode_bm;
+use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use pollster::FutureExt;
 #[cfg(feature = "audio")]
 use rodio::OutputStream;
 use serde::Deserialize;
 use serde_json::Value;
-use wgpu::{SurfaceError, util::DeviceExt};
+use wgpu::{
+    Backends, COPY_BYTES_PER_ROW_ALIGNMENT, InstanceDescriptor, InstanceFlags, Maintain,
+    SurfaceError, util::DeviceExt,
+};
 use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, KeyEvent, WindowEvent},
@@ -39,12 +43,34 @@ struct Args {
     /// Optional boot timeline manifest produced by grim_engine --timeline-json
     #[arg(long)]
     timeline: Option<PathBuf>,
+
+    /// When set, write the decoded bitmap to disk (PNG) before launching the viewer
+    #[arg(long)]
+    dump_frame: Option<PathBuf>,
+
+    /// When set, render the textured quad offscreen and dump the final output PNG
+    #[arg(long)]
+    dump_render: Option<PathBuf>,
+
+    /// Run the offscreen renderer and validate the output against the decoded bitmap
+    #[arg(long)]
+    verify_render: bool,
+
+    /// Maximum allowed fraction (0-1) of pixels that may diverge in the render diff
+    #[arg(long, default_value_t = 0.01)]
+    render_diff_threshold: f32,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
     env_logger::init();
+
+    ensure!(
+        (0.0..=1.0).contains(&args.render_diff_threshold),
+        "render_diff_threshold must be between 0 and 1 (got {})",
+        args.render_diff_threshold
+    );
 
     let (asset_name, asset_bytes, source_archive) =
         load_asset_bytes(&args.manifest, &args.asset).context("loading requested asset")?;
@@ -55,6 +81,92 @@ fn main() -> Result<()> {
         source_archive.display(),
         args.manifest.display()
     );
+
+    let decode_result = decode_asset_texture(&asset_name, &asset_bytes);
+
+    if let Some(output_path) = args.dump_frame.as_ref() {
+        let preview = decode_result
+            .as_ref()
+            .map_err(|err| anyhow!("decoding bitmap for --dump-frame: {err}"))?;
+        let stats = dump_texture_to_png(preview, output_path)
+            .with_context(|| format!("writing PNG to {}", output_path.display()))?;
+        println!(
+            "Bitmap frame exported to {} ({}x{} codec {} frame count {})",
+            output_path.display(),
+            preview.width,
+            preview.height,
+            preview.codec,
+            preview.frame_count
+        );
+        println!(
+            "  luminance avg {:.2}, min {}, max {}, opaque pixels {} / {}",
+            stats.mean_luma,
+            stats.min_luma,
+            stats.max_luma,
+            stats.opaque_pixels,
+            stats.total_pixels
+        );
+        println!(
+            "  quadrant luma means (TL, TR, BL, BR): {:.2}, {:.2}, {:.2}, {:.2}",
+            stats.quadrant_means[0],
+            stats.quadrant_means[1],
+            stats.quadrant_means[2],
+            stats.quadrant_means[3]
+        );
+    }
+
+    if args.verify_render || args.dump_render.is_some() {
+        let preview = decode_result
+            .as_ref()
+            .map_err(|err| anyhow!("decoding bitmap for render verification: {err}"))?;
+        let destination = args.dump_render.as_deref();
+        let verification = render_texture_offscreen(preview, destination)
+            .context("running offscreen render verification")?;
+        let stats = &verification.stats;
+        if let Some(path) = destination {
+            println!(
+                "Rendered quad exported to {} ({}x{} post-raster)",
+                path.display(),
+                preview.width,
+                preview.height
+            );
+        } else {
+            println!(
+                "Rendered quad verification completed ({}x{} offscreen)",
+                preview.width, preview.height
+            );
+        }
+        println!(
+            "  render luma avg {:.2}, min {}, max {}, opaque pixels {} / {}",
+            stats.mean_luma,
+            stats.min_luma,
+            stats.max_luma,
+            stats.opaque_pixels,
+            stats.total_pixels
+        );
+        println!(
+            "  render quadrant luma means (TL, TR, BL, BR): {:.2}, {:.2}, {:.2}, {:.2}",
+            stats.quadrant_means[0],
+            stats.quadrant_means[1],
+            stats.quadrant_means[2],
+            stats.quadrant_means[3]
+        );
+        let diff = &verification.diff;
+        let mismatch_ratio = diff_mismatch_ratio(diff);
+        let mismatch_pct = mismatch_ratio * 100.0;
+        println!(
+            "  render diff: mismatched_pixels={} ({:.4}%), max_abs_diff={}, mean_abs_diff={:.3}",
+            diff.mismatched_pixels, mismatch_pct, diff.max_abs_diff, diff.mean_abs_diff
+        );
+        println!(
+            "  render diff quadrant mismatch ratios (TL, TR, BL, BR): {:.4}, {:.4}, {:.4}, {:.4}",
+            diff.quadrant_mismatch[0],
+            diff.quadrant_mismatch[1],
+            diff.quadrant_mismatch[2],
+            diff.quadrant_mismatch[3]
+        );
+        validate_render_diff(diff, args.render_diff_threshold)?;
+    }
 
     let scene_data = match args.timeline.as_ref() {
         Some(path) => {
@@ -102,7 +214,14 @@ fn main() -> Result<()> {
             .context("creating viewer window")?,
     );
 
-    let mut state = ViewerState::new(window, &asset_name, asset_bytes, scene.clone()).block_on()?;
+    let mut state = ViewerState::new(
+        window,
+        &asset_name,
+        asset_bytes,
+        decode_result,
+        scene.clone(),
+    )
+    .block_on()?;
 
     event_loop
         .run(move |event, target| {
@@ -685,6 +804,9 @@ struct ViewerState {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     pipeline: wgpu::RenderPipeline,
+    quad_vertex_buffer: wgpu::Buffer,
+    quad_index_buffer: wgpu::Buffer,
+    quad_index_count: u32,
     bind_group: wgpu::BindGroup,
     _texture: wgpu::Texture,
     _texture_view: wgpu::TextureView,
@@ -703,6 +825,7 @@ impl ViewerState {
         window: Arc<Window>,
         asset_name: &str,
         asset_bytes: Vec<u8>,
+        decode_result: Result<PreviewTexture>,
         scene: Option<Arc<ViewerScene>>,
     ) -> Result<Self> {
         let size = window.inner_size();
@@ -753,8 +876,7 @@ impl ViewerState {
             .copied()
             .unwrap_or(wgpu::CompositeAlphaMode::Opaque);
 
-        let decoded = decode_asset_texture(asset_name, &asset_bytes);
-        let (preview, background) = match decoded {
+        let (preview, background) = match decode_result {
             Ok(texture) => {
                 println!(
                     "Decoded BM frame: {}x{} ({} frames, codec {})",
@@ -863,6 +985,12 @@ impl ViewerState {
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
         });
 
+        let quad_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<QuadVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+        };
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("asset-pipeline-layout"),
             bind_group_layouts: &[&bind_group_layout],
@@ -875,7 +1003,7 @@ impl ViewerState {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[quad_vertex_layout],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -893,6 +1021,18 @@ impl ViewerState {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+
+        let quad_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("asset-quad-vertex-buffer"),
+            contents: cast_slice(&QUAD_VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let quad_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("asset-quad-index-buffer"),
+            contents: cast_slice(&QUAD_INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let quad_index_count = QUAD_INDICES.len() as u32;
 
         let marker_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("marker-vertex-buffer"),
@@ -1011,6 +1151,9 @@ impl ViewerState {
             },
             size,
             pipeline,
+            quad_vertex_buffer,
+            quad_index_buffer,
+            quad_index_count,
             bind_group,
             _texture: texture,
             _texture_view: texture_view,
@@ -1075,7 +1218,9 @@ impl ViewerState {
             });
             rpass.set_pipeline(&self.pipeline);
             rpass.set_bind_group(0, &self.bind_group, &[]);
-            rpass.draw(0..3, 0..1);
+            rpass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
+            rpass.set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            rpass.draw_indexed(0..self.quad_index_count, 0, 0..1);
         }
 
         let marker_instances = self.build_marker_instances();
@@ -1287,6 +1432,555 @@ fn decode_asset_texture(asset_name: &str, bytes: &[u8]) -> Result<PreviewTexture
     })
 }
 
+struct TextureStats {
+    min_luma: u8,
+    max_luma: u8,
+    mean_luma: f32,
+    opaque_pixels: u32,
+    total_pixels: u32,
+    quadrant_means: [f32; 4],
+}
+
+struct RenderVerification {
+    stats: TextureStats,
+    diff: TextureDiffSummary,
+}
+
+struct TextureDiffSummary {
+    total_pixels: u32,
+    mismatched_pixels: u32,
+    max_abs_diff: u8,
+    mean_abs_diff: f32,
+    quadrant_mismatch: [f32; 4],
+}
+
+fn diff_mismatch_ratio(diff: &TextureDiffSummary) -> f32 {
+    if diff.total_pixels == 0 {
+        0.0
+    } else {
+        diff.mismatched_pixels as f32 / diff.total_pixels as f32
+    }
+}
+
+fn validate_render_diff(diff: &TextureDiffSummary, threshold: f32) -> Result<()> {
+    ensure!(
+        (0.0..=1.0).contains(&threshold),
+        "render diff threshold must be between 0 and 1 (got {})",
+        threshold
+    );
+    let ratio = diff_mismatch_ratio(diff);
+    if ratio > threshold {
+        bail!(
+            "post-render image diverges from decoded bitmap beyond allowed threshold ({:.4} > {:.4})",
+            ratio,
+            threshold
+        );
+    }
+    Ok(())
+}
+
+fn dump_texture_to_png(preview: &PreviewTexture, destination: &Path) -> Result<TextureStats> {
+    export_rgba_to_png(preview.width, preview.height, &preview.data, destination)
+}
+
+fn export_rgba_to_png(
+    width: u32,
+    height: u32,
+    data: &[u8],
+    destination: &Path,
+) -> Result<TextureStats> {
+    let expected_len = width as usize * height as usize * 4;
+    ensure!(
+        data.len() == expected_len,
+        "RGBA buffer size {} does not match dimensions {}x{}",
+        data.len(),
+        width,
+        height
+    );
+
+    let file = File::create(destination)?;
+    let encoder = PngEncoder::new(file);
+    encoder.write_image(data, width, height, ColorType::Rgba8.into())?;
+
+    Ok(compute_texture_stats(width, height, data))
+}
+
+fn compute_texture_stats(width: u32, height: u32, data: &[u8]) -> TextureStats {
+    let mut min_luma = u8::MAX;
+    let mut max_luma = u8::MIN;
+    let mut sum_luma: u64 = 0;
+    let mut total_pixels: u32 = 0;
+    let mut opaque_pixels: u32 = 0;
+    let mut quadrant_sums = [0u64; 4];
+    let mut quadrant_counts = [0u32; 4];
+
+    let half_h = height / 2;
+    let half_w = width / 2;
+
+    for (idx, chunk) in data.chunks(4).enumerate() {
+        let r = chunk[0] as u16;
+        let g = chunk[1] as u16;
+        let b = chunk[2] as u16;
+        let a = chunk[3];
+        let luma = ((r + g + b) / 3) as u8;
+        min_luma = min_luma.min(luma);
+        max_luma = max_luma.max(luma);
+        sum_luma += luma as u64;
+        total_pixels += 1;
+        if a > 0 {
+            opaque_pixels += 1;
+        }
+
+        let px = idx as u32 % width;
+        let py = idx as u32 / width;
+        let quadrant = match (px < half_w, py < half_h) {
+            (true, true) => 0,   // top-left
+            (false, true) => 1,  // top-right
+            (true, false) => 2,  // bottom-left
+            (false, false) => 3, // bottom-right
+        };
+        quadrant_sums[quadrant] += luma as u64;
+        quadrant_counts[quadrant] += 1;
+    }
+
+    let mean_luma = if total_pixels > 0 {
+        (sum_luma as f64 / total_pixels as f64) as f32
+    } else {
+        0.0
+    };
+
+    let mut quadrant_means = [0.0; 4];
+    for idx in 0..4 {
+        quadrant_means[idx] = if quadrant_counts[idx] > 0 {
+            (quadrant_sums[idx] as f64 / quadrant_counts[idx] as f64) as f32
+        } else {
+            0.0
+        };
+    }
+
+    TextureStats {
+        min_luma,
+        max_luma,
+        mean_luma,
+        opaque_pixels,
+        total_pixels,
+        quadrant_means,
+    }
+}
+
+fn render_texture_offscreen(
+    preview: &PreviewTexture,
+    destination: Option<&Path>,
+) -> Result<RenderVerification> {
+    let instance = wgpu::Instance::new(InstanceDescriptor {
+        backends: Backends::all(),
+        flags: InstanceFlags::default(),
+        ..Default::default()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        })
+        .block_on()
+        .or_else(|| {
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .block_on()
+        })
+        .or_else(|| {
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: true,
+                    compatible_surface: None,
+                })
+                .block_on()
+        })
+        .context("requesting adapter for offscreen render")?;
+
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("grim-viewer-offscreen-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+            },
+            None,
+        )
+        .block_on()
+        .context("requesting device for offscreen render")?;
+
+    let texture_extent = wgpu::Extent3d {
+        width: preview.width,
+        height: preview.height,
+        depth_or_array_layers: 1,
+    };
+
+    let asset_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen-asset-texture"),
+        size: texture_extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &asset_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &preview.data,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * preview.width),
+            rows_per_image: Some(preview.height),
+        },
+        texture_extent,
+    );
+
+    let asset_view = asset_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("offscreen-asset-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("offscreen-bind-group-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("offscreen-bind-group"),
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&asset_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("offscreen-shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
+    });
+
+    let quad_vertex_layout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<QuadVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+    };
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("offscreen-pipeline-layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("offscreen-pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[quad_vertex_layout],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+    });
+
+    let quad_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("offscreen-quad-vertex-buffer"),
+        contents: cast_slice(&QUAD_VERTICES),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let quad_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("offscreen-quad-index-buffer"),
+        contents: cast_slice(&QUAD_INDICES),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let quad_index_count = QUAD_INDICES.len() as u32;
+
+    let render_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen-target"),
+        size: texture_extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let render_view = render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen-encoder"),
+    });
+
+    {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("offscreen-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &render_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        rpass.set_pipeline(&pipeline);
+        rpass.set_bind_group(0, &bind_group, &[]);
+        rpass.set_vertex_buffer(0, quad_vertex_buffer.slice(..));
+        rpass.set_index_buffer(quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        rpass.draw_indexed(0..quad_index_count, 0, 0..1);
+    }
+
+    let bytes_per_row = 4 * preview.width;
+    let padded_bytes_per_row = ((bytes_per_row + COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+        / COPY_BYTES_PER_ROW_ALIGNMENT)
+        * COPY_BYTES_PER_ROW_ALIGNMENT;
+    let buffer_size = padded_bytes_per_row as u64 * preview.height as u64;
+    let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("offscreen-readback"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &render_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &readback_buffer,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(preview.height),
+            },
+        },
+        texture_extent,
+    );
+
+    queue.submit(std::iter::once(encoder.finish()));
+    device.poll(Maintain::Wait);
+
+    let buffer_slice = readback_buffer.slice(..);
+    let (tx, rx) = mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device.poll(Maintain::Wait);
+    match rx
+        .recv()
+        .context("waiting for offscreen readback completion")?
+    {
+        Ok(()) => {}
+        Err(err) => bail!("mapping offscreen readback buffer: {err}"),
+    }
+    let padded = buffer_slice.get_mapped_range();
+    let mut rgba = vec![0u8; (preview.width * preview.height * 4) as usize];
+
+    for row in 0..preview.height as usize {
+        let src_offset = row * padded_bytes_per_row as usize;
+        let dst_offset = row * bytes_per_row as usize;
+        rgba[dst_offset..dst_offset + bytes_per_row as usize]
+            .copy_from_slice(&padded[src_offset..src_offset + bytes_per_row as usize]);
+    }
+    drop(padded);
+    readback_buffer.unmap();
+
+    let diff = summarize_texture_diff(preview, &rgba)?;
+    let stats = match destination {
+        Some(path) => export_rgba_to_png(preview.width, preview.height, &rgba, path)?,
+        None => compute_texture_stats(preview.width, preview.height, &rgba),
+    };
+    Ok(RenderVerification { stats, diff })
+}
+
+fn summarize_texture_diff(preview: &PreviewTexture, rendered: &[u8]) -> Result<TextureDiffSummary> {
+    let expected_len = (preview.width * preview.height * 4) as usize;
+    ensure!(
+        rendered.len() == expected_len,
+        "rendered RGBA buffer size {} does not match expected {}x{}",
+        rendered.len(),
+        preview.width,
+        preview.height
+    );
+
+    let mut mismatched_pixels: u32 = 0;
+    let mut max_abs_diff: u8 = 0;
+    let mut sum_abs_diff: u64 = 0;
+    let mut quadrant_counts = [0u32; 4];
+    let mut quadrant_mismatches = [0u32; 4];
+
+    let half_w = preview.width / 2;
+    let half_h = preview.height / 2;
+
+    for (idx, (expected, actual)) in preview.data.chunks(4).zip(rendered.chunks(4)).enumerate() {
+        let mut pixel_abs_diff: u8 = 0;
+        for channel in 0..4 {
+            let diff = u8::abs_diff(expected[channel], actual[channel]);
+            if diff > pixel_abs_diff {
+                pixel_abs_diff = diff;
+            }
+        }
+
+        let px = idx as u32 % preview.width;
+        let py = idx as u32 / preview.width;
+        let quadrant = match (px < half_w, py < half_h) {
+            (true, true) => 0,
+            (false, true) => 1,
+            (true, false) => 2,
+            (false, false) => 3,
+        };
+        quadrant_counts[quadrant] += 1;
+
+        if pixel_abs_diff > 0 {
+            mismatched_pixels += 1;
+            quadrant_mismatches[quadrant] += 1;
+            max_abs_diff = max_abs_diff.max(pixel_abs_diff);
+        }
+        sum_abs_diff += pixel_abs_diff as u64;
+    }
+
+    let total_pixels = preview.width * preview.height;
+    let mean_abs_diff = if total_pixels > 0 {
+        (sum_abs_diff as f64 / total_pixels as f64) as f32
+    } else {
+        0.0
+    };
+
+    let mut quadrant_mismatch = [0.0_f32; 4];
+    for idx in 0..4 {
+        quadrant_mismatch[idx] = if quadrant_counts[idx] > 0 {
+            quadrant_mismatches[idx] as f32 / quadrant_counts[idx] as f32
+        } else {
+            0.0
+        };
+    }
+
+    Ok(TextureDiffSummary {
+        total_pixels,
+        mismatched_pixels,
+        max_abs_diff,
+        mean_abs_diff,
+        quadrant_mismatch,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_diff(total: u32, mismatched: u32) -> TextureDiffSummary {
+        TextureDiffSummary {
+            total_pixels: total,
+            mismatched_pixels: mismatched,
+            max_abs_diff: 5,
+            mean_abs_diff: 0.1,
+            quadrant_mismatch: [0.0; 4],
+        }
+    }
+
+    #[test]
+    fn validate_render_diff_allows_within_threshold() {
+        let diff = make_diff(10_000, 50); // 0.5%
+        assert!(validate_render_diff(&diff, 0.01).is_ok());
+    }
+
+    #[test]
+    fn validate_render_diff_rejects_exceeding_threshold() {
+        let diff = make_diff(10_000, 5_000); // 50%
+        let err = validate_render_diff(&diff, 0.25)
+            .expect_err("expected failure when ratio exceeds threshold");
+        assert!(
+            err.to_string()
+                .contains("post-render image diverges from decoded bitmap")
+        );
+    }
+
+    #[test]
+    fn validate_render_diff_rejects_invalid_threshold() {
+        let diff = make_diff(10_000, 0);
+        let err =
+            validate_render_diff(&diff, 1.1).expect_err("threshold outside [0,1] should fail");
+        assert!(
+            err.to_string()
+                .contains("render diff threshold must be between 0 and 1")
+        );
+    }
+}
+
 fn generate_placeholder_texture(bytes: &[u8], asset_name: &str) -> PreviewTexture {
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 256;
@@ -1318,26 +2012,21 @@ fn generate_placeholder_texture(bytes: &[u8], asset_name: &str) -> PreviewTextur
 }
 
 const SHADER_SOURCE: &str = r#"
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
 
 @vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    var positions = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    var raw_uvs = array<vec2<f32>, 3>(
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(2.0, 1.0),
-        vec2<f32>(0.0, -1.0),
-    );
+fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-    out.uv = raw_uvs[vertex_index] * 0.5 + vec2<f32>(0.5, 0.5);
+    out.position = vec4<f32>(input.position, 0.0, 1.0);
+    out.uv = input.uv;
     return out;
 }
 
@@ -1382,6 +2071,34 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(input.color, 0.9);
 }
 "#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct QuadVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+}
+
+const QUAD_VERTICES: [QuadVertex; 4] = [
+    QuadVertex {
+        position: [-1.0, 1.0],
+        uv: [0.0, 0.0],
+    },
+    QuadVertex {
+        position: [1.0, 1.0],
+        uv: [1.0, 0.0],
+    },
+    QuadVertex {
+        position: [-1.0, -1.0],
+        uv: [0.0, 1.0],
+    },
+    QuadVertex {
+        position: [1.0, -1.0],
+        uv: [1.0, 1.0],
+    },
+];
+
+const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 1, 3];
 
 fn preview_color(bytes: &[u8]) -> wgpu::Color {
     if bytes.is_empty() {
