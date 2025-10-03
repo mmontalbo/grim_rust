@@ -51,9 +51,9 @@
   counts for future bindings.
 
 ## Next Steps
-1. Unblock the remaining boot scaffolding (menu helpers, cut-scene services,
-   control handlers) within the coroutine host so the embedded runtime can
-   march further into Manny's Office.
+1. Flesh out the boot-time trackers (visibility queries, sector lookups,
+   menu helpers, cut-scene services, control handlers) inside the coroutine
+   host so the embedded runtime can march further into Manny's Office.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
@@ -105,3 +105,8 @@
   and inventory services we still need to implement for real gameplay. Cooperative
   threads keep the long-running Manny trackers alive so future bindings can
   observe their loops.
+- Scheduler polish: function-based threads now carry source-derived labels
+  (e.g., `_system.decompiled.lua:667` for `TrackManny`), and the host seeds
+  Manny's set scaffolding (`setups`, `current_setup`, `cameraman`) plus engine
+  helpers (`SetActorConstrain`, `GetVisibleThings`) so those trackers yield
+  cleanly while we layer in real visibility/camera behaviour.

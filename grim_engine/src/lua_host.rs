@@ -16,6 +16,13 @@ struct ScriptRecord {
     label: String,
     thread: Option<RegistryKey>,
     yields: u32,
+    callable: Option<RegistryKey>,
+}
+
+#[derive(Debug, Default)]
+struct ScriptCleanup {
+    thread: Option<RegistryKey>,
+    callable: Option<RegistryKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +131,7 @@ impl EngineContext {
             .clone()
     }
 
-    fn start_script(&mut self, label: String) -> u32 {
+    fn start_script(&mut self, label: String, callable: Option<RegistryKey>) -> u32 {
         let handle = self.next_script_handle;
         self.next_script_handle += 1;
         self.scripts.insert(
@@ -133,6 +140,7 @@ impl EngineContext {
                 label: label.clone(),
                 thread: None,
                 yields: 0,
+                callable,
             },
         );
         self.log_event(format!("script.start {label} (#{handle})"));
@@ -179,12 +187,15 @@ impl EngineContext {
         self.scripts.contains_key(&handle)
     }
 
-    fn complete_script(&mut self, handle: u32) -> Option<RegistryKey> {
+    fn complete_script(&mut self, handle: u32) -> ScriptCleanup {
         if let Some(record) = self.scripts.remove(&handle) {
             self.log_event(format!("script.complete {} (#{handle})", record.label));
-            return record.thread;
+            return ScriptCleanup {
+                thread: record.thread,
+                callable: record.callable,
+            };
         }
-        None
+        ScriptCleanup::default()
     }
 
     fn ensure_actor_mut(&mut self, id: &str, label: &str) -> &mut ActorSnapshot {
@@ -821,6 +832,26 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     globals.set("SetActorShadowPoint", noop.clone())?;
     globals.set("SetActorShadowPlane", noop.clone())?;
     globals.set("AddShadowPlane", noop.clone())?;
+    let constrain_ctx = context.clone();
+    globals.set(
+        "SetActorConstrain",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut values = args.into_iter();
+            let actor = values
+                .next()
+                .map(|value| describe_value(&value))
+                .unwrap_or_else(|| "<nil>".to_string());
+            let enabled = values
+                .next()
+                .map(|value| value_to_bool(&value))
+                .unwrap_or(false);
+            constrain_ctx.borrow_mut().log_event(format!(
+                "actor.constrain {actor} {}",
+                if enabled { "on" } else { "off" }
+            ));
+            Ok(())
+        })?,
+    )?;
     globals.set("LoadCostume", noop.clone())?;
     globals.set(
         "tag",
@@ -842,6 +873,16 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         lua.create_function(|_, _args: Variadic<Value>| Ok(()))?,
     )?;
     globals.set("random", lua.create_function(|_, ()| Ok(0.42))?)?;
+    let visible_ctx = context.clone();
+    globals.set(
+        "GetVisibleThings",
+        lua.create_function(move |lua_ctx, ()| {
+            visible_ctx
+                .borrow_mut()
+                .log_event("scene.get_visible_things".to_string());
+            lua_ctx.create_table()
+        })?,
+    )?;
     globals.set("sleep_for", noop.clone())?;
     globals.set("set_override", noop.clone())?;
     globals.set("kill_override", noop.clone())?;
@@ -1387,6 +1428,32 @@ fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
 
     let mo: Table = globals.get("mo")?;
     mo.set("setFile", "mo.set")?;
+    mo.set("setups", lua.create_table()?)?;
+    let current_setup_ctx = context.clone();
+    mo.set(
+        "current_setup",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let values = strip_self(args);
+            let description = values
+                .get(0)
+                .map(describe_value)
+                .unwrap_or_else(|| "<nil>".to_string());
+            current_setup_ctx
+                .borrow_mut()
+                .log_event(format!("set.current_setup {description}"));
+            Ok(())
+        })?,
+    )?;
+    let cameraman_ctx = context.clone();
+    mo.set(
+        "cameraman",
+        lua.create_function(move |_, _args: Variadic<Value>| {
+            cameraman_ctx
+                .borrow_mut()
+                .log_event("set.cameraman".to_string());
+            Ok(())
+        })?,
+    )?;
     let mo_key = lua.create_registry_value(mo.clone())?;
     let switch_context = context.clone();
     mo.set(
@@ -2599,18 +2666,19 @@ fn create_start_script(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
             return Ok(0u32);
         }
         let callable = args.remove(0);
-        let label = match &callable {
-            Value::Function(_) => "<function>".to_string(),
-            Value::String(s) => s.to_str()?.to_string(),
-            Value::Table(_) => "<table>".to_string(),
-            other => format!("<{other:?}>"),
+        let label = describe_callable_label(&callable)?;
+        let function = extract_function(lua_ctx, callable)?;
+        let callable_key = if let Some(func) = function.as_ref() {
+            Some(lua_ctx.create_registry_value(func.clone())?)
+        } else {
+            None
         };
         let handle = {
             let mut state = start_state.borrow_mut();
-            state.start_script(label.clone())
+            state.start_script(label.clone(), callable_key)
         };
-        if let Some(func) = extract_function(lua_ctx, callable)? {
-            let thread = lua_ctx.create_thread(func)?;
+        if let Some(func) = function {
+            let thread = lua_ctx.create_thread(func.clone())?;
             let thread_key = lua_ctx.create_registry_value(thread.clone())?;
             {
                 let mut state = start_state.borrow_mut();
@@ -2626,7 +2694,11 @@ fn create_start_script(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
                 Some(initial_args),
             )?;
         } else {
-            if let Some(key) = start_state.borrow_mut().complete_script(handle) {
+            let cleanup = start_state.borrow_mut().complete_script(handle);
+            if let Some(key) = cleanup.thread {
+                lua_ctx.remove_registry_value(key)?;
+            }
+            if let Some(key) = cleanup.callable {
                 lua_ctx.remove_registry_value(key)?;
             }
         }
@@ -2645,21 +2717,22 @@ fn create_single_start_script(
             return Ok(0u32);
         }
         let callable = args.remove(0);
-        let label = match &callable {
-            Value::Function(_) => "<function>".to_string(),
-            Value::String(s) => s.to_str()?.to_string(),
-            Value::Table(_) => "<table>".to_string(),
-            other => format!("<{other:?}>"),
-        };
+        let label = describe_callable_label(&callable)?;
         if single_state.borrow().has_script_with_label(&label) {
             return Ok(0u32);
         }
+        let function = extract_function(lua_ctx, callable)?;
+        let callable_key = if let Some(func) = function.as_ref() {
+            Some(lua_ctx.create_registry_value(func.clone())?)
+        } else {
+            None
+        };
         let handle = {
             let mut state = single_state.borrow_mut();
-            state.start_script(label.clone())
+            state.start_script(label.clone(), callable_key)
         };
-        if let Some(func) = extract_function(lua_ctx, callable)? {
-            let thread = lua_ctx.create_thread(func)?;
+        if let Some(func) = function {
+            let thread = lua_ctx.create_thread(func.clone())?;
             let thread_key = lua_ctx.create_registry_value(thread.clone())?;
             {
                 let mut state = single_state.borrow_mut();
@@ -2675,7 +2748,11 @@ fn create_single_start_script(
                 Some(initial_args),
             )?;
         } else {
-            if let Some(key) = single_state.borrow_mut().complete_script(handle) {
+            let cleanup = single_state.borrow_mut().complete_script(handle);
+            if let Some(key) = cleanup.thread {
+                lua_ctx.remove_registry_value(key)?;
+            }
+            if let Some(key) = cleanup.callable {
                 lua_ctx.remove_registry_value(key)?;
             }
         }
@@ -2711,11 +2788,14 @@ fn resume_script(
     };
 
     if !matches!(thread.status(), ThreadStatus::Resumable) {
-        let key = {
+        let cleanup = {
             let mut state = context.borrow_mut();
             state.complete_script(handle)
         };
-        if let Some(key) = key {
+        if let Some(key) = cleanup.thread {
+            lua.remove_registry_value(key)?;
+        }
+        if let Some(key) = cleanup.callable {
             lua.remove_registry_value(key)?;
         }
         return Ok(ScriptStep::Completed);
@@ -2734,22 +2814,28 @@ fn resume_script(
                 Ok(ScriptStep::Yielded)
             }
             ThreadStatus::Unresumable | ThreadStatus::Error => {
-                let key = {
+                let cleanup = {
                     let mut state = context.borrow_mut();
                     state.complete_script(handle)
                 };
-                if let Some(key) = key {
+                if let Some(key) = cleanup.thread {
+                    lua.remove_registry_value(key)?;
+                }
+                if let Some(key) = cleanup.callable {
                     lua.remove_registry_value(key)?;
                 }
                 Ok(ScriptStep::Completed)
             }
         },
         Err(LuaError::CoroutineInactive) => {
-            let key = {
+            let cleanup = {
                 let mut state = context.borrow_mut();
                 state.complete_script(handle)
             };
-            if let Some(key) = key {
+            if let Some(key) = cleanup.thread {
+                lua.remove_registry_value(key)?;
+            }
+            if let Some(key) = cleanup.callable {
                 lua.remove_registry_value(key)?;
             }
             Ok(ScriptStep::Completed)
@@ -2766,11 +2852,14 @@ fn resume_script(
             context
                 .borrow_mut()
                 .log_event(format!("script.error {label}: {message}"));
-            let key = {
+            let cleanup = {
                 let mut state = context.borrow_mut();
                 state.complete_script(handle)
             };
-            if let Some(key) = key {
+            if let Some(key) = cleanup.thread {
+                lua.remove_registry_value(key)?;
+            }
+            if let Some(key) = cleanup.callable {
                 lua.remove_registry_value(key)?;
             }
             Err(err)
@@ -2865,6 +2954,60 @@ fn strip_self(args: Variadic<Value>) -> Vec<Value> {
             values
         }
         None => Vec::new(),
+    }
+}
+
+fn describe_function(func: &Function) -> String {
+    let info = func.info();
+    if let Some(name) = info.name.clone() {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    if let Some(short) = info.short_src.clone() {
+        if let Some(line) = info.line_defined {
+            if line > 0 {
+                return format!("{short}:{line}");
+            }
+        }
+        return format!("function@{short}");
+    }
+    if let Some(source) = info.source.clone() {
+        if let Some(line) = info.line_defined {
+            if line > 0 {
+                return format!("{source}:{line}");
+            }
+        }
+        return format!("function@{source}");
+    }
+    match info.what {
+        "C" => "<cfunction>".to_string(),
+        other => format!("<{other}>"),
+    }
+}
+
+fn describe_callable_label(value: &Value) -> LuaResult<String> {
+    match value {
+        Value::Function(func) => Ok(describe_function(func)),
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        Value::Table(table) => {
+            if let Ok(name) = table.get::<_, String>("name") {
+                if !name.is_empty() {
+                    return Ok(name);
+                }
+            }
+            if let Ok(label) = table.get::<_, String>("label") {
+                if !label.is_empty() {
+                    return Ok(label);
+                }
+            }
+            if let Ok(func) = table.get::<_, Function>("run") {
+                return Ok(describe_function(&func));
+            }
+            Ok(format!("table@{:p}", table.to_pointer()))
+        }
+        Value::Nil => Ok("<nil>".to_string()),
+        other => Ok(describe_value(other)),
     }
 }
 
