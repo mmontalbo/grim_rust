@@ -162,6 +162,16 @@ to skip the winit window entirely (handy for CI or remote agents).
 `tools/grim_viewer.py verify` wraps `cargo run` with the headless
 configuration so automation can trigger a render check without remembering the
 full CLI surface.
+When you need the Steam runtime's GL/Vulkan stack (mirroring the old
+`grim_mod launch` behaviour), build once and launch through `steam-run`:
+
+```bash
+cargo build -p grim_viewer
+tools/grim_viewer.py verify --use-binary --steam-run --timeline artifacts/boot_timeline.json
+```
+
+The same command works over SSH on a GPU host, letting automation fire the
+headless verification remotely.
 Enable the optional `audio` feature to spin up a rodio output stream so the
 audio plumbing is ready when we begin playing sounds. Run it with:
 
@@ -183,7 +193,7 @@ and scheduler schema changes are caught automatically.
 when a GPU isn’t available.
 For an end-to-end pixel diff from automation, run
 ```
-tools/grim_viewer.py verify --timeline artifacts/boot_timeline.json
+tools/grim_viewer.py verify --use-binary --steam-run --timeline artifacts/boot_timeline.json
 ```
 
 ## Current Focus

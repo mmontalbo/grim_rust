@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence
+import shutil
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT_DIR / "artifacts" / "manny_office_assets.json"
@@ -64,6 +65,11 @@ def main() -> None:
         "--use-binary",
         action="store_true",
         help="Run the pre-built binary in target/<profile> instead of cargo run",
+    )
+    common.add_argument(
+        "--steam-run",
+        action="store_true",
+        help="Wrap the launch in steam-run to borrow Steam's GL/Vulkan runtime",
     )
     common.add_argument(
         "--env",
@@ -157,6 +163,12 @@ def exec_viewer(args, viewer_args: Sequence[str]) -> int:
         key, value = parse_env(entry)
         env[key] = value
 
+    tmpdir = env.get("TMPDIR")
+    if tmpdir and not Path(tmpdir).exists():
+        fallback = "/tmp"
+        print(f"[grim_viewer] TMPDIR '{tmpdir}' missing; using {fallback} instead")
+        env["TMPDIR"] = fallback
+
     command: List[str]
     if args.use_binary:
         binary = resolve_binary(args.release)
@@ -165,9 +177,13 @@ def exec_viewer(args, viewer_args: Sequence[str]) -> int:
         command = ["cargo", "run"]
         if args.release:
             command.append("--release")
-        command.extend(["-p", "grim_viewer"])
-    command.append("--")
+        command.extend(["-p", "grim_viewer", "--"])
     command.extend(viewer_args)
+
+    if args.steam_run:
+        if shutil.which("steam-run") is None:
+            raise RuntimeError("steam-run requested but not found on PATH")
+        command = ["steam-run", *command]
 
     print(f"[grim_viewer] launching: {' '.join(command)}")
     completed = subprocess.run(command, env=env)
