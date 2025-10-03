@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::{normalize_legacy_lua, ResourceGraph};
 use mlua::{
     Error as LuaError, Function, Lua, LuaOptions, MultiValue, RegistryKey, Result as LuaResult,
@@ -45,6 +45,12 @@ struct ActorSnapshot {
     position: Option<Vec3>,
     rotation: Option<Vec3>,
     is_selected: bool,
+    handle: u32,
+}
+
+#[derive(Debug, Default, Clone)]
+struct MenuState {
+    visible: bool,
 }
 
 #[derive(Debug)]
@@ -60,6 +66,10 @@ struct EngineContext {
     available_sets: BTreeMap<String, SetDescriptor>,
     loaded_sets: BTreeSet<String>,
     inventory: BTreeSet<String>,
+    actor_labels: BTreeMap<String, String>,
+    actor_handles: BTreeMap<u32, String>,
+    next_actor_handle: u32,
+    actors_installed: bool,
 }
 
 impl EngineContext {
@@ -87,6 +97,10 @@ impl EngineContext {
             available_sets,
             loaded_sets: BTreeSet::new(),
             inventory: BTreeSet::new(),
+            actor_labels: BTreeMap::new(),
+            actor_handles: BTreeMap::new(),
+            next_actor_handle: 1100,
+            actors_installed: false,
         }
     }
 
@@ -118,11 +132,16 @@ impl EngineContext {
     }
 
     fn ensure_actor_mut(&mut self, id: &str, label: &str) -> &mut ActorSnapshot {
-        self.actors.entry(id.to_string()).or_insert_with(|| {
+        let entry = self.actors.entry(id.to_string()).or_insert_with(|| {
             let mut actor = ActorSnapshot::default();
             actor.name = label.to_string();
             actor
-        })
+        });
+        entry.name = label.to_string();
+        self.actor_labels
+            .entry(label.to_string())
+            .or_insert_with(|| id.to_string());
+        entry
     }
 
     fn select_actor(&mut self, id: &str, label: &str) {
@@ -208,6 +227,84 @@ impl EngineContext {
             .iter()
             .find_map(|(handle, record)| (record.label == label).then_some(*handle))
     }
+
+    fn canonicalize_actor_label(label: &str) -> String {
+        let mut id = String::new();
+        for ch in label.chars() {
+            if ch.is_ascii_alphanumeric() {
+                id.push(ch.to_ascii_lowercase());
+            } else if ch.is_ascii_whitespace() || matches!(ch, '.' | '-' | '_' | ':') {
+                if !id.ends_with('_') {
+                    id.push('_');
+                }
+            }
+        }
+        if id.is_empty() {
+            id.push_str("actor");
+        }
+        while id.ends_with('_') {
+            id.pop();
+        }
+        if id.is_empty() {
+            id.push_str("actor");
+        }
+        id
+    }
+
+    fn register_actor_with_handle(
+        &mut self,
+        label: &str,
+        preferred_handle: Option<u32>,
+    ) -> (String, u32) {
+        let id = self
+            .actor_labels
+            .get(label)
+            .cloned()
+            .unwrap_or_else(|| Self::canonicalize_actor_label(label));
+
+        let entry = self.actors.entry(id.clone()).or_insert_with(|| {
+            let mut actor = ActorSnapshot::default();
+            actor.name = label.to_string();
+            actor
+        });
+        entry.name = label.to_string();
+
+        if let Some(existing) = self.actor_labels.get(label) {
+            if existing != &id {
+                self.actor_labels.insert(label.to_string(), id.clone());
+            }
+        } else {
+            self.actor_labels.insert(label.to_string(), id.clone());
+        }
+
+        let mut newly_assigned = None;
+        if entry.handle == 0 {
+            let handle = preferred_handle.unwrap_or_else(|| {
+                let handle = self.next_actor_handle;
+                self.next_actor_handle += 1;
+                handle
+            });
+            entry.handle = handle;
+            self.actor_handles.insert(handle, id.clone());
+            newly_assigned = Some(handle);
+        }
+
+        let handle = entry.handle;
+
+        if let Some(handle) = newly_assigned {
+            self.log_event(format!("actor.register {} (#{handle})", label));
+        }
+
+        (id, handle)
+    }
+
+    fn mark_actors_installed(&mut self) {
+        self.actors_installed = true;
+    }
+
+    fn actors_installed(&self) -> bool {
+        self.actors_installed
+    }
 }
 
 pub fn run_boot_sequence(data_root: &Path, verbose: bool) -> Result<()> {
@@ -250,23 +347,17 @@ fn install_globals(lua: &Lua, data_root: &Path, context: Rc<RefCell<EngineContex
 
     let root = data_root.to_path_buf();
     let verbose_context = context.clone();
+    let system_key = Rc::new(install_runtime_tables(lua, context.clone())?);
+    install_actor_scaffold(lua, context.clone(), system_key.clone()).map_err(|err| anyhow!(err))?;
+    let dofile_context = context.clone();
     let wrapped_dofile = lua.create_function(move |lua_ctx, path: String| -> LuaResult<Value> {
-        if Path::new(&path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| {
-                let lower = name.to_ascii_lowercase();
-                matches!(
-                    lower.as_str(),
-                    "setfallback.lua" | "_actors.lua" | "_actors.decompiled.lua"
-                )
-            })
-            .unwrap_or(false)
+        if let Some(value) =
+            handle_special_dofile(lua_ctx, &path, dofile_context.clone(), system_key.clone())?
         {
             if verbose_context.borrow().verbose {
-                println!("[lua][dofile] skipping {} via host", path);
+                println!("[lua][dofile] handled {} via host", path);
             }
-            return Ok(Value::Nil);
+            return Ok(value);
         }
         let mut tried = Vec::new();
         let candidates = candidate_paths(&path);
@@ -296,9 +387,28 @@ fn install_globals(lua: &Lua, data_root: &Path, context: Rc<RefCell<EngineContex
 
     install_logging_functions(lua, context.clone())?;
     install_engine_bindings(lua, context.clone())?;
-    install_runtime_tables(lua, context)?;
 
     Ok(())
+}
+
+fn handle_special_dofile<'lua>(
+    lua: &'lua Lua,
+    path: &str,
+    context: Rc<RefCell<EngineContext>>,
+    system_key: Rc<RegistryKey>,
+) -> LuaResult<Option<Value<'lua>>> {
+    if let Some(filename) = Path::new(path).file_name().and_then(|name| name.to_str()) {
+        let lower = filename.to_ascii_lowercase();
+        match lower.as_str() {
+            "setfallback.lua" => return Ok(Some(Value::Nil)),
+            "_actors.lua" | "_actors.decompiled.lua" => {
+                install_actor_scaffold(lua, context, system_key.clone())?;
+                return Ok(Some(Value::Nil));
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 fn candidate_paths(path: &str) -> Vec<PathBuf> {
@@ -357,7 +467,14 @@ fn execute_script<'lua>(lua: &'lua Lua, path: &Path) -> LuaResult<Option<Value<'
     };
 
     match eval_result {
-        Ok(results) => Ok(results.into_iter().next()),
+        Ok(results) => {
+            let mut iter = results.into_iter();
+            if let Some(value) = iter.next() {
+                Ok(Some(value))
+            } else {
+                Ok(Some(Value::Nil))
+            }
+        }
         Err(LuaError::SyntaxError { message, .. })
             if message.contains("bad header in precompiled chunk") =>
         {
@@ -564,7 +681,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     Ok(())
 }
 
-fn install_runtime_tables(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+fn install_runtime_tables(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<RegistryKey> {
     let globals = lua.globals();
 
     let system = lua.create_table()?;
@@ -572,143 +689,7 @@ fn install_runtime_tables(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
     system.set("setCount", 0)?;
     globals.set("system", system.clone())?;
 
-    let manny = lua.create_table()?;
-    manny.set("name", "Manny")?;
-    manny.set("hActor", 1001)?;
-
-    let set_selected_system_key: RegistryKey = lua.create_registry_value(system.clone())?;
-    let set_selected_manny_key: RegistryKey = lua.create_registry_value(manny.clone())?;
-    let manny_state = context.clone();
-    manny.set(
-        "set_selected",
-        lua.create_function(move |lua_ctx, _args: Variadic<Value>| {
-            {
-                let mut ctx = manny_state.borrow_mut();
-                ctx.select_actor("manny", "Manny");
-            }
-            let system: Table = lua_ctx.registry_value(&set_selected_system_key)?;
-            let manny_table: Table = lua_ctx.registry_value(&set_selected_manny_key)?;
-            system.set("currentActor", manny_table.clone())?;
-            Ok(())
-        })?,
-    )?;
-
-    let manny_state = context.clone();
-    manny.set(
-        "default",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            if let Some(Value::String(costume)) = args.get(0) {
-                manny_state.borrow_mut().set_actor_costume(
-                    "manny",
-                    "Manny",
-                    Some(costume.to_str()?.to_string()),
-                );
-            }
-            Ok(())
-        })?,
-    )?;
-
-    let manny_state = context.clone();
-    let put_in_set_system_key: RegistryKey = lua.create_registry_value(system.clone())?;
-    let put_in_set_manny_key: RegistryKey = lua.create_registry_value(manny.clone())?;
-    manny.set(
-        "put_in_set",
-        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-            if let Some(Value::Table(set)) = args.get(0) {
-                let set_file: String = set.get("setFile")?;
-                manny_state
-                    .borrow_mut()
-                    .put_actor_in_set("manny", "Manny", &set_file);
-            } else if let Some(Value::String(set_file)) = args.get(0) {
-                manny_state
-                    .borrow_mut()
-                    .put_actor_in_set("manny", "Manny", set_file.to_str()?);
-            }
-            // Keep system.currentActor in sync if absent
-            let system: Table = lua_ctx.registry_value(&put_in_set_system_key)?;
-            if let Ok(Value::Nil) = system.get::<_, Value>("currentActor") {
-                let manny_table: Table = lua_ctx.registry_value(&put_in_set_manny_key)?;
-                system.set("currentActor", manny_table)?;
-            }
-            Ok(())
-        })?,
-    )?;
-    let manny_state = context.clone();
-    manny.set(
-        "put_at_interest",
-        lua.create_function(move |_, _args: Variadic<Value>| {
-            manny_state.borrow_mut().actor_at_interest("manny", "Manny");
-            Ok(())
-        })?,
-    )?;
-    let manny_state = context.clone();
-    manny.set(
-        "setpos",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            if let Some(position) = value_slice_to_vec3(&args) {
-                manny_state
-                    .borrow_mut()
-                    .set_actor_position("manny", "Manny", position);
-            }
-            Ok(())
-        })?,
-    )?;
-    let manny_state = context.clone();
-    manny.set(
-        "setrot",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            if let Some(rotation) = value_slice_to_vec3(&args) {
-                manny_state
-                    .borrow_mut()
-                    .set_actor_rotation("manny", "Manny", rotation);
-            }
-            Ok(())
-        })?,
-    )?;
-    manny.set(
-        "play_chore",
-        lua.create_function(|_, _args: Variadic<Value>| Ok(()))?,
-    )?;
-    manny.set(
-        "pop_costume",
-        lua.create_function(|_, _args: Variadic<Value>| Ok(()))?,
-    )?;
-    manny.set(
-        "head_look_at",
-        lua.create_function(|_, _args: Variadic<Value>| Ok(()))?,
-    )?;
-    let manny_state = context.clone();
-    manny.set(
-        "is_speaking",
-        lua.create_function(move |_, ()| {
-            let actors = &manny_state.borrow().actors;
-            let speaking = actors
-                .get("manny")
-                .map(|actor| actor.is_selected)
-                .unwrap_or(false);
-            Ok(speaking)
-        })?,
-    )?;
-    let manny_state = context.clone();
-    manny.set(
-        "getpos",
-        lua.create_function(move |lua_ctx, ()| {
-            let table = lua_ctx.create_table()?;
-            if let Some(actor) = manny_state.borrow().actors.get("manny") {
-                if let Some(pos) = actor.position {
-                    table.set("x", pos.x)?;
-                    table.set("y", pos.y)?;
-                    table.set("z", pos.z)?;
-                    return Ok(table);
-                }
-            }
-            table.set("x", 0.0)?;
-            table.set("y", 0.0)?;
-            table.set("z", 0.0)?;
-            Ok(table)
-        })?,
-    )?;
-    globals.set("manny", manny.clone())?;
+    let system_key = lua.create_registry_value(system.clone())?;
 
     let mo = lua.create_table()?;
     mo.set("name", "Manny's Office")?;
@@ -726,7 +707,413 @@ fn install_runtime_tables(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
     mo.set("scythe", scythe)?;
     globals.set("mo", mo)?;
 
+    install_menu_infrastructure(lua, context)?;
+
+    Ok(system_key)
+}
+
+fn install_actor_scaffold(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    system_key: Rc<RegistryKey>,
+) -> LuaResult<()> {
+    if context.borrow().actors_installed() {
+        return Ok(());
+    }
+    drop(context.borrow());
+
+    ensure_actor_prototype(lua, context.clone(), system_key.clone())?;
+
+    let (manny_id, manny_handle) = {
+        let mut ctx = context.borrow_mut();
+        ctx.register_actor_with_handle("Manny", Some(1001))
+    };
+
+    let manny_table = build_actor_table(
+        lua,
+        context.clone(),
+        system_key.clone(),
+        manny_id.clone(),
+        "Manny".to_string(),
+        manny_handle,
+    )?;
+
+    let globals = lua.globals();
+    globals.set("manny", manny_table.clone())?;
+
+    {
+        let mut ctx = context.borrow_mut();
+        ctx.select_actor(&manny_id, "Manny");
+        ctx.mark_actors_installed();
+    }
+
+    let system: Table = lua.registry_value(system_key.as_ref())?;
+    system.set("currentActor", manny_table.clone())?;
+    if matches!(system.get::<_, Value>("rootActor"), Ok(Value::Nil)) {
+        system.set("rootActor", manny_table.clone())?;
+    }
+
     Ok(())
+}
+
+fn ensure_actor_prototype<'lua>(
+    lua: &'lua Lua,
+    context: Rc<RefCell<EngineContext>>,
+    system_key: Rc<RegistryKey>,
+) -> LuaResult<Table<'lua>> {
+    let globals = lua.globals();
+    if let Ok(actor) = globals.get::<_, Table>("Actor") {
+        return Ok(actor);
+    }
+
+    let actor = lua.create_table()?;
+    install_actor_methods(lua, &actor, context.clone(), system_key.clone())?;
+
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("actor.stub Actor.{}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    actor.set_metatable(Some(metatable));
+
+    globals.set("Actor", actor.clone())?;
+    Ok(actor)
+}
+
+fn install_actor_methods(
+    lua: &Lua,
+    actor: &Table,
+    context: Rc<RefCell<EngineContext>>,
+    system_key: Rc<RegistryKey>,
+) -> LuaResult<()> {
+    let create_context = context.clone();
+    let create_system_key = system_key.clone();
+    actor.set(
+        "create",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (_self_table, values) = split_self(args);
+            let mut label = None;
+            for value in values.iter().rev() {
+                if let Value::String(text) = value {
+                    label = Some(text.to_str()?.to_string());
+                    break;
+                }
+            }
+            let label = label.unwrap_or_else(|| "actor".to_string());
+            let (id, handle) = {
+                let mut ctx = create_context.borrow_mut();
+                ctx.register_actor_with_handle(&label, None)
+            };
+            build_actor_table(
+                lua_ctx,
+                create_context.clone(),
+                create_system_key.clone(),
+                id,
+                label,
+                handle,
+            )
+        })?,
+    )?;
+
+    let select_context = context.clone();
+    let select_system_key = system_key.clone();
+    actor.set(
+        "set_selected",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, name) = actor_identity(&table)?;
+                select_context.borrow_mut().select_actor(&id, &name);
+                let system: Table = lua_ctx.registry_value(select_system_key.as_ref())?;
+                system.set("currentActor", table)?;
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let put_context = context.clone();
+    let put_system_key = system_key.clone();
+    actor.set(
+        "put_in_set",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, name) = actor_identity(&table)?;
+                if let Some(set_value) = values.get(0) {
+                    let set_file = if let Value::Table(set_table) = set_value {
+                        if let Ok(Some(value)) = set_table.get::<_, Option<String>>("setFile") {
+                            value
+                        } else if let Ok(Some(value)) = set_table.get::<_, Option<String>>("name") {
+                            value
+                        } else if let Ok(Some(value)) = set_table.get::<_, Option<String>>("label")
+                        {
+                            value
+                        } else {
+                            "<unknown>".to_string()
+                        }
+                    } else if let Value::String(text) = set_value {
+                        text.to_str()?.to_string()
+                    } else {
+                        "<unknown>".to_string()
+                    };
+                    put_context
+                        .borrow_mut()
+                        .put_actor_in_set(&id, &name, &set_file);
+                    let system: Table = lua_ctx.registry_value(put_system_key.as_ref())?;
+                    if let Ok(Value::Nil) = system.get::<_, Value>("currentActor") {
+                        system.set("currentActor", table.clone())?;
+                    }
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let interest_context = context.clone();
+    actor.set(
+        "put_at_interest",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, name) = actor_identity(&table)?;
+                interest_context.borrow_mut().actor_at_interest(&id, &name);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let setpos_context = context.clone();
+    actor.set(
+        "setpos",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                if let Some(position) = value_slice_to_vec3(&values) {
+                    let (id, name) = actor_identity(&table)?;
+                    setpos_context
+                        .borrow_mut()
+                        .set_actor_position(&id, &name, position);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let setrot_context = context.clone();
+    actor.set(
+        "setrot",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                if let Some(rotation) = value_slice_to_vec3(&values) {
+                    let (id, name) = actor_identity(&table)?;
+                    setrot_context
+                        .borrow_mut()
+                        .set_actor_rotation(&id, &name, rotation);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let getpos_context = context.clone();
+    actor.set(
+        "getpos",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            let table = lua_ctx.create_table()?;
+            if let Some(actor_table) = self_table {
+                let (id, _name) = actor_identity(&actor_table)?;
+                if let Some(snapshot) = getpos_context.borrow().actors.get(&id) {
+                    if let Some(pos) = snapshot.position {
+                        table.set("x", pos.x)?;
+                        table.set("y", pos.y)?;
+                        table.set("z", pos.z)?;
+                        return Ok(table);
+                    }
+                }
+            }
+            table.set("x", 0.0)?;
+            table.set("y", 0.0)?;
+            table.set("z", 0.0)?;
+            Ok(table)
+        })?,
+    )?;
+
+    let getrot_context = context.clone();
+    actor.set(
+        "getrot",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            let table = lua_ctx.create_table()?;
+            if let Some(actor_table) = self_table {
+                let (id, _name) = actor_identity(&actor_table)?;
+                if let Some(snapshot) = getrot_context.borrow().actors.get(&id) {
+                    if let Some(rot) = snapshot.rotation {
+                        table.set("x", rot.x)?;
+                        table.set("y", rot.y)?;
+                        table.set("z", rot.z)?;
+                        return Ok(table);
+                    }
+                }
+            }
+            table.set("x", 0.0)?;
+            table.set("y", 0.0)?;
+            table.set("z", 0.0)?;
+            Ok(table)
+        })?,
+    )?;
+
+    let costume_context = context.clone();
+    actor.set(
+        "set_costume",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let costume = values.get(0).and_then(|value| match value {
+                    Value::String(text) => Some(text.to_str().ok()?.to_string()),
+                    Value::Nil => None,
+                    _ => None,
+                });
+                let (id, name) = actor_identity(&table)?;
+                costume_context
+                    .borrow_mut()
+                    .set_actor_costume(&id, &name, costume);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let default_context = context.clone();
+    actor.set(
+        "default",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                if let Some(Value::String(costume)) = values.get(0) {
+                    let (id, name) = actor_identity(&table)?;
+                    default_context.borrow_mut().set_actor_costume(
+                        &id,
+                        &name,
+                        Some(costume.to_str()?.to_string()),
+                    );
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let speak_context = context.clone();
+    actor.set(
+        "is_speaking",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, _name) = actor_identity(&table)?;
+                let speaking = speak_context
+                    .borrow()
+                    .selected_actor
+                    .as_deref()
+                    .map(|selected| selected == id)
+                    .unwrap_or(false);
+                return Ok(speaking);
+            }
+            Ok(false)
+        })?,
+    )?;
+
+    let noop = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+    actor.set("play_chore", noop.clone())?;
+    actor.set("pop_costume", noop.clone())?;
+    actor.set("head_look_at", noop.clone())?;
+    actor.set("push_costume", noop.clone())?;
+    actor.set("set_walk_chore", noop.clone())?;
+    actor.set("set_talk_color", noop.clone())?;
+    actor.set("set_mumble_chore", noop.clone())?;
+    actor.set("set_talk_chore", noop.clone())?;
+    actor.set("set_head", noop.clone())?;
+    actor.set("set_look_rate", noop.clone())?;
+    actor.set("set_collision_mode", noop.clone())?;
+    actor.set("ignore_boxes", noop.clone())?;
+
+    Ok(())
+}
+
+fn build_actor_table<'lua>(
+    lua_ctx: &'lua Lua,
+    context: Rc<RefCell<EngineContext>>,
+    system_key: Rc<RegistryKey>,
+    id: String,
+    label: String,
+    handle: u32,
+) -> LuaResult<Table<'lua>> {
+    let actor_table = lua_ctx.create_table()?;
+    actor_table.set("name", label.clone())?;
+    actor_table.set("id", id.clone())?;
+    actor_table.set("hActor", handle as i64)?;
+
+    let actor_proto: Table = lua_ctx.globals().get("Actor")?;
+    actor_table.set("parent", actor_proto.clone())?;
+
+    let metatable = lua_ctx.create_table()?;
+    metatable.set("__index", actor_proto.clone())?;
+    actor_table.set_metatable(Some(metatable));
+
+    let system: Table = lua_ctx.registry_value(system_key.as_ref())?;
+    let registry: Table = match system.get("actorTable") {
+        Ok(table) => table,
+        Err(_) => {
+            let table = lua_ctx.create_table()?;
+            system.set("actorTable", table.clone())?;
+            table
+        }
+    };
+
+    let existing = registry
+        .get::<_, Value>(label.clone())
+        .unwrap_or(Value::Nil);
+    if matches!(existing, Value::Nil) {
+        let count: i64 = system.get("actorCount").unwrap_or(0);
+        system.set("actorCount", count + 1)?;
+    }
+
+    registry.set(label.clone(), actor_table.clone())?;
+    registry.set(handle as i64, actor_table.clone())?;
+
+    {
+        let mut ctx = context.borrow_mut();
+        ctx.ensure_actor_mut(&id, &label);
+        ctx.log_event(format!("actor.table {} (#{handle})", label));
+    }
+
+    Ok(actor_table)
+}
+
+fn split_self<'lua>(args: Variadic<Value<'lua>>) -> (Option<Table<'lua>>, Vec<Value<'lua>>) {
+    let mut iter = args.into_iter();
+    match iter.next() {
+        Some(Value::Table(table)) => (Some(table), iter.collect()),
+        Some(first) => {
+            let mut values = vec![first];
+            values.extend(iter);
+            (None, values)
+        }
+        None => (None, Vec::new()),
+    }
+}
+
+fn actor_identity<'lua>(table: &Table<'lua>) -> LuaResult<(String, String)> {
+    let id: String = table.get("id")?;
+    let name: String = table.get("name")?;
+    Ok((id, name))
 }
 
 fn value_slice_to_vec3(values: &[Value]) -> Option<Vec3> {
@@ -918,6 +1305,329 @@ fn call_boot(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     Ok(())
 }
 
+fn install_menu_infrastructure(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    install_menu_constants(lua)?;
+    install_render_helpers(lua, context.clone())?;
+    install_game_pauser(lua, context.clone())?;
+    install_game_menu(lua, context.clone())?;
+    install_saveload_menu(lua, context)?;
+    Ok(())
+}
+
+fn install_menu_constants(lua: &Lua) -> Result<()> {
+    let globals = lua.globals();
+    globals.set("CACHE_PERSISTENT", 2)?;
+    globals.set("CACHE_TEMPORARY", 1)?;
+    globals.set("CACHE_NEVER", 0)?;
+    globals.set("MENU_MOTHERDUCK", 100)?;
+    globals.set("TEXTL_MOTHERDUCK", 200)?;
+    globals.set("RENDERMODE_EXITING", "exit")?;
+    Ok(())
+}
+
+fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let render_context = context.clone();
+    globals.set(
+        "SetGameRenderMode",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let values = strip_self(args);
+            let description = values
+                .get(0)
+                .map(describe_value)
+                .unwrap_or_else(|| "<nil>".to_string());
+            render_context
+                .borrow_mut()
+                .log_event(format!("render.mode {description}"));
+            Ok(())
+        })?,
+    )?;
+    Ok(())
+}
+
+fn install_game_pauser(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let game_pauser = lua.create_table()?;
+
+    let pause_context = context.clone();
+    game_pauser.set(
+        "pause",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let values = strip_self(args);
+            let active = values.get(0).map(value_to_bool).unwrap_or(false);
+            pause_context.borrow_mut().log_event(format!(
+                "game_pauser.pause {}",
+                if active { "on" } else { "off" }
+            ));
+            Ok(())
+        })?,
+    )?;
+
+    let resume_context = context.clone();
+    game_pauser.set(
+        "resume",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let values = strip_self(args);
+            let active = values.get(0).map(value_to_bool).unwrap_or(false);
+            resume_context.borrow_mut().log_event(format!(
+                "game_pauser.resume {}",
+                if active { "on" } else { "off" }
+            ));
+            Ok(())
+        })?,
+    )?;
+
+    globals.set("game_pauser", game_pauser)?;
+    Ok(())
+}
+
+fn install_game_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let game_menu = lua.create_table()?;
+    let menu_context = context.clone();
+    game_menu.set(
+        "create",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let values = strip_self(args);
+            let name = values
+                .get(0)
+                .and_then(value_to_string)
+                .or_else(|| Some("menu".to_string()));
+            build_menu_instance(lua_ctx, menu_context.clone(), name)
+        })?,
+    )?;
+    globals.set("game_menu", game_menu)?;
+    Ok(())
+}
+
+fn install_saveload_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let saveload = lua.create_table()?;
+    saveload.set("name", "SaveLoad")?;
+    saveload.set("exit_index", 1)?;
+
+    let menu = lua.create_table()?;
+    menu.set("items", lua.create_table()?)?;
+    saveload.set("menu", menu)?;
+
+    let noop = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+
+    let run_context = context.clone();
+    saveload.set(
+        "run",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut iter = args.into_iter();
+            let _self = iter.next();
+            let mode = iter
+                .next()
+                .as_ref()
+                .map(describe_value)
+                .unwrap_or_else(|| "<nil>".to_string());
+            run_context
+                .borrow_mut()
+                .log_event(format!("saveload_menu.run {mode}"));
+            Ok(())
+        })?,
+    )?;
+
+    let build_context = context.clone();
+    saveload.set(
+        "build_menu",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let mut iter = args.into_iter();
+            let self_table = match iter.next() {
+                Some(Value::Table(table)) => table,
+                _ => return Ok(()),
+            };
+
+            let exit_index: i64 = self_table.get("exit_index").unwrap_or(1);
+            let menu: Table = match self_table.get("menu") {
+                Ok(table) => table,
+                Err(_) => {
+                    let table = lua_ctx.create_table()?;
+                    table.set("items", lua_ctx.create_table()?)?;
+                    self_table.set("menu", table.clone())?;
+                    table
+                }
+            };
+
+            let items: Table = match menu.get("items") {
+                Ok(table) => table,
+                Err(_) => {
+                    let table = lua_ctx.create_table()?;
+                    menu.set("items", table.clone())?;
+                    table
+                }
+            };
+
+            let item_table: Table = match items.get(exit_index) {
+                Ok(Value::Table(table)) => table,
+                _ => {
+                    let table = lua_ctx.create_table()?;
+                    items.set(exit_index, table.clone())?;
+                    table
+                }
+            };
+
+            if let Some(method) = iter.next() {
+                build_context.borrow_mut().log_event(format!(
+                    "saveload_menu.build_menu {}",
+                    describe_value(&method)
+                ));
+            }
+
+            if let Err(_) = item_table.get::<_, Value>("text") {
+                item_table.set("text", "")?;
+            }
+
+            Ok(())
+        })?,
+    )?;
+
+    saveload.set("cancel", noop.clone())?;
+    saveload.set("destroy", noop.clone())?;
+    saveload.set("set_default_focus", noop.clone())?;
+
+    let metatable = lua.create_table()?;
+    let fallback = {
+        let fallback_context = context.clone();
+        lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+            if let Value::String(method) = key {
+                let method_name = method.to_str()?.to_string();
+                fallback_context
+                    .borrow_mut()
+                    .log_event(format!("saveload_menu.stub {method_name}"));
+            }
+            let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+            Ok(Value::Function(noop))
+        })?
+    };
+    metatable.set("__index", fallback)?;
+    saveload.set_metatable(Some(metatable));
+
+    globals.set("saveload_menu", saveload)?;
+    Ok(())
+}
+
+fn build_menu_instance<'lua>(
+    lua_ctx: &'lua Lua,
+    context: Rc<RefCell<EngineContext>>,
+    name: Option<String>,
+) -> LuaResult<Table<'lua>> {
+    let label = name.unwrap_or_else(|| "menu".to_string());
+    let menu = lua_ctx.create_table()?;
+    menu.set("name", label.clone())?;
+
+    let state = Rc::new(RefCell::new(MenuState::default()));
+    context
+        .borrow_mut()
+        .log_event(format!("menu.create {label}"));
+
+    let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+
+    let show_state = state.clone();
+    let show_context = context.clone();
+    let show_label = label.clone();
+    menu.set(
+        "show",
+        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+            show_state.borrow_mut().visible = true;
+            show_context
+                .borrow_mut()
+                .log_event(format!("menu.show {show_label}"));
+            Ok(())
+        })?,
+    )?;
+
+    let hide_state = state.clone();
+    let hide_context = context.clone();
+    let hide_label = label.clone();
+    menu.set(
+        "hide",
+        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+            hide_state.borrow_mut().visible = false;
+            hide_context
+                .borrow_mut()
+                .log_event(format!("menu.hide {hide_label}"));
+            Ok(())
+        })?,
+    )?;
+
+    let freeze_context = context.clone();
+    let freeze_label = label.clone();
+    menu.set(
+        "freeze",
+        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+            freeze_context
+                .borrow_mut()
+                .log_event(format!("menu.freeze {freeze_label}"));
+            Ok(())
+        })?,
+    )?;
+
+    let close_context = context.clone();
+    let close_label = label.clone();
+    menu.set(
+        "close",
+        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+            close_context
+                .borrow_mut()
+                .log_event(format!("menu.close {close_label}"));
+            Ok(())
+        })?,
+    )?;
+
+    let cleanup_context = context.clone();
+    let cleanup_label = label.clone();
+    menu.set(
+        "cleanup",
+        lua_ctx.create_function(move |_, _args: Variadic<Value>| {
+            cleanup_context
+                .borrow_mut()
+                .log_event(format!("menu.cleanup {cleanup_label}"));
+            Ok(())
+        })?,
+    )?;
+
+    let visible_state = state.clone();
+    menu.set(
+        "is_visible",
+        lua_ctx
+            .create_function(move |_, _args: Variadic<Value>| Ok(visible_state.borrow().visible))?,
+    )?;
+
+    menu.set("add_image", noop.clone())?;
+    menu.set("add_line", noop.clone())?;
+    menu.set("setup", noop.clone())?;
+    menu.set("destroy", noop.clone())?;
+    menu.set("cancel", noop.clone())?;
+    menu.set("refresh", noop.clone())?;
+    menu.set("add_button", noop.clone())?;
+    menu.set("add_slider", noop.clone())?;
+    menu.set("add_toggle", noop.clone())?;
+
+    let fallback = {
+        let fallback_context = context.clone();
+        let fallback_label = label.clone();
+        lua_ctx.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+            if let Value::String(method) = key {
+                let method_name = method.to_str()?.to_string();
+                fallback_context
+                    .borrow_mut()
+                    .log_event(format!("menu.stub {fallback_label}.{method_name}"));
+            }
+            let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+            Ok(Value::Function(noop))
+        })?
+    };
+
+    let metatable = lua_ctx.create_table()?;
+    metatable.set("__index", fallback)?;
+    menu.set_metatable(Some(metatable));
+
+    Ok(menu)
+}
+
 fn dump_runtime_summary(state: &EngineContext) {
     println!("Lua runtime summary:");
     match &state.current_set {
@@ -1062,6 +1772,46 @@ fn extract_function<'lua>(lua: &'lua Lua, value: Value<'lua>) -> LuaResult<Optio
         }
         _ => Ok(None),
     }
+}
+
+fn strip_self(args: Variadic<Value>) -> Vec<Value> {
+    let mut iter = args.into_iter();
+    match iter.next() {
+        Some(Value::Table(_)) => iter.collect(),
+        Some(value) => {
+            let mut values = vec![value];
+            values.extend(iter);
+            values
+        }
+        None => Vec::new(),
+    }
+}
+
+fn value_to_bool(value: &Value) -> bool {
+    match value {
+        Value::Boolean(flag) => *flag,
+        Value::Integer(i) => *i != 0,
+        Value::Number(n) => *n != 0.0,
+        Value::String(s) => s
+            .to_str()
+            .map(|text| text != "0" && text != "false")
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => text.to_str().ok().map(|s| s.to_string()),
+        Value::Integer(i) => Some(i.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Boolean(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn describe_value(value: &Value) -> String {
+    value_to_string(value).unwrap_or_else(|| format!("<{value:?}>"))
 }
 
 #[cfg(test)]
