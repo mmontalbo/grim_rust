@@ -83,3 +83,6 @@
 - Test hook: lightweight unit tests exercise the render-diff guard so
   `cargo test -p grim_viewer` keeps the verification threshold and failure
   messaging honest even on headless machines.
+- Automation pass: `tools/grim_viewer.py verify` wraps the viewer in headless
+  mode so CI (or this assistant) can diff decoded vs rendered frames without a
+  real window.

@@ -59,6 +59,10 @@ struct Args {
     /// Maximum allowed fraction (0-1) of pixels that may diverge in the render diff
     #[arg(long, default_value_t = 0.01)]
     render_diff_threshold: f32,
+
+    /// Skip creating a winit window/event loop; useful for headless automation
+    #[arg(long)]
+    headless: bool,
 }
 
 fn main() -> Result<()> {
@@ -198,6 +202,13 @@ fn main() -> Result<()> {
             );
         }
         println!();
+    }
+
+    if args.headless {
+        // Propagate any decoding failure before exiting early.
+        decode_result?;
+        println!("Headless mode requested; viewer window bootstrap skipped.");
+        return Ok(());
     }
 
     let scene = scene_data.map(Arc::new);

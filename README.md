@@ -157,6 +157,11 @@ wgpu render target and diff the post-raster image against the decoder output.
 The viewer reports per-quadrant mismatch ratios and will exit with a non-zero
 status if the divergence exceeds the `--render-diff-threshold` (default 1%),
 making it safe to wire into automated checks for viewport regressions.
+Add `--headless` when you only need the decode + verification passes and want
+to skip the winit window entirely (handy for CI or remote agents).
+`tools/grim_viewer.py verify` wraps `cargo run` with the headless
+configuration so automation can trigger a render check without remembering the
+full CLI surface.
 Enable the optional `audio` feature to spin up a rodio output stream so the
 audio plumbing is ready when we begin playing sounds. Run it with:
 
@@ -176,6 +181,10 @@ and scheduler schema changes are caught automatically.
 `grim_viewer` also includes unit coverage for the render diff guard, so
 `cargo test -p grim_viewer` continues to exercise the verification workflow even
 when a GPU isn’t available.
+For an end-to-end pixel diff from automation, run
+```
+tools/grim_viewer.py verify --timeline artifacts/boot_timeline.json
+```
 
 ## Current Focus
 1. Harden the legacy-Lua normaliser so additional constructs keep parsing under
