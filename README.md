@@ -148,6 +148,12 @@ emitted by `_objects.lua`, and the runtime summary captures the state we do
 manage to mutate—active set, queued scripts, Manny's transforms, inventory
 contents, and discovered inventory rooms—so we can diff real Lua behaviour
 against the static analysis while we fill in the missing services.
+Scripts now run on a cooperative coroutine scheduler: `start_script` and
+`single_start_script` launch Lua threads, `break_here` forwards to
+`coroutine.yield`, and the host advances each handle a handful of frames after
+`BOOT`. Long-running trackers such as Manny's `TrackManny`/`WalkManny` loops now
+stay resident with their yield counts so we can flesh out their behaviours
+without forcing the scaffolding to finish immediately.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
@@ -215,7 +221,8 @@ tools/grim_viewer.py verify --use-binary --steam-run --timeline artifacts/boot_t
 
 ## Current Focus
 1. Replace the dialog/music/mouse/UI/menu pref/inventory scaffolds with stateful
-   bindings so Manny's Office menus and overlays operate without stalling.
+   bindings on top of the new coroutine scheduler so Manny's Office menus and
+   overlays operate without stalling.
 2. Harden the legacy-Lua normaliser so additional constructs keep parsing under
    `full_moon`.
 3. Broaden the static simulator's subsystem coverage and regression

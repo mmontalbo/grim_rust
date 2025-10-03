@@ -8,12 +8,14 @@ use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::{normalize_legacy_lua, ResourceGraph};
 use mlua::{
     Error as LuaError, Function, Lua, LuaOptions, MultiValue, RegistryKey, Result as LuaResult,
-    StdLib, Table, Value, Variadic,
+    StdLib, Table, Thread, ThreadStatus, Value, Variadic,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ScriptRecord {
     label: String,
+    thread: Option<RegistryKey>,
+    yields: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +131,8 @@ impl EngineContext {
             handle,
             ScriptRecord {
                 label: label.clone(),
+                thread: None,
+                yields: 0,
             },
         );
         self.log_event(format!("script.start {label} (#{handle})"));
@@ -139,10 +143,48 @@ impl EngineContext {
         self.scripts.values().any(|record| record.label == label)
     }
 
-    fn complete_script(&mut self, handle: u32) {
+    fn attach_script_thread(&mut self, handle: u32, key: RegistryKey) {
+        if let Some(record) = self.scripts.get_mut(&handle) {
+            record.thread = Some(key);
+        }
+    }
+
+    fn script_thread_key(&self, handle: u32) -> Option<&RegistryKey> {
+        self.scripts
+            .get(&handle)
+            .and_then(|record| record.thread.as_ref())
+    }
+
+    fn increment_script_yield(&mut self, handle: u32) {
+        if let Some(record) = self.scripts.get_mut(&handle) {
+            record.yields = record.yields.saturating_add(1);
+        }
+    }
+
+    fn script_yield_count(&self, handle: u32) -> Option<u32> {
+        self.scripts.get(&handle).map(|record| record.yields)
+    }
+
+    fn script_label(&self, handle: u32) -> Option<&str> {
+        self.scripts
+            .get(&handle)
+            .map(|record| record.label.as_str())
+    }
+
+    fn active_script_handles(&self) -> Vec<u32> {
+        self.scripts.keys().copied().collect()
+    }
+
+    fn is_script_running(&self, handle: u32) -> bool {
+        self.scripts.contains_key(&handle)
+    }
+
+    fn complete_script(&mut self, handle: u32) -> Option<RegistryKey> {
         if let Some(record) = self.scripts.remove(&handle) {
             self.log_event(format!("script.complete {} (#{handle})", record.label));
+            return record.thread;
         }
+        None
     }
 
     fn ensure_actor_mut(&mut self, id: &str, label: &str) -> &mut ActorSnapshot {
@@ -342,6 +384,7 @@ pub fn run_boot_sequence(data_root: &Path, verbose: bool) -> Result<()> {
     load_system_script(&lua, data_root)?;
     override_boot_stubs(&lua, context.clone())?;
     call_boot(&lua, context.clone())?;
+    drive_active_scripts(&lua, context.clone(), 8, 32)?;
 
     let snapshot = context.borrow();
     dump_runtime_summary(&snapshot);
@@ -762,7 +805,10 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     globals.set("NukeResources", noop.clone())?;
     globals.set("GetSystemFonts", noop.clone())?;
     globals.set("PreloadCursors", noop.clone())?;
-    globals.set("break_here", noop.clone())?;
+    let break_here = lua
+        .load("return function(...) return coroutine.yield(...) end")
+        .eval::<Function>()?;
+    globals.set("break_here", break_here)?;
     globals.set("HideVerbSkull", noop.clone())?;
     globals.set("MakeCurrentSet", noop.clone())?;
     globals.set("MakeCurrentSetup", noop.clone())?;
@@ -1378,21 +1424,21 @@ fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
     let wait_context = context.clone();
     globals.set(
         "wait_for_script",
-        lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
-            for value in args.iter() {
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            for value in args.into_iter() {
                 match value {
                     Value::Integer(handle) => {
-                        wait_context.borrow_mut().complete_script(*handle as u32);
+                        wait_for_handle(lua_ctx, wait_context.clone(), handle as u32)?;
                     }
                     Value::Number(handle) => {
-                        wait_context.borrow_mut().complete_script(*handle as u32);
+                        wait_for_handle(lua_ctx, wait_context.clone(), handle as u32)?;
                     }
                     Value::Function(func) => {
                         func.call::<_, ()>(MultiValue::new())?;
                     }
                     Value::Table(table) => {
                         if let Ok(func) = table.get::<_, Function>("run") {
-                            func.call::<_, ()>(())?;
+                            func.call::<_, ()>(MultiValue::new())?;
                         }
                     }
                     _ => {}
@@ -2532,7 +2578,10 @@ fn dump_runtime_summary(state: &EngineContext) {
     if !state.scripts.is_empty() {
         println!("  Pending scripts:");
         for (handle, record) in &state.scripts {
-            println!("    - {} (#{handle})", record.label);
+            println!(
+                "    - {} (#{handle}) yields={}",
+                record.label, record.yields
+            );
         }
     }
     if !state.events.is_empty() {
@@ -2561,15 +2610,26 @@ fn create_start_script(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
             state.start_script(label.clone())
         };
         if let Some(func) = extract_function(lua_ctx, callable)? {
+            let thread = lua_ctx.create_thread(func)?;
+            let thread_key = lua_ctx.create_registry_value(thread.clone())?;
+            {
+                let mut state = start_state.borrow_mut();
+                state.attach_script_thread(handle, thread_key);
+            }
             let params: Vec<Value> = args.into_iter().collect();
-            if !params.is_empty() {
-                let mv = MultiValue::from_vec(params);
-                func.call::<_, ()>(mv)?;
-            } else {
-                func.call::<_, ()>(MultiValue::new())?;
+            let initial_args = MultiValue::from_vec(params);
+            resume_script(
+                lua_ctx,
+                start_state.clone(),
+                handle,
+                Some(thread),
+                Some(initial_args),
+            )?;
+        } else {
+            if let Some(key) = start_state.borrow_mut().complete_script(handle) {
+                lua_ctx.remove_registry_value(key)?;
             }
         }
-        start_state.borrow_mut().complete_script(handle);
         Ok(handle)
     })?;
     Ok(func)
@@ -2599,18 +2659,181 @@ fn create_single_start_script(
             state.start_script(label.clone())
         };
         if let Some(func) = extract_function(lua_ctx, callable)? {
+            let thread = lua_ctx.create_thread(func)?;
+            let thread_key = lua_ctx.create_registry_value(thread.clone())?;
+            {
+                let mut state = single_state.borrow_mut();
+                state.attach_script_thread(handle, thread_key);
+            }
             let params: Vec<Value> = args.into_iter().collect();
-            if !params.is_empty() {
-                let mv = MultiValue::from_vec(params);
-                func.call::<_, ()>(mv)?;
-            } else {
-                func.call::<_, ()>(MultiValue::new())?;
+            let initial_args = MultiValue::from_vec(params);
+            resume_script(
+                lua_ctx,
+                single_state.clone(),
+                handle,
+                Some(thread),
+                Some(initial_args),
+            )?;
+        } else {
+            if let Some(key) = single_state.borrow_mut().complete_script(handle) {
+                lua_ctx.remove_registry_value(key)?;
             }
         }
-        single_state.borrow_mut().complete_script(handle);
         Ok(handle)
     })?;
     Ok(func)
+}
+
+enum ScriptStep {
+    Yielded,
+    Completed,
+}
+
+fn resume_script(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    handle: u32,
+    thread_override: Option<Thread>,
+    initial_args: Option<MultiValue>,
+) -> LuaResult<ScriptStep> {
+    let thread = if let Some(thread) = thread_override {
+        thread
+    } else {
+        let thread_value = {
+            let state = context.borrow();
+            if let Some(key) = state.script_thread_key(handle) {
+                lua.registry_value::<Thread>(key)?
+            } else {
+                return Ok(ScriptStep::Completed);
+            }
+        };
+        thread_value
+    };
+
+    if !matches!(thread.status(), ThreadStatus::Resumable) {
+        let key = {
+            let mut state = context.borrow_mut();
+            state.complete_script(handle)
+        };
+        if let Some(key) = key {
+            lua.remove_registry_value(key)?;
+        }
+        return Ok(ScriptStep::Completed);
+    }
+
+    let resume_result = if let Some(args) = initial_args {
+        thread.resume::<_, MultiValue>(args)
+    } else {
+        thread.resume::<_, MultiValue>(MultiValue::new())
+    };
+
+    match resume_result {
+        Ok(_) => match thread.status() {
+            ThreadStatus::Resumable => {
+                context.borrow_mut().increment_script_yield(handle);
+                Ok(ScriptStep::Yielded)
+            }
+            ThreadStatus::Unresumable | ThreadStatus::Error => {
+                let key = {
+                    let mut state = context.borrow_mut();
+                    state.complete_script(handle)
+                };
+                if let Some(key) = key {
+                    lua.remove_registry_value(key)?;
+                }
+                Ok(ScriptStep::Completed)
+            }
+        },
+        Err(LuaError::CoroutineInactive) => {
+            let key = {
+                let mut state = context.borrow_mut();
+                state.complete_script(handle)
+            };
+            if let Some(key) = key {
+                lua.remove_registry_value(key)?;
+            }
+            Ok(ScriptStep::Completed)
+        }
+        Err(err) => {
+            let label = {
+                let state = context.borrow();
+                state
+                    .script_label(handle)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("#{handle}"))
+            };
+            let message = err.to_string();
+            context
+                .borrow_mut()
+                .log_event(format!("script.error {label}: {message}"));
+            let key = {
+                let mut state = context.borrow_mut();
+                state.complete_script(handle)
+            };
+            if let Some(key) = key {
+                lua.remove_registry_value(key)?;
+            }
+            Err(err)
+        }
+    }
+}
+
+fn wait_for_handle(lua: &Lua, context: Rc<RefCell<EngineContext>>, handle: u32) -> LuaResult<()> {
+    const MAX_STEPS: u32 = 10_000;
+    let mut steps = 0;
+    while context.borrow().is_script_running(handle) {
+        resume_script(lua, context.clone(), handle, None, None)?;
+        steps += 1;
+        if steps >= MAX_STEPS {
+            let label = {
+                let state = context.borrow();
+                state
+                    .script_label(handle)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("#{handle}"))
+            };
+            return Err(LuaError::external(format!(
+                "wait_for_script exceeded {MAX_STEPS} resumes for {label}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn drive_active_scripts(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    max_passes: usize,
+    max_yields_per_script: u32,
+) -> LuaResult<()> {
+    for _ in 0..max_passes {
+        let handles = {
+            let state = context.borrow();
+            state.active_script_handles()
+        };
+        if handles.is_empty() {
+            break;
+        }
+        let mut progressed = false;
+        for handle in handles {
+            let yield_count = {
+                let state = context.borrow();
+                state.script_yield_count(handle).unwrap_or(0)
+            };
+            if yield_count >= max_yields_per_script {
+                continue;
+            }
+            match resume_script(lua, context.clone(), handle, None, None)? {
+                ScriptStep::Yielded | ScriptStep::Completed => {
+                    progressed = true;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn extract_function<'lua>(lua: &'lua Lua, value: Value<'lua>) -> LuaResult<Option<Function<'lua>>> {

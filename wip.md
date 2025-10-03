@@ -45,11 +45,15 @@
   comparison against the static analysis. `_colors`, `_sfx`, and `_controls`
   now install host-provided scaffolds, while the richer menu helpers remain
   stubbed so verbose runs still highlight the next bindings we need to land.
+  `start_script`/`single_start_script` now spawn cooperative Lua threads,
+  `break_here` yields through `coroutine.yield`, and the host advances a few
+  frames post-BOOT so long-running trackers stay resident with their yield
+  counts for future bindings.
 
 ## Next Steps
 1. Unblock the remaining boot scaffolding (menu helpers, cut-scene services,
-   control handlers) so the embedded runtime can march further into Manny's
-   Office.
+   control handlers) within the coroutine host so the embedded runtime can
+   march further into Manny's Office.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
@@ -98,4 +102,6 @@
   `_music.lua`, `_mouse.lua`, `_ui.lua`, the menu helpers, and the inventory
   variants inside the embedded host so Manny boots with the real tables; log
   actor/object/inventory/inventory-room events to map the dialog, music, UI,
-  and inventory services we still need to implement for real gameplay.
+  and inventory services we still need to implement for real gameplay. Cooperative
+  threads keep the long-running Manny trackers alive so future bindings can
+  observe their loops.
