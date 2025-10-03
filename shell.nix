@@ -54,11 +54,41 @@ in pkgs.mkShell {
     rustfmt
     rust-analyzer
     pkg-config
-    alsaLib
+    alsa-lib
     vulkan-loader
+    wayland
+    libxkbcommon
+    xorg.libX11
+    xorg.libXcursor
+    xorg.libXi
+    xorg.libXrandr
+    xorg.libxcb
+    xorg.libXrender
+    xorg.libXext
+    xorg.libXfixes
+    xorg.libXinerama
+    xorg.libXxf86vm
+    xorg.libXtst
   ];
 
   shellHook = ''
+    export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
+      pkgs."vulkan-loader"
+      pkgs.wayland
+      pkgs.libxkbcommon
+      pkgs.xorg.libX11
+      pkgs.xorg.libXcursor
+      pkgs.xorg.libXi
+      pkgs.xorg.libXrandr
+      pkgs.xorg.libxcb
+      pkgs.xorg.libXrender
+      pkgs.xorg.libXext
+      pkgs.xorg.libXfixes
+      pkgs.xorg.libXinerama
+      pkgs.xorg.libXxf86vm
+      pkgs.xorg.libXtst
+    ]}:$LD_LIBRARY_PATH"
+
     if [ -z "$GRIM_INSTALL_PATH" ]; then
       export GRIM_INSTALL_PATH="$HOME/.local/share/Steam/steamapps/common/Grim Fandango Remastered"
     fi

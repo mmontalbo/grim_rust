@@ -14,8 +14,9 @@ grim_formats = { path = "../grim_formats" }
 pollster = "0.3"
 rodio = { version = "0.17", optional = true }
 wgpu = { version = "0.20", features = ["wgsl"] }
-winit = "0.29"
+winit = { version = "0.29", features = ["x11", "wayland"] }
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytemuck = { version = "1.14", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
