@@ -572,7 +572,7 @@ fn collect_decompiled_lua_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn normalize_legacy_lua(source: &str) -> String {
+pub fn normalize_legacy_lua(source: &str) -> String {
     #[derive(Copy, Clone)]
     enum State {
         Normal,
