@@ -22,12 +22,15 @@
 - `grim_engine` consumes the shared analysis layer, materialises the stage-aware
   boot timeline, and produces an `EngineState` snapshot plus optional JSON
   exports.
+- `grim_viewer` uses the asset manifest to stand up a wgpu preview window, ready
+  to swap in real BM decoding once the loader lands.
 
 ## Next Steps
 1. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
 2. Expand unit tests for both the simulator and the LAB parser so regressions
    surface quickly.
-3. Expand the host prototype: persist boot manifests, expose state deltas per
-   subsystem, and outline the services (script scheduler, cutscene playback,
-   save/load) required for a full Rust runtime.
+3. Expand the host prototype and viewer together: persist boot manifests,
+   expose per-subsystem deltas, decode a real Manny's Office asset, and outline
+   the services (script scheduler, cutscene playback, save/load) required for a
+   full Rust runtime.

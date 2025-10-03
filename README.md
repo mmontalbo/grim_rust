@@ -16,6 +16,7 @@ behaviour in Rust step by step.
 - `grim_formats/` – low-level format helpers (currently includes the LAB
   archive reader and utilities).
 - `grim_engine/` – prototype host that consumes the shared analysis APIs.
+- `grim_viewer/` – wgpu/winit spike that previews assets via manifests.
 
 ## Development Environment
 Enter the Nix shell to get the required tooling (Rust, scummvm-tools, Lua 5.1,
@@ -115,6 +116,17 @@ archives and reports whether the Manny's Office assets we rely on are present.
 `--asset-manifest <file>` writes that scan as JSON so other tools can reuse
 offsets/sizes without rerunning lookups, and `--extract-assets <dir>` copies the
 matching binaries into a workspace folder for manual inspection.
+
+## Viewer Spike
+`grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
+emitted by `grim_engine`, and reads assets straight from their LAB offsets to
+render a simple RGBA preview (instead of a blank clear colour). Enable the
+optional `audio` feature to spin up a rodio output stream so the audio plumbing
+is ready when we begin playing sounds. Run it with:
+
+```bash
+cargo run -p grim_viewer -- --manifest artifacts/manny_office_assets.json --asset mo_tube_can_comp.bm
+```
 
 ## Testing
 Unit coverage lives in the analysis crate. Run the suite with:

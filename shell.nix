@@ -54,6 +54,8 @@ in pkgs.mkShell {
     rustfmt
     rust-analyzer
     pkg-config
+    alsaLib
+    vulkan-loader
   ];
 
   shellHook = ''

@@ -3,5 +3,6 @@ members = [
   "grim_analysis",
   "grim_formats",
   "grim_engine",
+  "grim_viewer",
 ]
 resolver = "2"
