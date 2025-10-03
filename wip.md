@@ -53,7 +53,10 @@
 ## Next Steps
 1. Flesh out the boot-time trackers (visibility queries, sector lookups,
    menu helpers, cut-scene services, control handlers) inside the coroutine
-   host so the embedded runtime can march further into Manny's Office.
+   host so the embedded runtime can march further into Manny's Office. With
+   camera/hot sector queries faked in Rust, the next blockers are wiring
+   `Head_Control`/dialog state and feeding real visibility data back into the
+   loop so the trackers stop idling.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
@@ -110,3 +113,7 @@
   Manny's set scaffolding (`setups`, `current_setup`, `cameraman`) plus engine
   helpers (`SetActorConstrain`, `GetVisibleThings`) so those trackers yield
   cleanly while we layer in real visibility/camera behaviour.
+- Sector tracker: `Actor:find_sector_type`/`find_sector_name` now
+  return canned camera and hotspot hits for Manny, record the requested kinds
+  in the event log, and surface the latest sectors in the runtime summary so
+  `FINALIZEBOOT` can pick `mo_mcecu` without the original geometry tables.

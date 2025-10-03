@@ -45,6 +45,23 @@ struct Vec3 {
     z: f32,
 }
 
+#[derive(Debug, Clone)]
+struct SectorHit {
+    id: i32,
+    name: String,
+    kind: String,
+}
+
+impl SectorHit {
+    fn new(id: i32, name: impl Into<String>, kind: impl Into<String>) -> Self {
+        SectorHit {
+            id,
+            name: name.into(),
+            kind: kind.into(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct ActorSnapshot {
     name: String,
@@ -55,6 +72,7 @@ struct ActorSnapshot {
     rotation: Option<Vec3>,
     is_selected: bool,
     handle: u32,
+    sectors: BTreeMap<String, SectorHit>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -292,6 +310,41 @@ impl EngineContext {
     fn register_inventory_room(&mut self, name: &str) {
         if self.inventory_rooms.insert(name.to_string()) {
             self.log_event(format!("inventory.room {name}"));
+        }
+    }
+
+    fn record_sector_hit(&mut self, id: &str, label: &str, hit: SectorHit) {
+        let actor = self.ensure_actor_mut(id, label);
+        actor.sectors.insert(hit.kind.clone(), hit);
+    }
+
+    fn default_sector_hit(&self, actor_id: &str, requested_kind: Option<&str>) -> SectorHit {
+        let normalized = requested_kind
+            .map(|kind| kind.trim().to_ascii_lowercase())
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or_else(|| "walk".to_string());
+        if actor_id.eq_ignore_ascii_case("manny") {
+            match normalized.as_str() {
+                "camera" | "2" => SectorHit::new(6000, "mo_mcecu", "CAMERA"),
+                "hot" | "1" => SectorHit::new(6001, "mo_ddtws", "HOT"),
+                "walk" | "0" => SectorHit::new(6002, "mo_walk_default", "WALK"),
+                _ => SectorHit::new(
+                    6003,
+                    format!("manny_sector_{}", normalized),
+                    normalized.to_ascii_uppercase(),
+                ),
+            }
+        } else {
+            let kind = normalized.to_ascii_uppercase();
+            SectorHit::new(1000, format!("{}_sector", actor_id), kind)
+        }
+    }
+
+    fn evaluate_sector_name(&self, actor_id: &str, query: &str) -> bool {
+        if actor_id.eq_ignore_ascii_case("manny") {
+            matches!(query, "manny" | "office" | "desk")
+        } else {
+            false
         }
     }
 
@@ -648,6 +701,10 @@ fn install_controls_scaffold(
     globals.set("MODE_BACKGROUND", 3)?;
     globals.set("CONTROL_MODE", 0)?;
 
+    globals.set("WALK", 0)?;
+    globals.set("HOT", 1)?;
+    globals.set("CAMERA", 2)?;
+
     let system_controls = lua.create_table()?;
     let fallback_context = context.clone();
     let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
@@ -890,6 +947,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     globals.set("START_CUT_SCENE", noop.clone())?;
     globals.set("END_CUT_SCENE", noop.clone())?;
     globals.set("wait_for_message", noop.clone())?;
+    globals.set("IsMessageGoing", lua.create_function(|_, ()| Ok(false))?)?;
     globals.set(
         "Load",
         lua.create_function(|_, _args: Variadic<Value>| Ok(()))?,
@@ -1243,6 +1301,64 @@ fn install_actor_methods(
         })?,
     )?;
 
+    let sector_type_context = context.clone();
+    actor.set(
+        "find_sector_type",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, label) = actor_identity(&table)?;
+                let requested = values.get(0).and_then(|value| value_to_string(value));
+                let request_label = requested.clone().unwrap_or_else(|| "<nil>".to_string());
+                let hit = {
+                    let mut ctx = sector_type_context.borrow_mut();
+                    let hit = ctx.default_sector_hit(&id, requested.as_deref());
+                    ctx.log_event(format!(
+                        "actor.sector {} {} (req={}) -> {}",
+                        id, hit.kind, request_label, hit.name
+                    ));
+                    ctx.record_sector_hit(&id, &label, hit.clone());
+                    hit
+                };
+                let values = vec![
+                    Value::Integer(hit.id as i64),
+                    Value::String(lua_ctx.create_string(&hit.name)?),
+                    Value::String(lua_ctx.create_string(&hit.kind)?),
+                ];
+                return Ok(MultiValue::from_vec(values));
+            }
+            Ok(MultiValue::new())
+        })?,
+    )?;
+
+    let sector_name_context = context.clone();
+    actor.set(
+        "find_sector_name",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, _label) = actor_identity(&table)?;
+                let query = values
+                    .get(0)
+                    .and_then(|value| value_to_string(value))
+                    .unwrap_or_default();
+                let result = {
+                    let mut ctx = sector_name_context.borrow_mut();
+                    let hit = ctx.evaluate_sector_name(&id, &query);
+                    ctx.log_event(format!(
+                        "actor.sector_name {} {} -> {}",
+                        id,
+                        query,
+                        if hit { "true" } else { "false" }
+                    ));
+                    hit
+                };
+                return Ok(result);
+            }
+            Ok(false)
+        })?,
+    )?;
+
     let costume_context = context.clone();
     actor.set(
         "set_costume",
@@ -1330,6 +1446,10 @@ fn build_actor_table<'lua>(
     actor_table.set("name", label.clone())?;
     actor_table.set("id", id.clone())?;
     actor_table.set("hActor", handle as i64)?;
+
+    actor_table.set("is_running", false)?;
+    actor_table.set("is_backward", false)?;
+    actor_table.set("no_idle_head", false)?;
 
     let actor_proto: Table = lua_ctx.globals().get("Actor")?;
     actor_table.set("parent", actor_proto.clone())?;
@@ -1428,7 +1548,22 @@ fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
 
     let mo: Table = globals.get("mo")?;
     mo.set("setFile", "mo.set")?;
-    mo.set("setups", lua.create_table()?)?;
+    let setups = lua.create_table()?;
+    for name in [
+        "mo_ddtws",
+        "mo_ddtws2",
+        "mo_winws",
+        "mo_winws2",
+        "mo_comin",
+        "mo_cornr",
+        "overhead",
+        "mo_mcecu",
+        "mo_mnycu",
+    ] {
+        setups.set(name, name)?;
+    }
+    mo.set("cheat_boxes", lua.create_table()?)?;
+    mo.set("setups", setups)?;
     let current_setup_ctx = context.clone();
     mo.set(
         "current_setup",
@@ -2593,6 +2728,11 @@ fn dump_runtime_summary(state: &EngineContext) {
                 "  Manny rotation: ({:.3}, {:.3}, {:.3})",
                 rot.x, rot.y, rot.z
             );
+        }
+        if !manny.sectors.is_empty() {
+            for (kind, hit) in &manny.sectors {
+                println!("  Manny sector {kind}: {} (id {})", hit.name, hit.id);
+            }
         }
     }
     if !state.inventory.is_empty() {
