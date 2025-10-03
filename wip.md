@@ -19,11 +19,15 @@
   engine's registry mutations (e.g., `GrimLastSet`).
 - `grim_formats` now exposes a reusable `LabArchive` reader and `lab_dump`
   example so we can inspect LAB contents without shell scripts.
+- `grim_engine` consumes the shared analysis layer, materialises the stage-aware
+  boot timeline, and produces an `EngineState` snapshot plus optional JSON
+  exports.
 
 ## Next Steps
 1. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
 2. Expand unit tests for both the simulator and the LAB parser so regressions
    surface quickly.
-3. Sketch the services a Rust host will need—script scheduler, cutscene
-   playback, save/load—before we begin porting logic out of Lua.
+3. Expand the host prototype: persist boot manifests, expose state deltas per
+   subsystem, and outline the services (script scheduler, cutscene playback,
+   save/load) required for a full Rust runtime.

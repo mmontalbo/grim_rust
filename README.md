@@ -15,6 +15,7 @@ behaviour in Rust step by step.
   legacy syntax, and reports on the boot flow.
 - `grim_formats/` – low-level format helpers (currently includes the LAB
   archive reader and utilities).
+- `grim_engine/` – prototype host that consumes the shared analysis APIs.
 
 ## Development Environment
 Enter the Nix shell to get the required tooling (Rust, scummvm-tools, Lua 5.1,
@@ -90,6 +91,30 @@ cargo run -p grim_formats --bin lab_dump -- dev-install/DATA000.LAB | head
 The `LabArchive` API lets other tools map entries, stream individual assets, or
 extract them to disk. Unit tests cover the parser with synthetic archives so we
 notice regressions before pointing at the real game data.
+
+## Host Prototype
+`grim_engine` exercises the exported analysis APIs without going through the CLI.
+It loads the extracted data, runs the boot simulation, and uses the stage-aware
+`BootTimeline` to print a concise summary of the opening set. Each hook reports
+its boot-stage index, the actors it spawns, subsystems it touches, and any
+cutscenes/scripts/movies it queues. Try it with:
+
+```bash
+cargo run -p grim_engine -- --data-root extracted/DATA000 --verbose
+```
+
+Use `--verbose` to emit every hook in Manny's office; omit it for a compact
+overview that lists the first few entries and a roll-up of queued cutscenes,
+helper scripts, and fullscreen movies. Pass `--timeline-json timeline.json` to
+persist a prettified export that bundles both the boot stages and the resulting
+`EngineState`, giving downstream tooling a single manifest with hook
+simulations, prerequisites, and the post-boot snapshot.
+
+When pointed at a retail install (`--lab-root`), the host probes the LAB
+archives and reports whether the Manny's Office assets we rely on are present.
+`--asset-manifest <file>` writes that scan as JSON so other tools can reuse
+offsets/sizes without rerunning lookups, and `--extract-assets <dir>` copies the
+matching binaries into a workspace folder for manual inspection.
 
 ## Testing
 Unit coverage lives in the analysis crate. Run the suite with:

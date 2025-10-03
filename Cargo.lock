@@ -227,6 +227,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "grim_engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "grim_analysis",
+ "grim_formats",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "grim_formats"
 version = "0.1.0"
 dependencies = [
