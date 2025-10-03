@@ -134,19 +134,20 @@ drifts out of sync with downstream consumers.
 
 Experimental Lua execution is available via `--run-lua`. This spins up an
 embedded `mlua` interpreter, wires a minimal `EngineContext` through the shared
-analysis APIs, and now lets the stock `_actors` and `_objects` scaffolding run in
-place. The host registers actors with stable handles, mirrors Manny's boot-time
-set switches, and records actor/object mutations as the scripts execute.
-Verbose runs (`--run-lua --verbose`) echo each loaded script plus the
+analysis APIs, and now lets the boot-time scaffolding run in place. The host
+registers actors with stable handles, mirrors Manny's boot-time set switches,
+records actor/object mutations, and tracks which inventory variants the scripts
+register. Verbose runs (`--run-lua --verbose`) echo each loaded script plus the
 engine-side events (actor selection, Manny's position/costume changes, object
-state updates, inventory mutations). The host now handles the early boot
-plumbing—`_colors`, `_sfx`, and `_controls` install Lua-side scaffolds via
-Rust—but still stubs the richer menu helpers, so expect it to pause once those
-bindings are required. Manny's Office boots using the real object tables
+state updates, inventory/inventory-room mutations). The host intercepts the
+early boot plumbing—`_colors`, `_sfx`, `_controls`, `_dialog`, `_music`,
+`_mouse`, `_ui`, and the menu helpers such as `menu_loading`, `menu_prefs`, and
+the various `*_inv` scripts—installing Rust scaffolds that log each interaction
+while returning safe defaults. Manny's Office boots using the real object tables
 emitted by `_objects.lua`, and the runtime summary captures the state we do
 manage to mutate—active set, queued scripts, Manny's transforms, inventory
-contents—so we can diff real Lua behaviour against the static analysis while we
-fill in the missing services.
+contents, and discovered inventory rooms—so we can diff real Lua behaviour
+against the static analysis while we fill in the missing services.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
@@ -213,8 +214,8 @@ tools/grim_viewer.py verify --use-binary --steam-run --timeline artifacts/boot_t
 ```
 
 ## Current Focus
-1. Expand the embedded runtime bindings (menus, controls, colour/sfx globals)
-   so Manny's Office can progress past the current stubs.
+1. Replace the dialog/music/mouse/UI/menu pref/inventory scaffolds with stateful
+   bindings so Manny's Office menus and overlays operate without stalling.
 2. Harden the legacy-Lua normaliser so additional constructs keep parsing under
    `full_moon`.
 3. Broaden the static simulator's subsystem coverage and regression

@@ -66,6 +66,7 @@ struct EngineContext {
     available_sets: BTreeMap<String, SetDescriptor>,
     loaded_sets: BTreeSet<String>,
     inventory: BTreeSet<String>,
+    inventory_rooms: BTreeSet<String>,
     actor_labels: BTreeMap<String, String>,
     actor_handles: BTreeMap<u32, String>,
     next_actor_handle: u32,
@@ -97,6 +98,7 @@ impl EngineContext {
             available_sets,
             loaded_sets: BTreeSet::new(),
             inventory: BTreeSet::new(),
+            inventory_rooms: BTreeSet::new(),
             actor_labels: BTreeMap::new(),
             actor_handles: BTreeMap::new(),
             next_actor_handle: 1100,
@@ -219,6 +221,12 @@ impl EngineContext {
     fn add_inventory_item(&mut self, name: &str) {
         if self.inventory.insert(name.to_string()) {
             self.log_event(format!("inventory.add {name}"));
+        }
+    }
+
+    fn register_inventory_room(&mut self, name: &str) {
+        if self.inventory_rooms.insert(name.to_string()) {
+            self.log_event(format!("inventory.room {name}"));
         }
     }
 
@@ -413,6 +421,22 @@ fn handle_special_dofile<'lua>(
                 install_controls_scaffold(lua, context, system_key.clone())?;
                 return Ok(Some(Value::Nil));
             }
+            "_dialog.lua" | "_dialog.decompiled.lua" => {
+                install_dialog_scaffold(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "_music.lua" | "_music.decompiled.lua" => {
+                install_music_scaffold(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "_mouse.lua" | "_mouse.decompiled.lua" => {
+                install_mouse_scaffold(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "_ui.lua" | "_ui.decompiled.lua" => {
+                install_ui_scaffold(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
             "_actors.lua" | "_actors.decompiled.lua" => {
                 install_actor_scaffold(lua, context, system_key.clone())?;
                 return Ok(Some(Value::Nil));
@@ -437,7 +461,27 @@ fn handle_special_dofile<'lua>(
                 install_menu_remap_stub(lua, context.clone()).map_err(LuaError::external)?;
                 return Ok(Some(Value::Nil));
             }
+            "menu_prefs.lua" | "menu_prefs.decompiled.lua" => {
+                install_menu_prefs_stub(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
             _ => {}
+        }
+
+        if let Some(base) = lower
+            .strip_suffix(".decompiled.lua")
+            .or_else(|| lower.strip_suffix(".lua"))
+        {
+            if base.ends_with("_inv") {
+                install_inventory_variant_stub(lua, context.clone(), base)
+                    .map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+
+            if base == "mn_scythe" {
+                install_manny_scythe_stub(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
         }
     }
     Ok(None)
@@ -1685,6 +1729,302 @@ fn install_menu_remap_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     Ok(())
 }
 
+fn install_menu_prefs_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("menu_prefs"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let table = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("menu_prefs.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    table.set_metatable(Some(metatable));
+    globals.set("menu_prefs", table)?;
+    Ok(())
+}
+
+fn install_dialog_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("dialog"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let dialog = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("dialog.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    dialog.set_metatable(Some(metatable));
+
+    globals.set("dialog", dialog.clone())?;
+
+    // Provide Sentence table placeholder so scripts referencing dialog prototypes still work.
+    if matches!(globals.get::<_, Value>("Sentence"), Ok(Value::Nil) | Err(_)) {
+        let sentence_context = context.clone();
+        let noop = lua.create_function(move |_, _: Variadic<Value>| {
+            sentence_context
+                .borrow_mut()
+                .log_event("dialog.sentence".to_string());
+            Ok(())
+        })?;
+        globals.set("Sentence", noop)?;
+    }
+
+    Ok(())
+}
+
+fn install_music_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("music"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let music = lua.create_table()?;
+
+    let start_context = context.clone();
+    music.set(
+        "play",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let track = args
+                .get(0)
+                .and_then(|value| value_to_string(value))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            start_context
+                .borrow_mut()
+                .log_event(format!("music.play {track}"));
+            Ok(())
+        })?,
+    )?;
+
+    let stop_context = context.clone();
+    music.set(
+        "stop",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            stop_context.borrow_mut().log_event("music.stop");
+            Ok(())
+        })?,
+    )?;
+
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("music.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    music.set_metatable(Some(metatable));
+
+    globals.set("music", music)?;
+    Ok(())
+}
+
+fn install_mouse_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("mouse"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let mouse = lua.create_table()?;
+
+    let mode_context = context.clone();
+    mouse.set(
+        "set_mode",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mode = args
+                .get(0)
+                .and_then(|value| value_to_string(value))
+                .unwrap_or_else(|| "<none>".to_string());
+            mode_context
+                .borrow_mut()
+                .log_event(format!("mouse.set_mode {mode}"));
+            Ok(())
+        })?,
+    )?;
+
+    let show_context = context.clone();
+    mouse.set(
+        "show",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            show_context.borrow_mut().log_event("mouse.show");
+            Ok(())
+        })?,
+    )?;
+
+    let hide_context = context.clone();
+    mouse.set(
+        "hide",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            hide_context.borrow_mut().log_event("mouse.hide");
+            Ok(())
+        })?,
+    )?;
+
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("mouse.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    mouse.set_metatable(Some(metatable));
+
+    globals.set("mouse", mouse)?;
+    Ok(())
+}
+
+fn install_ui_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("UI"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let ui = lua.create_table()?;
+    ui.set("screens", lua.create_table()?)?;
+
+    let screen_ctor_context = context.clone();
+    ui.set(
+        "create_screen",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let name = args
+                .get(0)
+                .and_then(|value| value_to_string(value))
+                .unwrap_or_else(|| "anonymous".to_string());
+            screen_ctor_context
+                .borrow_mut()
+                .log_event(format!("ui.screen.create {name}"));
+            let table = lua_ctx.create_table()?;
+            let fallback_context = screen_ctor_context.clone();
+            let fallback =
+                lua_ctx.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+                    if let Value::String(method) = key {
+                        fallback_context
+                            .borrow_mut()
+                            .log_event(format!("ui.screen.stub {}", method.to_str()?));
+                    }
+                    let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+                    Ok(Value::Function(noop))
+                })?;
+            let metatable = lua_ctx.create_table()?;
+            metatable.set("__index", fallback)?;
+            table.set_metatable(Some(metatable));
+            Ok(table)
+        })?,
+    )?;
+
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("ui.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    ui.set_metatable(Some(metatable));
+
+    globals.set("UI", ui)?;
+
+    Ok(())
+}
+
+fn install_inventory_variant_stub(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    base: &str,
+) -> Result<()> {
+    let globals = lua.globals();
+    let room_id = base
+        .split(&['\\', '/'][..])
+        .last()
+        .unwrap_or(base)
+        .to_string();
+    context.borrow_mut().register_inventory_room(&room_id);
+
+    // expose a stub table under the global named after the script (e.g., mn_inv)
+    let global_name = room_id.replace('.', "_");
+
+    if !matches!(
+        globals.get::<_, Value>(global_name.as_str()),
+        Ok(Value::Table(_))
+    ) {
+        let table = lua.create_table()?;
+        let fallback_context = context.clone();
+        let fallback_name = global_name.clone();
+        let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+            if let Value::String(method) = key {
+                fallback_context.borrow_mut().log_event(format!(
+                    "inventory.variant.stub {}.{}",
+                    fallback_name,
+                    method.to_str()?
+                ));
+            }
+            let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+            Ok(Value::Function(noop))
+        })?;
+        let metatable = lua.create_table()?;
+        metatable.set("__index", fallback)?;
+        table.set_metatable(Some(metatable));
+        globals.set(global_name, table)?;
+    }
+
+    Ok(())
+}
+
+fn install_manny_scythe_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("mn_scythe"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let table = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("mn_scythe.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    table.set_metatable(Some(metatable));
+    globals.set("mn_scythe", table)?;
+    Ok(())
+}
+
 fn install_menu_constants(lua: &Lua) -> Result<()> {
     let globals = lua.globals();
     globals.set("CACHE_PERSISTENT", 2)?;
@@ -2050,6 +2390,16 @@ fn dump_runtime_summary(state: &EngineContext) {
             .collect::<Vec<_>>()
             .join(", ");
         println!("  Inventory: {}", display);
+    }
+    if !state.inventory_rooms.is_empty() {
+        let mut rooms: Vec<_> = state.inventory_rooms.iter().collect();
+        rooms.sort();
+        let display = rooms
+            .iter()
+            .map(|room| room.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  Inventory rooms: {}", display);
     }
     if !state.scripts.is_empty() {
         println!("  Pending scripts:");

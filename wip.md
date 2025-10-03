@@ -94,7 +94,8 @@
   wraps the viewer in headless mode through `steam-run`, so CI (or this
   assistant) can diff decoded vs rendered frames without a real window while
   borrowing Steam's GPU runtime.
-- Runtime spike: allow `_actors.lua` and `_objects.lua` to execute inside the
-  embedded host so Manny boots with the real object tables; log the resulting
-  actor/object mutations to guide the next round of bindings for menu helpers
-  and control globals.
+- Runtime spike: intercept `_actors.lua`, `_objects.lua`, `_dialog.lua`,
+  `_music.lua`, `_mouse.lua`, `_ui.lua`, the menu helpers, and the inventory
+  variants inside the embedded host so Manny boots with the real tables; log
+  actor/object/inventory/inventory-room events to map the dialog, music, UI,
+  and inventory services we still need to implement for real gameplay.
