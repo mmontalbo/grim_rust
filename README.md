@@ -147,6 +147,16 @@ coloured markers (green/blue for supporting casts, red for the current
 selection), giving a quick sanity check that the static simulator and manifest
 data line up with our spatial expectations while we work toward full room
 geometry and rendering.
+Add `--dump-frame <png>` to export the decoded bitmap to disk before the viewer
+boots; the command prints basic luminance statistics alongside width/height so
+you can confirm the codec 3 payloads expand into real imagery even on setups
+where winit cannot create a window.
+Pair it with `--dump-render <png>` (or the shorthand `--verify-render` when you
+only need the comparison) to execute the full-screen quad through a headless
+wgpu render target and diff the post-raster image against the decoder output.
+The viewer reports per-quadrant mismatch ratios and will exit with a non-zero
+status if the divergence exceeds the `--render-diff-threshold` (default 1%),
+making it safe to wire into automated checks for viewport regressions.
 Enable the optional `audio` feature to spin up a rodio output stream so the
 audio plumbing is ready when we begin playing sounds. Run it with:
 
@@ -163,6 +173,9 @@ cargo test --manifest-path grim_analysis/Cargo.toml
 
 The engine crate reuses the real Manny fixtures during `cargo test` so timeline
 and scheduler schema changes are caught automatically.
+`grim_viewer` also includes unit coverage for the render diff guard, so
+`cargo test -p grim_viewer` continues to exercise the verification workflow even
+when a GPU isn’t available.
 
 ## Current Focus
 1. Harden the legacy-Lua normaliser so additional constructs keep parsing under

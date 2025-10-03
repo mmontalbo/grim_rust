@@ -60,6 +60,16 @@
   dictionary) so the Manny's Office camera plates render from the LAB archives
   without relying on pre-baked PNGs. Seed subsequent animation frames with the
   previous frame's pixels to satisfy the differential encodes used by overlays.
+- PNG dump: `grim_viewer --dump-frame <path>` exports the decoded classic frame
+  as a PNG and reports luminance coverage per quadrant so we can validate codec
+  3 output even on machines where winit can't open a window or captures are
+  needed for automated comparisons.
+- Render verification: `grim_viewer --verify-render` runs the same fullscreen
+  quad through a headless wgpu render target, diffing the output against the
+  decoder result (use `--dump-render <path>` alongside it if you want the PNG).
+  The CLI reports total/quadrant mismatch ratios and exits non-zero when they
+  exceed `--render-diff-threshold` (default 1%), so diagonal clipping or
+  viewport bugs surface automatically in scripts/CI.
 - Timeline link: read the default `mo_mcecu` setup selection from the boot
   timeline so the viewer knows which background to load first without hard
   coding the index, and surface the boot-time actors in the viewer so we can
@@ -67,3 +77,9 @@
 - Viewer spike: add a simple full-screen quad render path that blits the decoded
   background while we work toward real room geometry, and overlay actor
   placement markers derived from the new replay snapshot data.
+- Fullscreen shader fix: correct the UV mapping on the blit triangle so Manny's
+  Office backgrounds render at full scale, removing the lower-corner zoom seen
+  earlier and aligning the PNG dump with the raw decoder output.
+- Test hook: lightweight unit tests exercise the render-diff guard so
+  `cargo test -p grim_viewer` keeps the verification threshold and failure
+  messaging honest even on headless machines.
