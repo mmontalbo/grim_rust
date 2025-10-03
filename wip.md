@@ -38,6 +38,13 @@
   `--simulate-scheduler` switch replays the boot queues using that iterator so
   we can reason about execution order without Lua, and `--scheduler-json`
   persists the exact boot queue order for downstream tooling.
+- Embedded Lua host: `grim_engine --run-lua` now boots an `mlua` VM backed by a
+  shared `EngineContext`, tracking Manny's selection, set switches, and starter
+  scripts. The host skips legacy scaffolding (`setfallback`, `_actors`, menu
+  helpers) until the corresponding Rust services land, logging each skipped file
+  so we know which bindings to implement next. Manny's transforms and inventory
+  changes now surface in the runtime summary even when the menu scripts bail
+  early.
 
 ## Next Steps
 1. Feed the new marker overlay data back into `grim_engine` (e.g., emit a

@@ -132,6 +132,18 @@ under `grim_engine/tests/fixtures` exercise both exports using the real Manny
 bootstrap data, so schema changes trip a failing test before the CLI output
 drifts out of sync with downstream consumers.
 
+Experimental Lua execution is available via `--run-lua`. This spins up an
+embedded `mlua` interpreter, wires a minimal `EngineContext` through the
+existing boot analysis APIs, and records actor/set mutations as the scripts run.
+Verbose runs (`--run-lua --verbose`) echo every loaded script plus the
+engine-side events (actor selection, Manny's position/costume changes, inventory
+mutations). The host currently skips legacy scaffolding such as
+`setfallback.lua` and `_actors.lua` until the matching Rust services land, so
+expect the mode to bail out once the menu boot scripts request functionality we
+have not reimplemented yet. The summary still captures the state we do manage to
+mutate—active set, queued scripts, Manny's transforms—so we can diff real Lua
+behaviour against the static analysis when filling in the missing services.
+
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
 emitted by `grim_engine`, and reads assets straight from their LAB offsets to
