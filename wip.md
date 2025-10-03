@@ -62,6 +62,9 @@
    without parsing console output.
 3. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
+4. Stub the remaining engine globals that `_sets` expects (e.g., `system_prefs:read`,
+   `footsteps`, `PutActorInSet`) so `CommonEnter` can finish booting Manny's Office.
+
 
 ## Current Iteration — Manny's Office Prototype
 - Objective: render an authentic Manny's Office background using the classic
@@ -117,3 +120,8 @@
   return canned camera and hotspot hits for Manny, record the requested kinds
   in the event log, and surface the latest sectors in the runtime summary so
   `FINALIZEBOOT` can pick `mo_mcecu` without the original geometry tables.
+- Set hook: wrap `Set.create` at runtime so every set table inherits the stock
+  methods; Manny now transitions into `mo.lua` with the real `CommonEnter`
+  flow before stalling on missing globals. Boot currently stops once
+  `_sets` looks for extras such as `system_prefs:read`, `footsteps`, and
+  other legacy helpers we still need to stub out.
