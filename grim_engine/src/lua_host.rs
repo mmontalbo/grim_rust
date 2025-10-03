@@ -401,6 +401,18 @@ fn handle_special_dofile<'lua>(
         let lower = filename.to_ascii_lowercase();
         match lower.as_str() {
             "setfallback.lua" => return Ok(Some(Value::Nil)),
+            "_colors.lua" | "_colors.decompiled.lua" => {
+                install_color_constants(lua)?;
+                return Ok(Some(Value::Nil));
+            }
+            "_sfx.lua" | "_sfx.decompiled.lua" => {
+                install_sfx_scaffold(lua, context.clone())?;
+                return Ok(Some(Value::Nil));
+            }
+            "_controls.lua" | "_controls.decompiled.lua" => {
+                install_controls_scaffold(lua, context, system_key.clone())?;
+                return Ok(Some(Value::Nil));
+            }
             "_actors.lua" | "_actors.decompiled.lua" => {
                 install_actor_scaffold(lua, context, system_key.clone())?;
                 return Ok(Some(Value::Nil));
@@ -409,6 +421,124 @@ fn handle_special_dofile<'lua>(
         }
     }
     Ok(None)
+}
+
+fn install_color_constants(lua: &Lua) -> LuaResult<()> {
+    let globals = lua.globals();
+
+    let make_color = |r: f32, g: f32, b: f32| -> LuaResult<Value> {
+        let table = lua.create_table()?;
+        table.set("r", r)?;
+        table.set("g", g)?;
+        table.set("b", b)?;
+        Ok(Value::Table(table))
+    };
+
+    globals.set("White", make_color(1.0, 1.0, 1.0)?)?;
+    globals.set("Yellow", make_color(1.0, 0.9, 0.2)?)?;
+    globals.set("Magenta", make_color(0.9, 0.1, 0.9)?)?;
+    globals.set("Aqua", make_color(0.1, 0.7, 0.9)?)?;
+
+    Ok(())
+}
+
+fn install_sfx_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> LuaResult<()> {
+    let globals = lua.globals();
+
+    globals.set("IM_GROUP_SFX", 1)?;
+
+    if matches!(globals.get::<_, Value>("sfx"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let sfx = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            if let Ok(name) = method.to_str() {
+                fallback_context
+                    .borrow_mut()
+                    .log_event(format!("sfx.stub {name}"));
+            }
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    sfx.set_metatable(Some(metatable));
+    globals.set("sfx", sfx)?;
+
+    Ok(())
+}
+
+fn install_controls_scaffold(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    system_key: Rc<RegistryKey>,
+) -> LuaResult<()> {
+    let globals = lua.globals();
+    let system: Table = lua.registry_value(system_key.as_ref())?;
+
+    if system
+        .get::<_, Value>("controls")
+        .map(|value| !matches!(value, Value::Nil))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let controls = lua.create_table()?;
+    let entries = [
+        ("AXIS_JOY1_X", 0),
+        ("AXIS_JOY1_Y", 1),
+        ("AXIS_MOUSE_X", 2),
+        ("AXIS_MOUSE_Y", 3),
+        ("AXIS_SENSITIVITY", 4),
+        ("KEY1", 10),
+        ("KEY2", 11),
+        ("KEY3", 12),
+        ("KEY4", 13),
+        ("KEY5", 14),
+        ("KEY6", 15),
+        ("KEY7", 16),
+        ("KEY8", 17),
+        ("KEY9", 18),
+        ("LCONTROLKEY", 30),
+        ("RCONTROLKEY", 31),
+    ];
+    for (name, value) in entries {
+        controls.set(name, value)?;
+    }
+    system.set("controls", controls)?;
+
+    globals.set("MODE_NORMAL", 0)?;
+    globals.set("MODE_MOUSE", 1)?;
+    globals.set("MODE_KEYS", 2)?;
+    globals.set("MODE_BACKGROUND", 3)?;
+    globals.set("CONTROL_MODE", 0)?;
+
+    let system_controls = lua.create_table()?;
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            if let Ok(name) = method.to_str() {
+                fallback_context
+                    .borrow_mut()
+                    .log_event(format!("system_controls.stub {name}"));
+            }
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    system_controls.set_metatable(Some(metatable));
+    globals.set("system_controls", system_controls)?;
+
+    system.set("axisHandler", Value::Nil)?;
+
+    Ok(())
 }
 
 fn candidate_paths(path: &str) -> Vec<PathBuf> {

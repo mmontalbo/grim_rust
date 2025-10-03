@@ -42,13 +42,14 @@
   shared `EngineContext`, letting the stock `_actors.lua` and `_objects.lua`
   scripts execute so Manny's Office uses the real object tables. Actor selection,
   set switches, object state mutations, and inventory changes are logged for
-  comparison against the static analysis. Menu helpers, `_colors`, `_sfx`, and
-  `_controls` are still stubbed, so verbose runs expose which bindings we need
-  to implement next.
+  comparison against the static analysis. `_colors`, `_sfx`, and `_controls`
+  now install host-provided scaffolds, while the richer menu helpers remain
+  stubbed so verbose runs still highlight the next bindings we need to land.
 
 ## Next Steps
-1. Unblock the remaining boot scaffolding (`_colors`, `_sfx`, `_controls`, menu
-   helpers) so the embedded runtime can march further into Manny's Office.
+1. Unblock the remaining boot scaffolding (menu helpers, cut-scene services,
+   control handlers) so the embedded runtime can march further into Manny's
+   Office.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.

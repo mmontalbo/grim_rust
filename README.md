@@ -139,13 +139,14 @@ place. The host registers actors with stable handles, mirrors Manny's boot-time
 set switches, and records actor/object mutations as the scripts execute.
 Verbose runs (`--run-lua --verbose`) echo each loaded script plus the
 engine-side events (actor selection, Manny's position/costume changes, object
-state updates, inventory mutations). The mode still stubs the broader boot
-scaffolding—`_colors`, `_sfx`, `_controls`, and menu helpers—so expect it to
-pause once those bindings are required, but Manny's Office now boots using the
-real object tables emitted by `_objects.lua`. The runtime summary captures the
-state we do manage to mutate—active set, queued scripts, Manny's transforms,
-inventory contents—so we can diff real Lua behaviour against the static
-analysis while we fill in the missing services.
+state updates, inventory mutations). The host now handles the early boot
+plumbing—`_colors`, `_sfx`, and `_controls` install Lua-side scaffolds via
+Rust—but still stubs the richer menu helpers, so expect it to pause once those
+bindings are required. Manny's Office boots using the real object tables
+emitted by `_objects.lua`, and the runtime summary captures the state we do
+manage to mutate—active set, queued scripts, Manny's transforms, inventory
+contents—so we can diff real Lua behaviour against the static analysis while we
+fill in the missing services.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
