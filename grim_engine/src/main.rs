@@ -16,10 +16,12 @@ use serde::Serialize;
 
 mod assets;
 mod lab_collection;
+mod lua_host;
 mod scheduler;
 mod state;
 use assets::MANNY_OFFICE_ASSETS;
 use lab_collection::{collect_assets, AssetMetadata, AssetReport, LabCollection};
+use lua_host::run_boot_sequence;
 use scheduler::{MovieQueue, ScriptScheduler};
 use state::{
     EngineState, HookApplication, HookReference, MovieEvent, ScriptEvent, SetState,
@@ -80,10 +82,19 @@ struct Args {
     /// Path to write the boot-time scheduler queues as JSON
     #[arg(long)]
     scheduler_json: Option<PathBuf>,
+
+    /// Execute the embedded Lua VM prototype instead of the static analysis pipeline
+    #[arg(long)]
+    run_lua: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.run_lua {
+        run_boot_sequence(&args.data_root, args.verbose)?;
+        return Ok(());
+    }
 
     let mut registry =
         Registry::from_json_file(args.registry.as_deref()).context("loading registry snapshot")?;
