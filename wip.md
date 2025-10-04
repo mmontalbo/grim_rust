@@ -136,6 +136,8 @@
   Lua marks as visible. Manny-to-object bearings now log real angles; the next
   blocker is feeding this geometry into the cut-scene and visibility trackers
   that still expect real walkbox data.
+- Visibility sweeps now record per-object distance, bearing, range hits, and the
+  derived hotlist so the runtime summary mirrors what Head_Control evaluates each frame.
 - Costume/dialogue plumbing: the embedded host now tracks each actor's base
   and active costume, surfaces `Actor:get_costume`, respects `Actor:complete_chore`,
   and routes `Actor:normal_say_line` through `system.lastActorTalking` while logging

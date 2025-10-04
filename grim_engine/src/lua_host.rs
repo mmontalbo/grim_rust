@@ -340,6 +340,24 @@ struct ObjectSnapshot {
     interest_actor: Option<u32>,
 }
 
+#[derive(Debug, Clone)]
+struct VisibleObjectInfo {
+    handle: i64,
+    name: String,
+    string_name: Option<String>,
+    range: f32,
+    distance: Option<f32>,
+    angle: Option<f32>,
+    within_range: Option<bool>,
+    in_hotlist: bool,
+}
+
+impl VisibleObjectInfo {
+    fn display_name(&self) -> &str {
+        self.string_name.as_deref().unwrap_or(self.name.as_str())
+    }
+}
+
 #[derive(Debug)]
 struct EngineContext {
     verbose: bool,
@@ -365,6 +383,8 @@ struct EngineContext {
     objects_by_name: BTreeMap<String, i64>,
     objects_by_actor: BTreeMap<u32, i64>,
     achievements: BTreeMap<String, AchievementState>,
+    visible_objects: Vec<VisibleObjectInfo>,
+    hotlist_handles: Vec<i64>,
 }
 
 impl EngineContext {
@@ -413,6 +433,8 @@ impl EngineContext {
             objects_by_name: BTreeMap::new(),
             objects_by_actor: BTreeMap::new(),
             achievements: BTreeMap::new(),
+            visible_objects: Vec::new(),
+            hotlist_handles: Vec::new(),
         }
     }
 
@@ -1139,25 +1161,114 @@ impl EngineContext {
     }
 
     fn record_visible_objects(&mut self, handles: &[i64]) {
+        self.visible_objects.clear();
+        self.hotlist_handles.clear();
         if handles.is_empty() {
             self.log_event("scene.visible <none>".to_string());
             return;
         }
+
+        let actor_snapshot = self
+            .selected_actor
+            .as_ref()
+            .and_then(|id| self.actors.get(id))
+            .cloned()
+            .or_else(|| self.actors.get("manny").cloned());
+        let actor_position = actor_snapshot.as_ref().and_then(|actor| actor.position);
+        let actor_handle = actor_snapshot
+            .as_ref()
+            .map(|actor| actor.handle)
+            .filter(|handle| *handle != 0);
+
         let mut names = Vec::new();
+        let mut visible_infos: Vec<VisibleObjectInfo> = Vec::new();
+
         for handle in handles {
-            if let Some(object) = self.objects.get(handle) {
-                if let Some(label) = &object.string_name {
-                    names.push(label.clone());
-                } else {
-                    names.push(object.name.clone());
+            if let Some(object) = self.objects.get(handle).cloned() {
+                let display = object
+                    .string_name
+                    .clone()
+                    .unwrap_or_else(|| object.name.clone());
+                names.push(display.clone());
+
+                let mut info = VisibleObjectInfo {
+                    handle: *handle,
+                    name: object.name.clone(),
+                    string_name: object.string_name.clone(),
+                    range: object.range,
+                    distance: None,
+                    angle: None,
+                    within_range: None,
+                    in_hotlist: false,
+                };
+
+                let object_position = object.position.or_else(|| {
+                    object
+                        .interest_actor
+                        .and_then(|h| self.actor_position_by_handle(h))
+                });
+                if let (Some(actor_pos), Some(obj_pos)) = (actor_position, object_position) {
+                    let distance = distance_between(actor_pos, obj_pos);
+                    info.distance = Some(distance);
+                    info.within_range = Some(distance <= object.range + f32::EPSILON);
                 }
+
+                if let (Some(actor_handle), Some(target_handle)) =
+                    (actor_handle, object.interest_actor)
+                {
+                    if let (Some(actor_pos), Some(target_pos)) = (
+                        self.actor_position_by_handle(actor_handle),
+                        self.actor_position_by_handle(target_handle),
+                    ) {
+                        info.angle = Some(heading_between(actor_pos, target_pos) as f32);
+                    }
+                }
+
+                visible_infos.push(info);
             }
         }
+
         if names.is_empty() {
             self.log_event("scene.visible <unknown>".to_string());
         } else {
             self.log_event(format!("scene.visible {}", names.join(", ")));
         }
+
+        let mut best_angle: Option<f32> = None;
+        for info in &visible_infos {
+            if let Some(angle) = info.angle {
+                if best_angle.map(|best| angle < best).unwrap_or(true) {
+                    best_angle = Some(angle);
+                }
+            }
+        }
+
+        if let Some(best) = best_angle {
+            for info in &mut visible_infos {
+                if let Some(angle) = info.angle {
+                    if (angle - best).abs() < 10.0 {
+                        info.in_hotlist = true;
+                    }
+                }
+            }
+        }
+
+        let hot_names: Vec<String> = visible_infos
+            .iter()
+            .filter(|info| info.in_hotlist)
+            .map(|info| info.display_name().to_string())
+            .collect();
+
+        if !hot_names.is_empty() {
+            self.log_event(format!("scene.hotlist {}", hot_names.join(", ")));
+        }
+
+        self.hotlist_handles = visible_infos
+            .iter()
+            .filter(|info| info.in_hotlist)
+            .map(|info| info.handle)
+            .collect();
+        self.visible_objects = visible_infos;
     }
 
     fn object_position_by_actor(&self, actor_handle: u32) -> Option<Vec3> {
@@ -2086,12 +2197,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
                     let pos_a = ctx.actor_position_by_handle(a);
                     let pos_b = ctx.actor_position_by_handle(b);
                     if let (Some(a_pos), Some(b_pos)) = (pos_a, pos_b) {
-                        let dx = (b_pos.x - a_pos.x) as f64;
-                        let dy = (b_pos.y - a_pos.y) as f64;
-                        let mut angle = dy.atan2(dx).to_degrees();
-                        if angle < 0.0 {
-                            angle += 360.0;
-                        }
+                        let angle = heading_between(a_pos, b_pos);
                         (angle, format!("#{a} -> #{b}"))
                     } else {
                         (0.0, format!("#{a} -> #{b} (no pos)"))
@@ -4646,6 +4752,39 @@ fn dump_runtime_summary(state: &EngineContext) {
             .join(", ");
         println!("  Inventory rooms: {}", display);
     }
+    if !state.visible_objects.is_empty() {
+        println!("  Visible objects:");
+        for info in &state.visible_objects {
+            let mut details: Vec<String> = Vec::new();
+            if let Some(distance) = info.distance {
+                details.push(format!("dist={distance:.3}"));
+            }
+            if let Some(angle) = info.angle {
+                details.push(format!("angle={angle:.2}°"));
+            }
+            if let Some(within) = info.within_range {
+                if within {
+                    details.push("in-range".to_string());
+                } else {
+                    details.push("out-of-range".to_string());
+                }
+                if info.range > 0.0 {
+                    details.push(format!("range={:.3}", info.range));
+                }
+            } else if info.range > 0.0 {
+                details.push(format!("range={:.3}", info.range));
+            }
+            if info.in_hotlist {
+                details.push("HOT".to_string());
+            }
+            let suffix = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", details.join(", "))
+            };
+            println!("    - {} (#{}{})", info.display_name(), info.handle, suffix);
+        }
+    }
     if !state.menus.is_empty() {
         println!("  Menus:");
         for (name, menu_state) in &state.menus {
@@ -5067,6 +5206,23 @@ fn value_to_string(value: &Value) -> Option<String> {
 
 fn describe_value(value: &Value) -> String {
     value_to_string(value).unwrap_or_else(|| format!("<{value:?}>"))
+}
+
+fn heading_between(from: Vec3, to: Vec3) -> f64 {
+    let dx = (to.x - from.x) as f64;
+    let dy = (to.y - from.y) as f64;
+    let mut angle = dy.atan2(dx).to_degrees();
+    if angle < 0.0 {
+        angle += 360.0;
+    }
+    angle
+}
+
+fn distance_between(a: Vec3, b: Vec3) -> f32 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let dz = b.z - a.z;
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 #[cfg(test)]

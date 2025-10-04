@@ -168,6 +168,10 @@ real angles instead of the earlier zero-degree placeholders; next we need to
 pipe this geometry into the cut-scene and visibility trackers that still expect
 real walkbox data.
 
+Every visibility sweep now stores the matching object snapshot, including distance, bearing,
+range heuristics, and the derived hotlist so the runtime summary mirrors what `Head_Control`
+is considering each frame.
+
 Costume state now mirrors the Lua side: the host tracks each actor's base
 and active costumes, `Actor:get_costume` surfaces the current wardrobe to Lua,
 and helpers such as `Actor:complete_chore` respect the stored defaults instead
