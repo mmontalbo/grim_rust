@@ -51,13 +51,13 @@
   counts for future bindings.
 
 ## Next Steps
-1. Flesh out the boot-time trackers (visibility queries, sector lookups,
-   menu helpers, cut-scene services, control handlers) inside the coroutine
-   host so the embedded runtime can march further into Manny's Office.
-   Camera/hot sector queries now use Manny's live transforms to pick zone
-   specific setups, so the next blockers are wiring `Head_Control`/dialog
-   state and feeding real visibility data back into the loop so the trackers
-   stop idling.
+1. Flesh out the boot-time trackers (cut-scene services, control handlers,
+   and geometry-driven visibility/collision lookups) inside the coroutine host
+   so the embedded runtime can march further into Manny's Office.
+   Camera/hot sector queries now use Manny's live transforms and
+   `Actor:set_visibility` keeps `GetVisibleThings` aligned with the script state,
+   so the next blockers are wiring `Head_Control`/dialog logic to real walkbox
+   data instead of heuristics.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
@@ -131,6 +131,8 @@
   `SendObjectToFront`, `SetActiveCommentary`) alongside script introspection
   shims (`next_script`, `identify_script`, `FunctionName`), so `_system` finishes
   `FINALIZEBOOT` and Manny's Office trackers run on real tables. Interest-actor
-  positions now flow back into `GetAngleBetweenActors`, yielding real Manny-to-object
-  bearings; next up is feeding those transforms into the visibility and cut-scene
-  helpers that still rely on canned sector hits.
+  positions now flow back into `GetAngleBetweenActors`, and the host mirrors
+  `Actor:set_visibility` toggles so `GetVisibleThings` returns the same objects
+  Lua marks as visible. Manny-to-object bearings now log real angles; the next
+  blocker is feeding this geometry into the cut-scene and visibility trackers
+  that still expect real walkbox data.

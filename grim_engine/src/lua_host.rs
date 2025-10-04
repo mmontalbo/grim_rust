@@ -113,6 +113,7 @@ struct ActorSnapshot {
     position: Option<Vec3>,
     rotation: Option<Vec3>,
     is_selected: bool,
+    is_visible: bool,
     handle: u32,
     sectors: BTreeMap<String, SectorHit>,
 }
@@ -316,6 +317,7 @@ struct ObjectSnapshot {
     position: Option<Vec3>,
     range: f32,
     touchable: bool,
+    visible: bool,
     interest_actor: Option<u32>,
 }
 
@@ -475,6 +477,7 @@ impl EngineContext {
         let entry = self.actors.entry(id.to_string()).or_insert_with(|| {
             let mut actor = ActorSnapshot::default();
             actor.name = label.to_string();
+            actor.is_visible = true;
             actor
         });
         entry.name = label.to_string();
@@ -787,6 +790,7 @@ impl EngineContext {
         let entry = self.actors.entry(id.clone()).or_insert_with(|| {
             let mut actor = ActorSnapshot::default();
             actor.name = label.to_string();
+            actor.is_visible = true;
             actor
         });
         entry.name = label.to_string();
@@ -872,6 +876,7 @@ impl EngineContext {
                 .values()
                 .filter(|object| {
                     object.touchable
+                        && object.visible
                         && object
                             .set_file
                             .as_deref()
@@ -942,6 +947,18 @@ impl EngineContext {
         self.log_event(format!("object.touchable #{handle} {state}"));
     }
 
+    fn set_object_visibility(&mut self, handle: i64, visible: bool) {
+        if let Some(object) = self.objects.get_mut(&handle) {
+            if object.visible != visible {
+                object.visible = visible;
+                let state = if visible { "visible" } else { "hidden" };
+                self.log_event(format!("object.visible #{handle} {state}"));
+            } else {
+                object.visible = visible;
+            }
+        }
+    }
+
     fn actor_position_by_handle(&self, handle: u32) -> Option<Vec3> {
         self.actor_handles
             .get(&handle)
@@ -949,12 +966,22 @@ impl EngineContext {
             .and_then(|actor| actor.position)
             .or_else(|| self.object_position_by_actor(handle))
     }
-
     fn actor_rotation_by_handle(&self, handle: u32) -> Option<Vec3> {
         self.actor_handles
             .get(&handle)
             .and_then(|id| self.actors.get(id))
             .and_then(|actor| actor.rotation)
+    }
+
+    fn set_actor_visibility(&mut self, actor_id: &str, label: &str, visible: bool) {
+        let state = if visible { "visible" } else { "hidden" };
+        self.log_event(format!("actor.visibility {} {state}", label));
+        if let Some(actor) = self.actors.get_mut(actor_id) {
+            actor.is_visible = visible;
+            if let Some(object_handle) = self.objects_by_actor.get(&actor.handle).copied() {
+                self.set_object_visibility(object_handle, visible);
+            }
+        }
     }
 
     fn put_actor_handle_in_set(&mut self, handle: u32, set_file: &str) {
@@ -2253,6 +2280,23 @@ fn install_actor_methods(
         })?,
     )?;
 
+    let visibility_context = context.clone();
+    actor.set(
+        "set_visibility",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let visible = values.get(0).map(value_to_bool).unwrap_or(false);
+                table.set("is_visible", visible)?;
+                let (id, name) = actor_identity(&table)?;
+                visibility_context
+                    .borrow_mut()
+                    .set_actor_visibility(&id, &name, visible);
+            }
+            Ok(())
+        })?,
+    )?;
+
     let getpos_context = context.clone();
     actor.set(
         "getpos",
@@ -2669,6 +2713,13 @@ fn read_object_snapshot(_lua: &Lua, object: &Table, handle: i64) -> LuaResult<Ob
     };
     let range = object.get::<_, Option<f32>>("range")?.unwrap_or(0.0);
     let touchable = object.get::<_, Option<bool>>("touchable")?.unwrap_or(false);
+    let visible = if let Some(flag) = object.get::<_, Option<bool>>("is_visible")? {
+        flag
+    } else if let Some(flag) = object.get::<_, Option<bool>>("visible")? {
+        flag
+    } else {
+        true
+    };
     let interest_actor = object
         .get::<_, Value>("interest_actor")
         .ok()
@@ -2681,6 +2732,7 @@ fn read_object_snapshot(_lua: &Lua, object: &Table, handle: i64) -> LuaResult<Ob
         position,
         range,
         touchable,
+        visible,
         interest_actor,
     })
 }
@@ -4231,7 +4283,7 @@ fn describe_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_paths, value_slice_to_vec3, EngineContext, Vec3};
+    use super::{candidate_paths, value_slice_to_vec3, EngineContext, ObjectSnapshot, Vec3};
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use mlua::Value;
     use std::path::PathBuf;
@@ -4343,5 +4395,32 @@ mod tests {
         assert_eq!(camera_hit.name, "mo_mnycu");
         let hot_hit = ctx.manny_office_sector("hot").expect("door hot");
         assert_eq!(hot_hit.name, "mo_comin");
+    }
+
+    #[test]
+    fn actor_visibility_controls_object_handles() {
+        let mut ctx = make_context();
+        let (id, handle) = ctx.register_actor_with_handle("Lamp", Some(2000));
+        ctx.put_actor_in_set(&id, "Lamp", "mo.set");
+        ctx.switch_to_set("mo.set");
+        ctx.register_object(ObjectSnapshot {
+            handle: 3000,
+            name: "lamp".to_string(),
+            string_name: Some("lamp".to_string()),
+            set_file: Some("mo.set".to_string()),
+            position: None,
+            range: 0.0,
+            touchable: true,
+            visible: true,
+            interest_actor: Some(handle),
+        });
+
+        assert_eq!(ctx.visible_object_handles(), vec![3000]);
+
+        ctx.set_actor_visibility(&id, "Lamp", false);
+        assert!(ctx.visible_object_handles().is_empty());
+
+        ctx.set_actor_visibility(&id, "Lamp", true);
+        assert_eq!(ctx.visible_object_handles(), vec![3000]);
     }
 }

@@ -161,9 +161,12 @@ The host also mirrors the legacy script inspection utilities (`next_script`,
 `rebuildButtons`, `NewObjectState`, `SendObjectToFront`, and commentary toggles.
 With those in place Manny's Office completes `FINALIZEBOOT` before the head-control
 trackers spin. The host now captures `_objects` interest-actor transforms and
-feeds them back into `GetAngleBetweenActors`, so the Manny-to-object bearings
-log real angles instead of the earlier zero-degree placeholders while we keep
-planning richer geometry sources.
+feeds them back into `GetAngleBetweenActors`, and the new `Actor:set_visibility`
+binding mirrors each toggle into the runtime snapshots so `GetVisibleThings`
+returns the same interactables the scripts expose. Manny-to-object bearings log
+real angles instead of the earlier zero-degree placeholders; next we need to
+pipe this geometry into the cut-scene and visibility trackers that still expect
+real walkbox data.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
