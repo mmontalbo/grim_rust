@@ -18,6 +18,10 @@ pub struct FunctionSimulation {
     pub stateful_call_events: Vec<StatefulCallEvent>,
     pub started_scripts: Vec<String>,
     pub movie_calls: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub geometry_calls: Vec<GeometryCallEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub visibility_calls: Vec<VisibilityCallEvent>,
 }
 
 pub fn simulate_set_function(function: &SetFunction) -> FunctionSimulation {
@@ -32,6 +36,8 @@ struct FunctionSimulationBuilder {
     method_calls: BTreeMap<String, BTreeMap<String, usize>>,
     stateful_calls: BTreeMap<StateSubsystem, BTreeMap<String, BTreeMap<String, usize>>>,
     stateful_call_events: Vec<StatefulCallEvent>,
+    geometry_calls: Vec<GeometryCallEvent>,
+    visibility_calls: Vec<VisibilityCallEvent>,
     started_scripts_seen: BTreeSet<String>,
     started_scripts: Vec<String>,
     movie_calls_seen: BTreeSet<String>,
@@ -64,6 +70,20 @@ impl FunctionSimulationBuilder {
 
         let entry = self.method_calls.entry(target_key).or_default();
         *entry.entry(method_key).or_insert(0) += 1;
+    }
+
+    fn record_geometry_call<S: Into<String>>(&mut self, function: S, arguments: Vec<String>) {
+        self.geometry_calls.push(GeometryCallEvent {
+            function: function.into(),
+            arguments,
+        });
+    }
+
+    fn record_visibility_call<S: Into<String>>(&mut self, function: S, arguments: Vec<String>) {
+        self.visibility_calls.push(VisibilityCallEvent {
+            function: function.into(),
+            arguments,
+        });
     }
 
     fn record_stateful_call(
@@ -110,6 +130,8 @@ impl FunctionSimulationBuilder {
             stateful_call_events: self.stateful_call_events,
             started_scripts: self.started_scripts,
             movie_calls: self.movie_calls,
+            geometry_calls: self.geometry_calls,
+            visibility_calls: self.visibility_calls,
         }
     }
 }
@@ -298,7 +320,8 @@ fn analyze_table(
 
 fn analyze_function_call(builder: &mut FunctionSimulationBuilder, call: &FunctionCall) {
     if let Some(name) = global_function_name(call) {
-        match name.to_ascii_lowercase().as_str() {
+        let lower = name.to_ascii_lowercase();
+        match lower.as_str() {
             "start_script" | "single_start_script" => {
                 if let Some(expr) = first_argument_expression(call) {
                     if let Some(identifier) = expression_to_identifier(expr) {
@@ -313,6 +336,27 @@ fn analyze_function_call(builder: &mut FunctionSimulationBuilder, call: &Functio
                     }
                 }
             }
+            "makesectoractive" => {
+                for suffix in call.suffixes() {
+                    if let Suffix::Call(Call::AnonymousCall(args)) = suffix {
+                        builder.record_geometry_call(name.clone(), function_args_to_strings(args));
+                        break;
+                    }
+                }
+            }
+            "build_hotlist"
+            | "get_next_visible_object"
+            | "change_gaze"
+            | "enable_head_control"
+            | "head_control" => {
+                for suffix in call.suffixes() {
+                    if let Suffix::Call(Call::AnonymousCall(args)) = suffix {
+                        builder
+                            .record_visibility_call(name.clone(), function_args_to_strings(args));
+                        break;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -321,6 +365,15 @@ fn analyze_function_call(builder: &mut FunctionSimulationBuilder, call: &Functio
         analyze_expression(builder, expr);
     }
     if let Some(invocation) = method_invocation(call) {
+        let method_name = invocation.method.to_ascii_lowercase();
+        if method_name == "head_look_at" {
+            let function_label = format!(
+                "{}:{}",
+                invocation.target.clone(),
+                invocation.method.clone()
+            );
+            builder.record_visibility_call(function_label, invocation.args.clone());
+        }
         builder.record_method_call(invocation);
     }
 
@@ -479,6 +532,18 @@ pub struct StatefulCallEvent {
     pub subsystem: StateSubsystem,
     pub target: String,
     pub method: String,
+    pub arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeometryCallEvent {
+    pub function: String,
+    pub arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VisibilityCallEvent {
+    pub function: String,
     pub arguments: Vec<String>,
 }
 
@@ -935,6 +1000,39 @@ mod tests {
         assert_eq!(
             simulation.movie_calls,
             vec!["intro.snm".to_string(), "mo_ts.snm".to_string()]
+        );
+    }
+
+    #[test]
+    fn simulate_records_visibility_calls() {
+        let function = parse_set_function(
+            r#"
+            function enter(self)
+                Build_Hotlist(self.target)
+                system.currentActor:head_look_at(hot_object)
+                system.currentActor:head_look_at(nil)
+            end
+            "#,
+        );
+
+        let simulation = simulate_set_function(&function);
+        assert_eq!(simulation.visibility_calls.len(), 3);
+        assert_eq!(simulation.visibility_calls[0].function, "Build_Hotlist");
+        assert_eq!(
+            simulation.visibility_calls[0].arguments,
+            vec!["self.target".to_string()]
+        );
+        assert_eq!(
+            simulation.visibility_calls[1].function,
+            "system.currentActor:head_look_at"
+        );
+        assert_eq!(
+            simulation.visibility_calls[1].arguments,
+            vec!["hot_object".to_string()]
+        );
+        assert_eq!(
+            simulation.visibility_calls[2].arguments,
+            vec!["nil".to_string()]
         );
     }
 

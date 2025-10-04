@@ -11,3 +11,7 @@ grim_formats = { path = "../grim_formats" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 mlua = { version = "0.9", features = ["lua51", "vendored"] }
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

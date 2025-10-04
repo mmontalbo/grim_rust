@@ -983,8 +983,10 @@ dependencies = [
  "grim_analysis",
  "grim_formats",
  "mlua",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

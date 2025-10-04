@@ -25,6 +25,7 @@
   re-parsing Lua. The replay snapshot now tracks actor transforms (position,
   rotation, facing) plus basic chore state/history, and the timeline manifest
   fixtures cover the richer schema so downstream tools can rely on it.
+- Geometry verification test: `cargo test -p grim_engine` exercises `verify_geometry_round_trip_matches_static_timeline` to ensure the runtime snapshot stays aligned with the static geometry timeline.
 - Asset manifests now tag bitmap entries as `classic` vs `unsupported` so the
   tooling can skip remastered-only surfaces until the codec 3 decompressor
   exists.
@@ -42,24 +43,24 @@
   shared `EngineContext`, letting the stock `_actors.lua` and `_objects.lua`
   scripts execute so Manny's Office uses the real object tables. Actor selection,
   set switches, object state mutations, and inventory changes are logged for
-  comparison against the static analysis. `_colors`, `_sfx`, and `_controls`
-  now install host-provided scaffolds, while the richer menu helpers remain
-  stubbed so verbose runs still highlight the next bindings we need to land.
+  comparison against the static analysis. `_colors`, `_controls`, and the
+  music/SFX helpers now install stateful scaffolds that record the current cue,
+  queued transitions, mute state, and active sound handles, while the richer
+  menu helpers remain stubbed so verbose runs still highlight the next bindings
+  we need to land.
   `start_script`/`single_start_script` now spawn cooperative Lua threads,
   `break_here` yields through `coroutine.yield`, and the host advances a few
   frames post-BOOT so long-running trackers stay resident with their yield
   counts for future bindings.
 
 ## Next Steps
-1. Emit a machine-readable geometry/visibility snapshot from the runtime so other tooling can
-   validate placements without scraping verbose logs.
+1. Wire the `--verify-geometry` flow (now exercised by `cargo test -p grim_engine`) into downstream tooling/CI so sector or visibility drift surfaces automatically outside local runs.
 2. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
 3. Replace the Manny-specific camera fallback with geometry-driven selection and extend the
-   parser/lookup path to other sets once their data is decoded. Diff the runtime results against
-   the static analysis timeline to keep sector coverage honest.
-4. Start wiring the geometry-backed commentary/cut-scene state into the remaining runtime services
-   (audio/menu helpers) so later scenes can react without falling back to placeholder logging.
+   parser/lookup path to other sets once their data is decoded, using the snapshot diff to keep
+   sector coverage honest.
+4. Push the geometry-backed state into the remaining runtime helpers (menu services and the deeper audio routines) so later scenes can react without relying on placeholder logging.
 
 
 ## Current Iteration — Manny's Office Prototype
@@ -114,6 +115,15 @@
   omits hotspots when their covering sectors are inactive, and the commentary/cut-scene helpers
   consume the same state so `SetActiveCommentary` auto-suspends/resumes and the cut-scene ledger
   reports when geometry overrides block or unblock a sequence.
+- Geometry snapshot: `--lua-geometry-json <file>` captures the embedded runtime's
+  geometry/visibility state (active set/setup, sector activation, actors/objects, hotlists, commentary/cut-scene ledgers, and the event log). Other tools can now consume that JSON directly instead of scraping verbose runs.
+- Geometry diff: `grim_engine --geometry-diff <snapshot.json>` compares those runtime snapshots
+  against the static timeline's recorded `MakeSectorActive` calls, flagging sectors that don't match,
+  unresolved toggles, and polygons referenced by scripts but missing from the LAB geometry. It now
+  also recomputes each visible object's range, distance, and bearing from the LAB geometry, so head-
+  control drift shows up alongside sector mismatches when Manny's hotspots move off their scripted
+  placements.
+  Add `--geometry-diff-json <report.json>` to write the same findings as JSON so CI or external tools can archive the sector and visibility mismatches. Run `grim_engine --verify-geometry` to capture a fresh runtime snapshot and diff it in one step, exiting non-zero when the sector or visibility data drifts.
 - Scheduler polish: function-based threads now carry source-derived labels
   (e.g., `_system.decompiled.lua:667` for `TrackManny`), and the host seeds
   Manny's set scaffolding (`setups`, `current_setup`, `cameraman`) plus engine

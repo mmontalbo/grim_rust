@@ -4,6 +4,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::geometry_snapshot::{
+    LuaActorSectorSnapshot, LuaActorSnapshot, LuaCommentarySnapshot, LuaCurrentSetSnapshot,
+    LuaCutSceneSnapshot, LuaGeometrySnapshot, LuaMusicCueSnapshot, LuaMusicSnapshot,
+    LuaObjectActorLink, LuaObjectSectorSnapshot, LuaObjectSnapshot, LuaSectorSnapshot,
+    LuaSetSelectionSnapshot, LuaSetSnapshot, LuaSetupSnapshot, LuaSfxInstanceSnapshot,
+    LuaSfxSnapshot, LuaVisibleObjectSnapshot,
+};
 use crate::lab_collection::LabCollection;
 use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::{normalize_legacy_lua, ResourceGraph};
@@ -412,6 +419,38 @@ struct MenuState {
     last_action: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct MusicCueSnapshot {
+    name: String,
+    parameters: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct MusicState {
+    current: Option<MusicCueSnapshot>,
+    queued: Vec<MusicCueSnapshot>,
+    current_state: Option<String>,
+    state_stack: Vec<String>,
+    paused: bool,
+    muted_groups: BTreeSet<String>,
+    volume: Option<f32>,
+    history: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SfxInstance {
+    handle: String,
+    cue: String,
+    parameters: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct SfxState {
+    next_handle: u32,
+    active: BTreeMap<String, SfxInstance>,
+    history: Vec<String>,
+}
+
 #[derive(Clone, Copy)]
 struct FootstepProfile {
     key: &'static str,
@@ -665,6 +704,8 @@ struct EngineContext {
     active_dialog: Option<DialogState>,
     speaking_actor: Option<String>,
     message_active: bool,
+    music: MusicState,
+    sfx: SfxState,
     lab_collection: Option<Rc<LabCollection>>,
     set_geometry: BTreeMap<String, ParsedSetGeometry>,
     sector_states: BTreeMap<String, BTreeMap<String, bool>>,
@@ -728,6 +769,8 @@ impl EngineContext {
             active_dialog: None,
             speaking_actor: None,
             message_active: false,
+            music: MusicState::default(),
+            sfx: SfxState::default(),
             lab_collection,
             set_geometry: BTreeMap::new(),
             sector_states: BTreeMap::new(),
@@ -848,6 +891,182 @@ impl EngineContext {
 
     fn speaking_actor(&self) -> Option<&str> {
         self.speaking_actor.as_deref()
+    }
+
+    fn play_music(&mut self, track: String, params: Vec<String>) {
+        let snapshot = MusicCueSnapshot {
+            name: track.clone(),
+            parameters: params.clone(),
+        };
+        self.music.current = Some(snapshot);
+        let detail = format_music_detail("play", &track, &params);
+        self.music.history.push(detail);
+        self.log_event(format!("music.play {}", track));
+    }
+
+    fn queue_music(&mut self, track: String, params: Vec<String>) {
+        let snapshot = MusicCueSnapshot {
+            name: track.clone(),
+            parameters: params.clone(),
+        };
+        self.music.queued.push(snapshot);
+        let detail = format_music_detail("queue", &track, &params);
+        self.music.history.push(detail);
+        self.log_event(format!("music.queue {}", track));
+    }
+
+    fn stop_music(&mut self, mode: Option<String>) {
+        self.music.current = None;
+        self.music.paused = false;
+        let history_entry = match mode.as_deref() {
+            Some(value) if !value.is_empty() => format!("stop {}", value),
+            _ => "stop".to_string(),
+        };
+        self.music.history.push(history_entry.clone());
+        let event = match mode.as_deref() {
+            Some(value) if !value.is_empty() => format!("music.stop {}", value),
+            _ => "music.stop".to_string(),
+        };
+        self.log_event(event);
+    }
+
+    fn pause_music(&mut self) {
+        if !self.music.paused {
+            self.music.paused = true;
+        }
+        self.music.history.push("pause".to_string());
+        self.log_event("music.pause");
+    }
+
+    fn resume_music(&mut self) {
+        if self.music.paused {
+            self.music.paused = false;
+        }
+        self.music.history.push("resume".to_string());
+        self.log_event("music.resume");
+    }
+
+    fn set_music_state(&mut self, state: Option<String>) {
+        match state {
+            Some(name) => {
+                if let Some(current) = self.music.state_stack.last_mut() {
+                    *current = name.clone();
+                }
+                self.music.current_state = Some(name.clone());
+                self.music.history.push(format!("state {}", name));
+                self.log_event(format!("music.state {}", name));
+            }
+            None => {
+                self.music.current_state = None;
+                self.music.history.push("state <nil>".to_string());
+                self.log_event("music.state <nil>".to_string());
+            }
+        }
+    }
+
+    fn push_music_state(&mut self, state: Option<String>) {
+        match state {
+            Some(name) => {
+                self.music.state_stack.push(name.clone());
+                self.music.current_state = Some(name.clone());
+                self.music.history.push(format!("state.push {}", name));
+                self.log_event(format!("music.state.push {}", name));
+            }
+            None => {
+                self.music.history.push("state.push <nil>".to_string());
+                self.log_event("music.state.push <nil>".to_string());
+            }
+        }
+    }
+
+    fn pop_music_state(&mut self) {
+        let popped = self.music.state_stack.pop();
+        self.music.current_state = self.music.state_stack.last().cloned();
+        let label = popped.as_deref().unwrap_or("<none>");
+        self.music.history.push(format!("state.pop {}", label));
+        self.log_event(format!("music.state.pop {}", label));
+    }
+
+    fn mute_music_group(&mut self, group: Option<String>) {
+        match group {
+            Some(name) => {
+                self.music.muted_groups.insert(name.clone());
+                self.music.history.push(format!("mute {}", name));
+                self.log_event(format!("music.mute {}", name));
+            }
+            None => {
+                self.music.history.push("mute <nil>".to_string());
+                self.log_event("music.mute <nil>".to_string());
+            }
+        }
+    }
+
+    fn unmute_music_group(&mut self, group: Option<String>) {
+        match group {
+            Some(name) => {
+                self.music.muted_groups.remove(&name);
+                self.music.history.push(format!("unmute {}", name));
+                self.log_event(format!("music.unmute {}", name));
+            }
+            None => {
+                self.music.history.push("unmute <nil>".to_string());
+                self.log_event("music.unmute <nil>".to_string());
+            }
+        }
+    }
+
+    fn set_music_volume(&mut self, volume: Option<f32>) {
+        self.music.volume = volume;
+        let detail = match self.music.volume {
+            Some(value) => format!("volume {:.3}", value),
+            None => "volume <nil>".to_string(),
+        };
+        self.music.history.push(detail.clone());
+        self.log_event(format!("music.{}", detail));
+    }
+
+    fn play_sound_effect(&mut self, cue: String, params: Vec<String>) -> String {
+        let handle = format!("sfx_{:04}", self.sfx.next_handle);
+        self.sfx.next_handle = self.sfx.next_handle.saturating_add(1);
+        let instance = SfxInstance {
+            handle: handle.clone(),
+            cue: cue.clone(),
+            parameters: params.clone(),
+        };
+        self.sfx.active.insert(handle.clone(), instance);
+        let detail = if params.is_empty() {
+            format!("sfx.play {} -> {}", cue, handle)
+        } else {
+            format!("sfx.play {} [{}] -> {}", cue, params.join(", "), handle)
+        };
+        self.sfx.history.push(detail);
+        self.log_event(format!("sfx.play {}", cue));
+        handle
+    }
+
+    fn stop_sound_effect(&mut self, target: Option<String>) {
+        let mut label = String::from("sfx.stop");
+        if let Some(spec) = target {
+            if self.sfx.active.remove(&spec).is_some() {
+                label = format!("sfx.stop {}", spec);
+            } else if let Some(handle) = self
+                .sfx
+                .active
+                .iter()
+                .find(|(_, instance)| instance.cue.eq_ignore_ascii_case(&spec))
+                .map(|(handle, _)| handle.clone())
+            {
+                self.sfx.active.remove(&handle);
+                label = format!("sfx.stop {}", spec);
+            } else {
+                label = format!("sfx.stop {}", spec);
+            }
+        } else {
+            self.sfx.active.clear();
+            label.push_str(" all");
+        }
+        self.sfx.history.push(label.clone());
+        self.log_event(label);
     }
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
@@ -2246,9 +2465,363 @@ impl EngineContext {
             }
         }
     }
+
+    fn geometry_snapshot(&self) -> LuaGeometrySnapshot {
+        let current_set = self.current_set.as_ref().map(|current| {
+            let selection =
+                self.current_setups
+                    .get(&current.set_file)
+                    .map(|index| LuaSetSelectionSnapshot {
+                        index: *index,
+                        label: self
+                            .available_sets
+                            .get(&current.set_file)
+                            .and_then(|descriptor| descriptor.setup_label_for_index(*index))
+                            .map(|label| label.to_string()),
+                    });
+            LuaCurrentSetSnapshot {
+                set_file: current.set_file.clone(),
+                variable_name: current.variable_name.clone(),
+                display_name: current.display_name.clone(),
+                selection,
+            }
+        });
+
+        let mut set_keys = BTreeSet::new();
+        set_keys.extend(self.set_geometry.keys().cloned());
+        set_keys.extend(self.sector_states.keys().cloned());
+
+        let mut sets = Vec::new();
+        for set_file in set_keys {
+            let descriptor = self.available_sets.get(&set_file);
+            let geometry = self.set_geometry.get(&set_file);
+            let states = self.sector_states.get(&set_file);
+
+            let current_setup =
+                self.current_setups
+                    .get(&set_file)
+                    .map(|index| LuaSetSelectionSnapshot {
+                        index: *index,
+                        label: descriptor
+                            .and_then(|desc| desc.setup_label_for_index(*index))
+                            .map(|label| label.to_string()),
+                    });
+
+            let setups = geometry
+                .map(|geometry| {
+                    geometry
+                        .setups
+                        .iter()
+                        .map(|setup| LuaSetupSnapshot {
+                            name: setup.name.clone(),
+                            interest: setup.interest.map(|(x, y)| [x, y]),
+                            position: setup.position.map(|(x, y)| [x, y]),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(Vec::new);
+
+            let sectors = geometry
+                .map(|geometry| {
+                    geometry
+                        .sectors
+                        .iter()
+                        .map(|sector| LuaSectorSnapshot {
+                            id: sector.id,
+                            name: sector.name.clone(),
+                            kind: sector_kind_label(sector.kind).to_string(),
+                            default_active: sector.default_active,
+                            active: states
+                                .and_then(|map| map.get(&sector.name).copied())
+                                .unwrap_or(sector.default_active),
+                            vertices: sector
+                                .vertices
+                                .iter()
+                                .map(|(x, y)| [*x, *y])
+                                .collect::<Vec<_>>(),
+                            centroid: [sector.centroid.0, sector.centroid.1],
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(Vec::new);
+
+            let active_sectors = states
+                .map(|map| {
+                    map.iter()
+                        .map(|(name, active)| (name.clone(), *active))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_else(BTreeMap::new);
+
+            sets.push(LuaSetSnapshot {
+                set_file: set_file.clone(),
+                variable_name: descriptor.map(|desc| desc.variable_name.clone()),
+                display_name: descriptor.and_then(|desc| desc.display_name.clone()),
+                has_geometry: geometry.is_some(),
+                current_setup,
+                setups,
+                sectors,
+                active_sectors,
+            });
+        }
+
+        let actors = self
+            .actors
+            .iter()
+            .map(|(id, actor)| {
+                let sectors = actor
+                    .sectors
+                    .iter()
+                    .map(|(kind, hit)| {
+                        (
+                            kind.clone(),
+                            LuaActorSectorSnapshot {
+                                id: hit.id,
+                                name: hit.name.clone(),
+                                kind: hit.kind.clone(),
+                            },
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                (
+                    id.clone(),
+                    LuaActorSnapshot {
+                        name: actor.name.clone(),
+                        costume: actor.costume.clone(),
+                        base_costume: actor.base_costume.clone(),
+                        current_set: actor.current_set.clone(),
+                        at_interest: actor.at_interest,
+                        position: actor.position.map(vec3_to_array),
+                        rotation: actor.rotation.map(vec3_to_array),
+                        is_selected: actor.is_selected,
+                        is_visible: actor.is_visible,
+                        handle: actor.handle,
+                        sectors,
+                        costume_stack: actor.costume_stack.clone(),
+                        current_chore: actor.current_chore.clone(),
+                        walk_chore: actor.walk_chore.clone(),
+                        talk_chore: actor.talk_chore.clone(),
+                        talk_drop_chore: actor.talk_drop_chore.clone(),
+                        mumble_chore: actor.mumble_chore.clone(),
+                        talk_color: actor.talk_color.clone(),
+                        head_target: actor.head_target.clone(),
+                        head_look_rate: actor.head_look_rate,
+                        collision_mode: actor.collision_mode.clone(),
+                        ignoring_boxes: actor.ignoring_boxes,
+                        last_chore_costume: actor.last_chore_costume.clone(),
+                        speaking: actor.speaking,
+                        last_line: actor.last_line.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let mut objects: Vec<LuaObjectSnapshot> = self
+            .objects
+            .values()
+            .map(|object| {
+                let interest_actor = object.interest_actor.map(|handle| {
+                    let actor_id = self.actor_handles.get(&handle).cloned();
+                    let actor_label = actor_id
+                        .as_ref()
+                        .and_then(|id| self.actors.get(id))
+                        .map(|actor| actor.name.clone());
+                    LuaObjectActorLink {
+                        handle,
+                        actor_id,
+                        actor_label,
+                    }
+                });
+                let sectors = object
+                    .sectors
+                    .iter()
+                    .map(|sector| LuaObjectSectorSnapshot {
+                        name: sector.name.clone(),
+                        kind: sector_kind_label(sector.kind).to_string(),
+                    })
+                    .collect::<Vec<_>>();
+                let in_active_sector = object
+                    .set_file
+                    .as_deref()
+                    .map(|set_file| self.object_is_in_active_sector(set_file, object));
+                LuaObjectSnapshot {
+                    handle: object.handle,
+                    name: object.name.clone(),
+                    string_name: object.string_name.clone(),
+                    set_file: object.set_file.clone(),
+                    position: object.position.map(vec3_to_array),
+                    range: object.range,
+                    touchable: object.touchable,
+                    visible: object.visible,
+                    interest_actor,
+                    sectors,
+                    in_active_sector,
+                }
+            })
+            .collect();
+        objects.sort_by_key(|entry| entry.handle);
+
+        let visible_objects = self
+            .visible_objects
+            .iter()
+            .map(|info| LuaVisibleObjectSnapshot {
+                handle: info.handle,
+                name: info.name.clone(),
+                string_name: info.string_name.clone(),
+                display_name: info.display_name().to_string(),
+                range: info.range,
+                distance: info.distance,
+                angle: info.angle,
+                within_range: info.within_range,
+                in_hotlist: info.in_hotlist,
+            })
+            .collect::<Vec<_>>();
+
+        let mut loaded_sets: Vec<String> = self.loaded_sets.iter().cloned().collect();
+        loaded_sets.sort();
+
+        let inventory: Vec<String> = self.inventory.iter().cloned().collect();
+        let inventory_rooms: Vec<String> = self.inventory_rooms.iter().cloned().collect();
+
+        let current_setups = self
+            .current_setups
+            .iter()
+            .map(|(set_file, index)| {
+                let label = self
+                    .available_sets
+                    .get(set_file)
+                    .and_then(|desc| desc.setup_label_for_index(*index))
+                    .map(|value| value.to_string());
+                (
+                    set_file.clone(),
+                    LuaSetSelectionSnapshot {
+                        index: *index,
+                        label,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let commentary = self
+            .commentary
+            .as_ref()
+            .map(|record| LuaCommentarySnapshot {
+                label: record.label.clone(),
+                object_handle: record.object_handle,
+                active: record.active,
+                suppressed_reason: record.suppressed_reason.clone(),
+            });
+
+        let cut_scenes = self
+            .cut_scene_stack
+            .iter()
+            .map(|record| LuaCutSceneSnapshot {
+                label: record.label.clone(),
+                set_file: record.set_file.clone(),
+                sector: record.sector.clone(),
+                suppressed: record.suppressed,
+            })
+            .collect::<Vec<_>>();
+
+        let music = self.music.to_snapshot();
+        let sfx = self.sfx.to_snapshot();
+
+        LuaGeometrySnapshot {
+            current_set,
+            selected_actor: self.selected_actor.clone(),
+            voice_effect: self.voice_effect.clone(),
+            loaded_sets,
+            current_setups,
+            sets,
+            actors,
+            objects,
+            visible_objects,
+            hotlist_handles: self.hotlist_handles.clone(),
+            inventory,
+            inventory_rooms,
+            commentary,
+            cut_scenes,
+            music,
+            sfx,
+            events: self.events.clone(),
+        }
+    }
 }
 
-pub fn run_boot_sequence(data_root: &Path, lab_root: Option<&Path>, verbose: bool) -> Result<()> {
+impl MusicState {
+    fn to_snapshot(&self) -> LuaMusicSnapshot {
+        let current = self.current.as_ref().map(|cue| cue.to_snapshot());
+        let queued = self
+            .queued
+            .iter()
+            .map(|cue| cue.to_snapshot())
+            .collect::<Vec<_>>();
+        let muted_groups = self.muted_groups.iter().cloned().collect::<Vec<_>>();
+        LuaMusicSnapshot {
+            current,
+            queued,
+            current_state: self.current_state.clone(),
+            state_stack: self.state_stack.clone(),
+            paused: self.paused,
+            muted_groups,
+            volume: self.volume,
+            history: self.history.clone(),
+        }
+    }
+}
+
+impl MusicCueSnapshot {
+    fn to_snapshot(&self) -> LuaMusicCueSnapshot {
+        LuaMusicCueSnapshot {
+            name: self.name.clone(),
+            parameters: self.parameters.clone(),
+        }
+    }
+}
+
+impl SfxState {
+    fn to_snapshot(&self) -> LuaSfxSnapshot {
+        let active = self
+            .active
+            .values()
+            .map(|instance| instance.to_snapshot())
+            .collect::<Vec<_>>();
+        LuaSfxSnapshot {
+            active,
+            history: self.history.clone(),
+        }
+    }
+}
+
+impl SfxInstance {
+    fn to_snapshot(&self) -> LuaSfxInstanceSnapshot {
+        LuaSfxInstanceSnapshot {
+            handle: self.handle.clone(),
+            cue: self.cue.clone(),
+            parameters: self.parameters.clone(),
+        }
+    }
+}
+
+fn sector_kind_label(kind: SetSectorKind) -> &'static str {
+    match kind {
+        SetSectorKind::Walk => "walk",
+        SetSectorKind::Camera => "camera",
+        SetSectorKind::Special => "special",
+        SetSectorKind::Other => "other",
+    }
+}
+
+fn vec3_to_array(vec: Vec3) -> [f32; 3] {
+    [vec.x, vec.y, vec.z]
+}
+
+pub fn run_boot_sequence(
+    data_root: &Path,
+    lab_root: Option<&Path>,
+    verbose: bool,
+    geometry_json: Option<&Path>,
+) -> Result<()> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
             .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
@@ -2296,6 +2869,14 @@ pub fn run_boot_sequence(data_root: &Path, lab_root: Option<&Path>, verbose: boo
 
     let snapshot = context.borrow();
     dump_runtime_summary(&snapshot);
+    if let Some(path) = geometry_json {
+        let snapshot_data = snapshot.geometry_snapshot();
+        let json = serde_json::to_string_pretty(&snapshot_data)
+            .context("serializing Lua geometry snapshot to JSON")?;
+        fs::write(path, &json)
+            .with_context(|| format!("writing Lua geometry snapshot to {}", path.display()))?;
+        println!("Saved Lua geometry snapshot to {}", path.display());
+    }
     Ok(())
 }
 
@@ -2508,6 +3089,58 @@ fn install_sfx_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> LuaRe
     }
 
     let sfx = lua.create_table()?;
+
+    let play_context = context.clone();
+    sfx.set(
+        "play",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            if values.is_empty() {
+                return Ok(());
+            }
+            let cue = values
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let params = values
+                .iter()
+                .skip(1)
+                .map(|value| describe_value(value))
+                .collect::<Vec<_>>();
+            play_context.borrow_mut().play_sound_effect(cue, params);
+            Ok(())
+        })?,
+    )?;
+
+    let stop_context = context.clone();
+    sfx.set(
+        "stop",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            let target = values.get(0).and_then(|value| value_to_string(value));
+            stop_context.borrow_mut().stop_sound_effect(target);
+            Ok(())
+        })?,
+    )?;
+
+    let stop_all_context = context.clone();
+    sfx.set(
+        "stop_all",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            stop_all_context.borrow_mut().stop_sound_effect(None);
+            Ok(())
+        })?,
+    )?;
+
+    let stop_all_camel_context = context.clone();
+    sfx.set(
+        "stopAll",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            stop_all_camel_context.borrow_mut().stop_sound_effect(None);
+            Ok(())
+        })?,
+    )?;
+
     let fallback_context = context.clone();
     let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
         if let Value::String(method) = key {
@@ -5361,17 +5994,46 @@ fn install_music_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
 
     let music = lua.create_table()?;
 
-    let start_context = context.clone();
+    let play_context = context.clone();
     music.set(
         "play",
         lua.create_function(move |_, args: Variadic<Value>| {
-            let track = args
+            let (_, values) = split_self(args);
+            if values.is_empty() {
+                return Ok(());
+            }
+            let track = values
                 .get(0)
-                .and_then(|value| value_to_string(value))
+                .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
-            start_context
-                .borrow_mut()
-                .log_event(format!("music.play {track}"));
+            let params = values
+                .iter()
+                .skip(1)
+                .map(|value| describe_value(value))
+                .collect::<Vec<_>>();
+            play_context.borrow_mut().play_music(track, params);
+            Ok(())
+        })?,
+    )?;
+
+    let queue_context = context.clone();
+    music.set(
+        "queue",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            if values.is_empty() {
+                return Ok(());
+            }
+            let track = values
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let params = values
+                .iter()
+                .skip(1)
+                .map(|value| describe_value(value))
+                .collect::<Vec<_>>();
+            queue_context.borrow_mut().queue_music(track, params);
             Ok(())
         })?,
     )?;
@@ -5379,8 +6041,92 @@ fn install_music_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
     let stop_context = context.clone();
     music.set(
         "stop",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            let mode = values.get(0).and_then(|value| value_to_string(value));
+            stop_context.borrow_mut().stop_music(mode);
+            Ok(())
+        })?,
+    )?;
+
+    let pause_context = context.clone();
+    music.set(
+        "pause",
         lua.create_function(move |_, _: Variadic<Value>| {
-            stop_context.borrow_mut().log_event("music.stop");
+            pause_context.borrow_mut().pause_music();
+            Ok(())
+        })?,
+    )?;
+
+    let resume_context = context.clone();
+    music.set(
+        "resume",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            resume_context.borrow_mut().resume_music();
+            Ok(())
+        })?,
+    )?;
+
+    let set_state_context = context.clone();
+    music.set(
+        "set_state",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            let state = values.get(0).and_then(|value| value_to_string(value));
+            set_state_context.borrow_mut().set_music_state(state);
+            Ok(())
+        })?,
+    )?;
+
+    let push_state_context = context.clone();
+    music.set(
+        "push_state",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            let state = values.get(0).and_then(|value| value_to_string(value));
+            push_state_context.borrow_mut().push_music_state(state);
+            Ok(())
+        })?,
+    )?;
+
+    let pop_state_context = context.clone();
+    music.set(
+        "pop_state",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            pop_state_context.borrow_mut().pop_music_state();
+            Ok(())
+        })?,
+    )?;
+
+    let mute_context = context.clone();
+    music.set(
+        "mute_group",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            let group = values.get(0).and_then(|value| value_to_string(value));
+            mute_context.borrow_mut().mute_music_group(group);
+            Ok(())
+        })?,
+    )?;
+
+    let unmute_context = context.clone();
+    music.set(
+        "unmute_group",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            let group = values.get(0).and_then(|value| value_to_string(value));
+            unmute_context.borrow_mut().unmute_music_group(group);
+            Ok(())
+        })?,
+    )?;
+
+    let volume_context = context.clone();
+    music.set(
+        "set_volume",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_, values) = split_self(args);
+            let volume = values.get(0).and_then(|value| value_to_f32(value));
+            volume_context.borrow_mut().set_music_volume(volume);
             Ok(())
         })?,
     )?;
@@ -5970,6 +6716,67 @@ fn dump_runtime_summary(state: &EngineContext) {
     if let Some(effect) = &state.voice_effect {
         println!("  Voice effect: {}", effect);
     }
+    if let Some(current) = &state.music.current {
+        if current.parameters.is_empty() {
+            println!("  Music playing: {}", current.name);
+        } else {
+            println!(
+                "  Music playing: {} [{}]",
+                current.name,
+                current.parameters.join(", ")
+            );
+        }
+    } else {
+        println!("  Music playing: <none>");
+    }
+    if !state.music.queued.is_empty() {
+        let queued: Vec<_> = state
+            .music
+            .queued
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        println!("  Music queued: {}", queued.join(", "));
+    }
+    if state.music.paused {
+        println!("  Music paused");
+    }
+    if let Some(state_name) = &state.music.current_state {
+        println!("  Music state: {}", state_name);
+    }
+    if !state.music.state_stack.is_empty() {
+        println!(
+            "  Music state stack: {}",
+            state.music.state_stack.join(" -> ")
+        );
+    }
+    if !state.music.muted_groups.is_empty() {
+        let groups: Vec<_> = state
+            .music
+            .muted_groups
+            .iter()
+            .map(|group| group.as_str())
+            .collect();
+        println!("  Music muted groups: {}", groups.join(", "));
+    }
+    if let Some(volume) = state.music.volume {
+        println!("  Music volume: {:.3}", volume);
+    }
+    if !state.sfx.active.is_empty() {
+        println!("  Active SFX:");
+        for instance in state.sfx.active.values() {
+            if instance.parameters.is_empty() {
+                println!("    - {} ({})", instance.cue, instance.handle);
+            } else {
+                println!(
+                    "    - {} ({}) [{}]",
+                    instance.cue,
+                    instance.handle,
+                    instance.parameters.join(", ")
+                );
+            }
+        }
+    }
     if let Some(manny) = state.actors.get("manny") {
         if let Some(set) = &manny.current_set {
             println!("  Manny in set: {set}");
@@ -6532,6 +7339,13 @@ fn value_to_string(value: &Value) -> Option<String> {
         _ => None,
     }
 }
+fn format_music_detail(action: &str, cue: &str, params: &[String]) -> String {
+    if params.is_empty() {
+        format!("{} {}", action, cue)
+    } else {
+        format!("{} {} [{}]", action, cue, params.join(", "))
+    }
+}
 
 fn describe_value(value: &Value) -> String {
     value_to_string(value).unwrap_or_else(|| format!("<{value:?}>"))
@@ -6746,6 +7560,58 @@ mod tests {
     }
 
     #[test]
+    fn music_state_tracks_basic_transitions() {
+        let mut ctx = make_context();
+        ctx.play_music("intro".to_string(), vec!["loop=true".to_string()]);
+        assert_eq!(
+            ctx.music.current.as_ref().map(|cue| cue.name.as_str()),
+            Some("intro")
+        );
+        assert!(ctx
+            .music
+            .history
+            .last()
+            .expect("music history entry")
+            .starts_with("play intro"));
+
+        ctx.queue_music("next".to_string(), Vec::new());
+        assert_eq!(ctx.music.queued.len(), 1);
+
+        ctx.pause_music();
+        assert!(ctx.music.paused);
+        ctx.resume_music();
+        assert!(!ctx.music.paused);
+
+        ctx.set_music_state(Some("office".to_string()));
+        assert_eq!(ctx.music.current_state.as_deref(), Some("office"));
+        ctx.push_music_state(Some("alert".to_string()));
+        assert_eq!(
+            ctx.music.state_stack.last().map(|s| s.as_str()),
+            Some("alert")
+        );
+        ctx.pop_music_state();
+        assert!(ctx.music.state_stack.is_empty());
+
+        ctx.stop_music(Some("immediate".to_string()));
+        assert!(ctx.music.current.is_none());
+    }
+
+    #[test]
+    fn sfx_state_registers_and_clears_instances() {
+        let mut ctx = make_context();
+        let handle = ctx.play_sound_effect("door_knock".to_string(), vec!["loop=0".to_string()]);
+        assert!(ctx.sfx.active.contains_key(&handle));
+        ctx.stop_sound_effect(Some(handle.clone()));
+        assert!(!ctx.sfx.active.contains_key(&handle));
+
+        ctx.play_sound_effect("ambient".to_string(), Vec::new());
+        ctx.play_sound_effect("buzz".to_string(), Vec::new());
+        assert!(!ctx.sfx.active.is_empty());
+        ctx.stop_sound_effect(None);
+        assert!(ctx.sfx.active.is_empty());
+    }
+
+    #[test]
     fn visible_objects_respect_sector_activation() {
         let mut ctx = make_context();
         ctx.set_geometry.insert(
@@ -6890,5 +7756,47 @@ mod tests {
         assert!(ctx.cut_scene_stack.last().expect("cut scene").suppressed);
         let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
         assert!(!ctx.cut_scene_stack.last().expect("cut scene").suppressed);
+    }
+
+    #[test]
+    fn geometry_snapshot_reflects_sector_state() {
+        let mut ctx = make_context();
+        ctx.set_geometry.insert(
+            "mo.set".to_string(),
+            ParsedSetGeometry::from_set_file(sample_geometry_set()),
+        );
+        ctx.switch_to_set("mo.set");
+        let snapshot = ctx.geometry_snapshot();
+        let set = snapshot
+            .sets
+            .iter()
+            .find(|set| set.set_file == "mo.set")
+            .expect("mo.set snapshot");
+        let desk_sector = set
+            .sectors
+            .iter()
+            .find(|sector| sector.name == "desk_walk")
+            .expect("desk_walk sector");
+        assert!(desk_sector.active, "desk_walk should start active");
+
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
+        let snapshot = ctx.geometry_snapshot();
+        let set = snapshot
+            .sets
+            .iter()
+            .find(|set| set.set_file == "mo.set")
+            .expect("mo.set snapshot");
+        let desk_sector = set
+            .sectors
+            .iter()
+            .find(|sector| sector.name == "desk_walk")
+            .expect("desk_walk sector");
+        assert!(
+            !desk_sector.active,
+            "desk_walk should reflect toggled state in snapshot"
+        );
+
+        let current = snapshot.current_set.expect("current set snapshot");
+        assert_eq!(current.set_file, "mo.set");
     }
 }

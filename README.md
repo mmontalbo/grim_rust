@@ -177,6 +177,13 @@ hot-box scripts flip the same polygons the original engine used instead of relyi
 logging-only placeholders. Visible hotspot sweeps now drop any object whose sectors are
 currently inactive, so `GetVisibleThings` mirrors the walkbox changes `MakeSectorActive` introduces. Objects bound to interest actors now inherit their parent actor's set and live transforms, so Manny's commentary/head-control trackers follow the same walkbox toggles after he moves around the office. Commentary toggles track the active hotlist entry and automatically suspend or resume when the covering walkboxes flip, while the cut-scene ledger records the originating set/sector and flags when a sequence is blocked or unblocked by geometry overrides.
 
+Use `--lua-geometry-json <file>` alongside `--run-lua` to dump a machine-readable snapshot of the current runtime. The JSON captures the active set and setup, per-set sector activation sourced from the LAB geometry, every actor/object snapshot (including visibility, hotlist status, and sector membership), plus the commentary/cut-scene ledgers and event log so downstream tooling can diff placements without scraping verbose logs.
+
+When the static analysis pipeline runs, `grim_analysis` now records every 
+`MakeSectorActive` invocation, so `grim_engine --geometry-diff <snapshot.json>` can compare those scripted toggles against a previously captured `--lua-geometry-json` snapshot. The diff highlights sectors that don't match, unresolved toggles, and geometry calls that target missing polygons, giving us a quick sanity check before diving back into verbose runtime logs. It also checks Build_Hotlist/head_look_at expectations, warning if the runtime snapshot reports an empty hotlist or leaves Manny's head target unset, and now compares each visible object’s range/distance/bearing against the LAB-derived geometry so head-control drift shows up alongside the sector results. Pair the command with `--geometry-diff-json <report.json>` to write the sector/visibility comparison as JSON so downstream tooling can archive the diff output. Run `grim_engine --verify-geometry` (optionally adding `--lab-root`, `--lua-geometry-json`, or `--geometry-diff-json`) to execute both steps automatically: it replays the static boot pipeline, captures a fresh runtime snapshot, diffs the results, and exits non-zero if a mismatch is detected.
+
+`cargo test -p grim_engine` now exercises the same verify-geometry workflow via `tests::verify_geometry_round_trip_matches_static_timeline`, so automated runs fail if the runtime snapshot diverges from the static timeline.
+
 Every visibility sweep now stores the matching object snapshot, including distance, bearing,
 range heuristics, and the derived hotlist so the runtime summary mirrors what `Head_Control`
 is considering each frame. The end-of-run summary also reports the current commentary label and any cut scenes still blocked by sector overrides so we can diff runtime vs analysis expectations.
@@ -210,6 +217,14 @@ Achievements bootstrap now run through the embedded host as well: requests for
 `ACHIEVE_CLASSIC_DRIVER`, ensuring Manny's Office exit scripts can toggle the
 classic-driver achievement without crashing while the real platform bridges are
 still out of scope for this prototype.
+
+Music and effects scaffolds gained real state tracking too. Calls into
+`music:play`, `music:queue`, `music:stop`, and the legacy state stack helpers now
+update a host-side ledger that records the active cue, queued transitions, muted
+mix groups, and the most recent volume change so the runtime summary and geometry
+snapshot show which themes are live. The new `sfx:play`/`sfx:stop` shims create
+lightweight instances with synthetic handles, letting later scripts toggle
+looping ambiences without falling back to no-op logging.
 
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest

@@ -2,9 +2,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use grim_analysis::boot::{run_boot_pipeline, BootRequest};
 use grim_analysis::registry::Registry;
@@ -15,11 +16,14 @@ use grim_analysis::timeline::{build_boot_timeline, BootTimeline, HookKind, HookT
 use serde::Serialize;
 
 mod assets;
+mod geometry_diff;
+mod geometry_snapshot;
 mod lab_collection;
 mod lua_host;
 mod scheduler;
 mod state;
 use assets::MANNY_OFFICE_ASSETS;
+use geometry_diff::run_geometry_diff;
 use lab_collection::{collect_assets, AssetMetadata, AssetReport, LabCollection};
 use lua_host::run_boot_sequence;
 use scheduler::{MovieQueue, ScriptScheduler};
@@ -83,17 +87,75 @@ struct Args {
     #[arg(long)]
     scheduler_json: Option<PathBuf>,
 
+    /// Compare a Lua geometry snapshot against the static timeline (requires --timeline-json or default analysis run)
+    #[arg(long)]
+    geometry_diff: Option<PathBuf>,
+
+    /// Path to write the geometry diff summary as JSON (requires --geometry-diff)
+    #[arg(long)]
+    geometry_diff_json: Option<PathBuf>,
+
     /// Execute the embedded Lua VM prototype instead of the static analysis pipeline
     #[arg(long)]
     run_lua: bool,
+
+    /// Path to write the embedded Lua geometry/visibility snapshot as JSON (with --run-lua or --verify-geometry)
+    #[arg(long)]
+    lua_geometry_json: Option<PathBuf>,
+
+    /// Generate a runtime geometry snapshot and diff it against the static timeline
+    #[arg(long)]
+    verify_geometry: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.run_lua {
-        run_boot_sequence(&args.data_root, args.lab_root.as_deref(), args.verbose)?;
+        if args.verify_geometry {
+            bail!("--verify-geometry cannot be combined with --run-lua");
+        }
+        if let Some(path) = args.geometry_diff.as_ref() {
+            eprintln!(
+                "[grim_engine] warning: --geometry-diff={} ignored with --run-lua",
+                path.display()
+            );
+        }
+        if let Some(path) = args.geometry_diff_json.as_ref() {
+            eprintln!(
+                "[grim_engine] warning: --geometry-diff-json={} ignored with --run-lua",
+                path.display()
+            );
+        }
+        run_boot_sequence(
+            &args.data_root,
+            args.lab_root.as_deref(),
+            args.verbose,
+            args.lua_geometry_json.as_deref(),
+        )?;
         return Ok(());
+    }
+
+    if args.verify_geometry && args.geometry_diff.is_some() {
+        bail!("--geometry-diff cannot be used with --verify-geometry; the snapshot is captured automatically");
+    }
+
+    if !args.verify_geometry {
+        if let Some(path) = args.lua_geometry_json.as_ref() {
+            eprintln!(
+                "[grim_engine] warning: --lua-geometry-json={} ignored without --run-lua",
+                path.display()
+            );
+        }
+    }
+
+    if !args.verify_geometry && args.geometry_diff.is_none() {
+        if let Some(path) = args.geometry_diff_json.as_ref() {
+            eprintln!(
+                "[grim_engine] warning: --geometry-diff-json={} ignored without --geometry-diff",
+                path.display()
+            );
+        }
     }
 
     let mut registry =
@@ -109,6 +171,47 @@ fn main() -> Result<()> {
     );
     let timeline = build_boot_timeline(&summary, &runtime_model);
     let engine_state = EngineState::from_timeline(&timeline);
+
+    if args.verify_geometry {
+        let (snapshot_path, remove_after) = match args.lua_geometry_json.as_ref() {
+            Some(path) => (path.clone(), false),
+            None => (temp_snapshot_path(), true),
+        };
+
+        run_boot_sequence(
+            &args.data_root,
+            args.lab_root.as_deref(),
+            args.verbose,
+            Some(snapshot_path.as_path()),
+        )?;
+
+        run_geometry_diff(
+            &timeline,
+            &engine_state,
+            snapshot_path.as_path(),
+            &args.data_root,
+            args.geometry_diff_json.as_deref(),
+        )?;
+
+        if remove_after {
+            if let Err(err) = fs::remove_file(&snapshot_path) {
+                eprintln!(
+                    "[grim_engine] warning: failed to remove temporary geometry snapshot {}: {}",
+                    snapshot_path.display(),
+                    err
+                );
+            }
+        }
+    }
+    if let Some(path) = args.geometry_diff.as_ref() {
+        run_geometry_diff(
+            &timeline,
+            &engine_state,
+            path,
+            &args.data_root,
+            args.geometry_diff_json.as_deref(),
+        )?;
+    }
     if let Some(path) = args.timeline_json.as_ref() {
         let manifest = TimelineManifest {
             timeline: &timeline,
@@ -494,8 +597,9 @@ fn print_hook_summary(idx: usize, application: &HookApplication) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::{fs, path::PathBuf, sync::OnceLock};
+    use tempfile::NamedTempFile;
 
     static BOOT_FIXTURE: OnceLock<(BootTimeline, EngineState)> = OnceLock::new();
 
@@ -654,6 +758,77 @@ mod tests {
 
         assert_eq!(actual, expected);
     }
+    #[test]
+    fn verify_geometry_round_trip_matches_static_timeline() -> Result<()> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf();
+
+        let data_root = workspace_root.join("extracted").join("DATA000");
+        let lab_root = workspace_root.join("dev-install");
+
+        assert!(
+            data_root.is_dir(),
+            "expected DATA000 at {}",
+            data_root.display()
+        );
+        assert!(
+            lab_root.is_dir(),
+            "expected dev-install at {}",
+            lab_root.display()
+        );
+
+        let fixture = boot_fixture();
+        let timeline = &fixture.0;
+        let engine_state = &fixture.1;
+
+        let snapshot_file = NamedTempFile::new()?;
+        super::lua_host::run_boot_sequence(
+            &data_root,
+            Some(lab_root.as_path()),
+            false,
+            Some(snapshot_file.path()),
+        )?;
+
+        let diff_file = NamedTempFile::new()?;
+        super::geometry_diff::run_geometry_diff(
+            timeline,
+            engine_state,
+            snapshot_file.path(),
+            &data_root,
+            Some(diff_file.path()),
+        )?;
+
+        let summary_json = fs::read_to_string(diff_file.path())?;
+        let summary: Value = serde_json::from_str(&summary_json)?;
+
+        let sectors_are_clean = summary
+            .get("sector_mismatches")
+            .map(|value| matches!(value, Value::Array(items) if items.is_empty()))
+            .unwrap_or(true);
+        assert!(
+            sectors_are_clean,
+            "geometry diff reported sector mismatches: {summary}"
+        );
+
+        let issues_are_clean = summary
+            .get("issues")
+            .and_then(Value::as_object)
+            .map(|issues| {
+                issues.values().all(|value| match value {
+                    Value::Array(items) => items.is_empty(),
+                    Value::Null => true,
+                    Value::Object(map) => map.is_empty(),
+                    _ => false,
+                })
+            })
+            .unwrap_or(true);
+        assert!(issues_are_clean, "geometry diff reported issues: {summary}");
+
+        Ok(())
+    }
 }
 
 fn describe_hook_kind(kind: HookKind) -> &'static str {
@@ -729,6 +904,19 @@ fn print_simulation_details(simulation: &FunctionSimulation) {
 
     if !simulation.movie_calls.is_empty() {
         println!("      movies: {}", simulation.movie_calls.join(", "));
+    }
+
+    if !simulation.geometry_calls.is_empty() {
+        println!("      geometry calls:");
+        for call in simulation.geometry_calls.iter().take(4) {
+            println!("        {}({})", call.function, call.arguments.join(", "));
+        }
+        if simulation.geometry_calls.len() > 4 {
+            println!(
+                "        ... +{} more calls",
+                simulation.geometry_calls.len() - 4
+            );
+        }
     }
 }
 
@@ -855,4 +1043,18 @@ fn format_reference(reference: &HookReference) -> String {
 
 fn is_cutscene_script(script: &str) -> bool {
     script.to_ascii_lowercase().starts_with("cut_scene.")
+}
+
+fn temp_snapshot_path() -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    path.push(format!(
+        "grim_engine_geometry_snapshot_{}_{}.json",
+        timestamp,
+        std::process::id()
+    ));
+    path
 }

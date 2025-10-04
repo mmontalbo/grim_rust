@@ -277,6 +277,10 @@ pub struct HookApplication {
     pub ancillary_calls: Vec<AncillaryCall>,
     pub queued_scripts: Vec<ScriptEvent>,
     pub queued_movies: Vec<MovieEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub geometry_calls: Vec<GeometryCall>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub visibility_calls: Vec<VisibilityCall>,
 }
 
 impl HookApplication {
@@ -288,6 +292,8 @@ impl HookApplication {
         let ancillary_calls = collect_ancillary_calls(&simulation, &reference);
         let queued_scripts = collect_script_events(&simulation, &reference);
         let queued_movies = collect_movie_events(&simulation, &reference);
+        let geometry_calls = collect_geometry_calls(&simulation, &reference, sequence_index);
+        let visibility_calls = collect_visibility_calls(&simulation, &reference, sequence_index);
         let created_actors = simulation.created_actors.clone();
 
         HookApplication {
@@ -299,6 +305,8 @@ impl HookApplication {
             ancillary_calls,
             queued_scripts,
             queued_movies,
+            geometry_calls,
+            visibility_calls,
         }
     }
 }
@@ -350,6 +358,22 @@ pub struct SubsystemDeltaEvent {
     pub trigger_sequence: usize,
     pub triggered_by: HookReference,
     pub call_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeometryCall {
+    pub function: String,
+    pub arguments: Vec<String>,
+    pub triggered_by: HookReference,
+    pub trigger_sequence: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VisibilityCall {
+    pub function: String,
+    pub arguments: Vec<String>,
+    pub triggered_by: HookReference,
+    pub trigger_sequence: usize,
 }
 
 #[allow(dead_code)]
@@ -464,6 +488,40 @@ fn collect_script_events(
         .map(|script| ScriptEvent {
             name: script.clone(),
             triggered_by: reference.clone(),
+        })
+        .collect()
+}
+
+fn collect_geometry_calls(
+    simulation: &FunctionSimulation,
+    reference: &HookReference,
+    sequence_index: usize,
+) -> Vec<GeometryCall> {
+    simulation
+        .geometry_calls
+        .iter()
+        .map(|call| GeometryCall {
+            function: call.function.clone(),
+            arguments: call.arguments.clone(),
+            triggered_by: reference.clone(),
+            trigger_sequence: sequence_index + 1,
+        })
+        .collect()
+}
+
+fn collect_visibility_calls(
+    simulation: &FunctionSimulation,
+    reference: &HookReference,
+    sequence_index: usize,
+) -> Vec<VisibilityCall> {
+    simulation
+        .visibility_calls
+        .iter()
+        .map(|call| VisibilityCall {
+            function: call.function.clone(),
+            arguments: call.arguments.clone(),
+            triggered_by: reference.clone(),
+            trigger_sequence: sequence_index + 1,
         })
         .collect()
 }
