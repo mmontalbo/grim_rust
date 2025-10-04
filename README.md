@@ -171,7 +171,10 @@ hydrate walk and camera sectors from the LAB archives so runtime sector queries
 no longer rely solely on hard-coded zones. Walk-sector lookups are driven by the
 parsed polygons, while camera/hot requests map through the setup interest
 points (Manny's introductory camera still uses the compatibility fallback until
-we mirror the original selection heuristics precisely).
+we mirror the original selection heuristics precisely). Sector toggles routed through
+`MakeSectorActive` now update those parsed walk/camera records as well, so door passages and
+hot-box scripts flip the same polygons the original engine used instead of relying on
+logging-only placeholders.
 
 Every visibility sweep now stores the matching object snapshot, including distance, bearing,
 range heuristics, and the derived hotlist so the runtime summary mirrors what `Head_Control`

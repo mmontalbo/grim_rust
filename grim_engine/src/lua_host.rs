@@ -77,10 +77,17 @@ struct SectorPolygon {
     kind: SetSectorKind,
     vertices: Vec<(f32, f32)>,
     centroid: (f32, f32),
+    default_active: bool,
 }
 
 impl SectorPolygon {
-    fn new(name: String, id: i32, kind: SetSectorKind, vertices: Vec<(f32, f32)>) -> Self {
+    fn new(
+        name: String,
+        id: i32,
+        kind: SetSectorKind,
+        vertices: Vec<(f32, f32)>,
+        default_active: bool,
+    ) -> Self {
         let centroid = if vertices.is_empty() {
             (0.0, 0.0)
         } else {
@@ -96,6 +103,7 @@ impl SectorPolygon {
             kind,
             vertices,
             centroid,
+            default_active,
         }
     }
 
@@ -146,7 +154,21 @@ impl ParsedSetGeometry {
                     .into_iter()
                     .map(|SetVec3 { x, y, .. }| (x, y))
                     .collect();
-                SectorPolygon::new(sector.name, sector.id, sector.kind, vertices)
+                let default_active = sector
+                    .default_visibility
+                    .as_ref()
+                    .map(|value| match value.to_ascii_lowercase().as_str() {
+                        "hidden" | "invisible" | "false" | "off" => false,
+                        _ => true,
+                    })
+                    .unwrap_or(true);
+                SectorPolygon::new(
+                    sector.name,
+                    sector.id,
+                    sector.kind,
+                    vertices,
+                    default_active,
+                )
             })
             .collect();
 
@@ -282,6 +304,21 @@ impl SectorHit {
             kind: kind.into(),
         }
     }
+}
+
+#[derive(Debug)]
+enum SectorToggleResult {
+    Applied {
+        set_file: String,
+        sector: String,
+        known_sector: bool,
+    },
+    NoChange {
+        set_file: String,
+        sector: String,
+        known_sector: bool,
+    },
+    NoSet,
 }
 
 #[derive(Debug, Clone)]
@@ -591,6 +628,7 @@ struct EngineContext {
     message_active: bool,
     lab_collection: Option<Rc<LabCollection>>,
     set_geometry: BTreeMap<String, ParsedSetGeometry>,
+    sector_states: BTreeMap<String, BTreeMap<String, bool>>,
 }
 
 impl EngineContext {
@@ -652,6 +690,7 @@ impl EngineContext {
             message_active: false,
             lab_collection,
             set_geometry: BTreeMap::new(),
+            sector_states: BTreeMap::new(),
         }
     }
 
@@ -927,6 +966,15 @@ impl EngineContext {
                                     geometry.setups.len()
                                 ));
                             }
+                            self.sector_states
+                                .entry(set_file.to_string())
+                                .or_insert_with(|| {
+                                    let mut map = BTreeMap::new();
+                                    for sector in &geometry.sectors {
+                                        map.insert(sector.name.clone(), sector.default_active);
+                                    }
+                                    map
+                                });
                             self.set_geometry.insert(set_file.to_string(), geometry);
                         } else if self.verbose {
                             eprintln!(
@@ -954,6 +1002,123 @@ impl EngineContext {
                 }
             }
         }
+    }
+
+    fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
+        if !self.sector_states.contains_key(set_file) {
+            if !self.set_geometry.contains_key(set_file) {
+                self.load_set_geometry(set_file);
+            }
+            let mut map = BTreeMap::new();
+            if let Some(geometry) = self.set_geometry.get(set_file) {
+                for sector in &geometry.sectors {
+                    map.insert(sector.name.clone(), sector.default_active);
+                }
+            }
+            self.sector_states.insert(set_file.to_string(), map);
+        } else if let Some(geometry) = self.set_geometry.get(set_file) {
+            let entries: Vec<(String, bool)> = geometry
+                .sectors
+                .iter()
+                .map(|sector| (sector.name.clone(), sector.default_active))
+                .collect();
+            if let Some(states) = self.sector_states.get_mut(set_file) {
+                for (name, default_active) in entries {
+                    states.entry(name).or_insert(default_active);
+                }
+            }
+        }
+        self.set_geometry.contains_key(set_file)
+    }
+
+    fn canonical_sector_name(&self, set_file: &str, sector: &str) -> Option<String> {
+        let lower = sector.to_ascii_lowercase();
+        if let Some(geometry) = self.set_geometry.get(set_file) {
+            if let Some(poly) = geometry
+                .sectors
+                .iter()
+                .find(|poly| poly.name.to_ascii_lowercase() == lower)
+            {
+                return Some(poly.name.clone());
+            }
+        }
+        self.sector_states.get(set_file).and_then(|map| {
+            map.keys()
+                .find(|name| name.to_ascii_lowercase() == lower)
+                .cloned()
+        })
+    }
+
+    fn set_sector_active(
+        &mut self,
+        set_file_hint: Option<&str>,
+        sector_name: &str,
+        active: bool,
+    ) -> SectorToggleResult {
+        let set_file = match set_file_hint {
+            Some(file) if !file.is_empty() => file.to_string(),
+            _ => match self.current_set.as_ref() {
+                Some(snapshot) => snapshot.set_file.clone(),
+                None => return SectorToggleResult::NoSet,
+            },
+        };
+
+        let has_geometry = self.ensure_sector_state_map(&set_file);
+        let canonical = self
+            .canonical_sector_name(&set_file, sector_name)
+            .unwrap_or_else(|| sector_name.to_string());
+        let known_sector = if has_geometry {
+            self.set_geometry
+                .get(&set_file)
+                .map(|geometry| {
+                    geometry
+                        .sectors
+                        .iter()
+                        .any(|poly| poly.name.eq_ignore_ascii_case(&canonical))
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let states = self
+            .sector_states
+            .get_mut(&set_file)
+            .expect("sector state map missing");
+        let previous = states.insert(canonical.clone(), active);
+        let state = if active { "on" } else { "off" };
+
+        match previous {
+            Some(prev) if prev == active => {
+                self.log_event(format!(
+                    "sector.active {set_file}:{canonical} already {state}"
+                ));
+                SectorToggleResult::NoChange {
+                    set_file,
+                    sector: canonical,
+                    known_sector,
+                }
+            }
+            _ => {
+                self.log_event(format!("sector.active {set_file}:{canonical} {state}"));
+                SectorToggleResult::Applied {
+                    set_file,
+                    sector: canonical,
+                    known_sector,
+                }
+            }
+        }
+    }
+
+    fn is_sector_active(&self, set_file: &str, sector_name: &str) -> bool {
+        let key = self
+            .canonical_sector_name(set_file, sector_name)
+            .unwrap_or_else(|| sector_name.to_string());
+        self.sector_states
+            .get(set_file)
+            .and_then(|map| map.get(&key))
+            .copied()
+            .unwrap_or(true)
     }
 
     fn record_current_setup(&mut self, set_file: &str, setup: i32) {
@@ -1369,6 +1534,10 @@ impl EngineContext {
             (_, _) => "mo_mcecu",
         };
 
+        if !self.is_sector_active(&current_set.set_file, label) {
+            return None;
+        }
+
         self.sector_hit_from_setup(&current_set.set_file, label, normalized_kind)
     }
 
@@ -1723,7 +1892,9 @@ impl EngineContext {
             }
             "walk" | "0" => {
                 if let Some(polygon) = geometry.find_polygon(SetSectorKind::Walk, point) {
-                    return Some(SectorHit::new(polygon.id, polygon.name.clone(), "WALK"));
+                    if self.is_sector_active(&current.set_file, &polygon.name) {
+                        return Some(SectorHit::new(polygon.id, polygon.name.clone(), "WALK"));
+                    }
                 }
             }
             _ => {
@@ -1733,11 +1904,13 @@ impl EngineContext {
                     _ => None,
                 } {
                     if let Some(polygon) = geometry.find_polygon(kind, point) {
-                        return Some(SectorHit::new(
-                            polygon.id,
-                            polygon.name.clone(),
-                            raw_kind.to_ascii_uppercase(),
-                        ));
+                        if self.is_sector_active(&current.set_file, &polygon.name) {
+                            return Some(SectorHit::new(
+                                polygon.id,
+                                polygon.name.clone(),
+                                raw_kind.to_ascii_uppercase(),
+                            ));
+                        }
                     }
                 }
             }
@@ -2368,6 +2541,42 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
                 "commentary.active {}",
                 if enabled { "on" } else { "off" }
             ));
+            Ok(())
+        })?,
+    )?;
+    let sector_ctx = context.clone();
+    globals.set(
+        "MakeSectorActive",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let name_value = args.get(0).cloned().unwrap_or(Value::Nil);
+            let active = args.get(1).map(value_to_bool).unwrap_or(true);
+            let set_hint = args.get(2).and_then(|value| value_to_set_file(value));
+            let mut ctx = sector_ctx.borrow_mut();
+            let Some(sector_name) = value_to_sector_name(&name_value) else {
+                let desc = describe_value(&name_value);
+                ctx.log_event(format!("sector.active <invalid> ({desc})"));
+                return Ok(());
+            };
+            match ctx.set_sector_active(set_hint.as_deref(), &sector_name, active) {
+                SectorToggleResult::Applied {
+                    set_file,
+                    sector,
+                    known_sector,
+                    ..
+                }
+                | SectorToggleResult::NoChange {
+                    set_file,
+                    sector,
+                    known_sector,
+                } => {
+                    if !known_sector {
+                        ctx.log_event(format!("sector.active.unknown {set_file}:{sector}"));
+                    }
+                }
+                SectorToggleResult::NoSet => {
+                    ctx.log_event("sector.active <no current set>".to_string());
+                }
+            }
             Ok(())
         })?,
     )?;
@@ -3984,6 +4193,24 @@ fn value_to_set_file(value: &Value) -> Option<String> {
     }
 }
 
+fn value_to_sector_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.to_str().ok()?.to_string()),
+        Value::Table(table) => {
+            if let Ok(Some(name)) = table.get::<_, Option<String>>("name") {
+                return Some(name);
+            }
+            if let Ok(Some(label)) = table.get::<_, Option<String>>("label") {
+                return Some(label);
+            }
+            None
+        }
+        Value::Integer(i) => Some(i.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 fn value_to_object_handle(value: &Value) -> Option<i64> {
     match value {
         Value::Integer(handle) => Some(*handle),
@@ -5466,6 +5693,31 @@ fn dump_runtime_summary(state: &EngineContext) {
             .collect::<Vec<_>>()
             .join(", ");
         println!("  Inventory rooms: {}", display);
+    }
+    if let Some(current) = &state.current_set {
+        if let Some(states) = state.sector_states.get(&current.set_file) {
+            if let Some(geometry) = state.set_geometry.get(&current.set_file) {
+                let mut overrides: Vec<(String, bool)> = Vec::new();
+                for sector in &geometry.sectors {
+                    if let Some(active) = states.get(&sector.name) {
+                        if *active != sector.default_active {
+                            overrides.push((sector.name.clone(), *active));
+                        }
+                    }
+                }
+                if !overrides.is_empty() {
+                    overrides.sort_by(|a, b| a.0.cmp(&b.0));
+                    println!("  Sector overrides:");
+                    for (name, active) in overrides {
+                        println!(
+                            "    - {}: {}",
+                            name,
+                            if active { "active" } else { "inactive" }
+                        );
+                    }
+                }
+            }
+        }
     }
     if !state.visible_objects.is_empty() {
         println!("  Visible objects:");

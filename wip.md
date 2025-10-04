@@ -53,7 +53,8 @@
 ## Next Steps
 1. Carry the parsed set geometry through the remaining boot-time trackers (head-control,
    commentary, and cut-scene helpers) so they consume the real walk polygons instead of logging
-   placeholders.
+   placeholders. `MakeSectorActive` now flips the parsed walk/camera entries; the follow-up is wiring
+   that state into the commentary/cut-scene routines that still rely on stubbed visibility.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
@@ -109,6 +110,10 @@
   and inventory services we still need to implement for real gameplay. Cooperative
   threads keep the long-running Manny trackers alive so future bindings can
   observe their loops.
+- Sector toggles: host-side `MakeSectorActive` updates the LAB-derived sector map,
+  so door passages and scripted hotspots enable/disable the same walk/camera
+  polygons the original runtime used. Runtime summaries now highlight overrides
+  whenever scripts diverge from the set file defaults.
 - Scheduler polish: function-based threads now carry source-derived labels
   (e.g., `_system.decompiled.lua:667` for `TrackManny`), and the host seeds
   Manny's set scaffolding (`setups`, `current_setup`, `cameraman`) plus engine
