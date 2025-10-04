@@ -45,6 +45,18 @@ struct Vec3 {
     z: f32,
 }
 
+const MANNY_OFFICE_SEED_POS: Vec3 = Vec3 {
+    x: 0.606_999_993,
+    y: 2.040_999_89,
+    z: 0.0,
+};
+
+const MANNY_OFFICE_SEED_ROT: Vec3 = Vec3 {
+    x: 0.0,
+    y: 222.210_007,
+    z: 0.0,
+};
+
 #[derive(Debug, Clone)]
 struct SectorHit {
     id: i32,
@@ -274,6 +286,7 @@ struct ObjectSnapshot {
     position: Option<Vec3>,
     range: f32,
     touchable: bool,
+    interest_actor: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -299,6 +312,7 @@ struct EngineContext {
     voice_effect: Option<String>,
     objects: BTreeMap<i64, ObjectSnapshot>,
     objects_by_name: BTreeMap<String, i64>,
+    objects_by_actor: BTreeMap<u32, i64>,
 }
 
 impl EngineContext {
@@ -336,6 +350,7 @@ impl EngineContext {
             voice_effect: None,
             objects: BTreeMap::new(),
             objects_by_name: BTreeMap::new(),
+            objects_by_actor: BTreeMap::new(),
         }
     }
 
@@ -458,6 +473,24 @@ impl EngineContext {
         });
         self.current_setups.entry(set_key.clone()).or_insert(0);
         self.log_event(format!("set.switch {set_file}"));
+        if set_file.eq_ignore_ascii_case("mo.set") {
+            let needs_pos = self
+                .actors
+                .get("manny")
+                .map(|actor| actor.position.is_none())
+                .unwrap_or(true);
+            if needs_pos {
+                self.set_actor_position("manny", "Manny", MANNY_OFFICE_SEED_POS);
+            }
+            let needs_rot = self
+                .actors
+                .get("manny")
+                .map(|actor| actor.rotation.is_none())
+                .unwrap_or(true);
+            if needs_rot {
+                self.set_actor_rotation("manny", "Manny", MANNY_OFFICE_SEED_ROT);
+            }
+        }
     }
 
     fn mark_set_loaded(&mut self, set_file: &str) {
@@ -495,17 +528,26 @@ impl EngineContext {
     }
 
     fn set_actor_position(&mut self, id: &str, label: &str, position: Vec3) {
-        let actor = self.ensure_actor_mut(id, label);
-        actor.position = Some(position);
+        let handle = {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.position = Some(position);
+            actor.handle
+        };
         self.log_event(format!(
             "actor.{id}.pos {:.3},{:.3},{:.3}",
             position.x, position.y, position.z
         ));
+        if handle != 0 {
+            self.update_object_position_for_actor(handle, position);
+        }
     }
 
     fn set_actor_rotation(&mut self, id: &str, label: &str, rotation: Vec3) {
-        let actor = self.ensure_actor_mut(id, label);
-        actor.rotation = Some(rotation);
+        let _handle = {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.rotation = Some(rotation);
+            actor.handle
+        };
         self.log_event(format!(
             "actor.{id}.rot {:.3},{:.3},{:.3}",
             rotation.x, rotation.y, rotation.z
@@ -650,6 +692,12 @@ impl EngineContext {
 
     fn register_object(&mut self, snapshot: ObjectSnapshot) {
         let handle = snapshot.handle;
+        if let Some(existing) = self.objects.get(&handle) {
+            if let Some(actor_handle) = existing.interest_actor {
+                self.objects_by_actor.remove(&actor_handle);
+            }
+        }
+        let interest_actor = snapshot.interest_actor;
         let name = snapshot.name.clone();
         let set_label = snapshot
             .set_file
@@ -657,6 +705,10 @@ impl EngineContext {
             .unwrap_or_else(|| "<unknown>".to_string());
         let existed = self.objects.insert(handle, snapshot).is_some();
         self.objects_by_name.insert(name.clone(), handle);
+        if let Some(actor_handle) = interest_actor {
+            self.objects_by_actor.insert(actor_handle, handle);
+            self.log_event(format!("object.link actor#{} -> {}", actor_handle, name));
+        }
         let verb = if existed {
             "object.update"
         } else {
@@ -667,6 +719,9 @@ impl EngineContext {
 
     fn unregister_object(&mut self, handle: i64) {
         if let Some(snapshot) = self.objects.remove(&handle) {
+            if let Some(actor_handle) = snapshot.interest_actor {
+                self.objects_by_actor.remove(&actor_handle);
+            }
             self.objects_by_name.retain(|_, value| *value != handle);
             self.log_event(format!("object.remove {} (#{handle})", snapshot.name));
         }
@@ -714,6 +769,29 @@ impl EngineContext {
         }
     }
 
+    fn object_position_by_actor(&self, actor_handle: u32) -> Option<Vec3> {
+        self.objects_by_actor
+            .get(&actor_handle)
+            .and_then(|object_handle| self.objects.get(object_handle))
+            .and_then(|object| object.position)
+    }
+
+    fn update_object_position_for_actor(&mut self, actor_handle: u32, position: Vec3) {
+        if let Some(object_handle) = self.objects_by_actor.get(&actor_handle).copied() {
+            let mut object_name = None;
+            if let Some(object) = self.objects.get_mut(&object_handle) {
+                object.position = Some(position);
+                object_name = Some(object.name.clone());
+            }
+            if let Some(name) = object_name {
+                self.log_event(format!(
+                    "object.actor#{}.pos {} {:.3},{:.3},{:.3}",
+                    actor_handle, name, position.x, position.y, position.z
+                ));
+            }
+        }
+    }
+
     fn set_object_touchable(&mut self, handle: i64, touchable: bool) {
         if let Some(object) = self.objects.get_mut(&handle) {
             object.touchable = touchable;
@@ -731,6 +809,7 @@ impl EngineContext {
             .get(&handle)
             .and_then(|id| self.actors.get(id))
             .and_then(|actor| actor.position)
+            .or_else(|| self.object_position_by_actor(handle))
     }
 
     fn actor_rotation_by_handle(&self, handle: u32) -> Option<Vec3> {
@@ -1985,6 +2064,23 @@ fn install_actor_methods(
         })?,
     )?;
 
+    let moveto_context = context.clone();
+    actor.set(
+        "moveto",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                if let Some(position) = value_slice_to_vec3(&values) {
+                    let (id, name) = actor_identity(&table)?;
+                    moveto_context
+                        .borrow_mut()
+                        .set_actor_position(&id, &name, position);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
     let setpos_context = context.clone();
     actor.set(
         "setpos",
@@ -2435,6 +2531,10 @@ fn read_object_snapshot(_lua: &Lua, object: &Table, handle: i64) -> LuaResult<Ob
     };
     let range = object.get::<_, Option<f32>>("range")?.unwrap_or(0.0);
     let touchable = object.get::<_, Option<bool>>("touchable")?.unwrap_or(false);
+    let interest_actor = object
+        .get::<_, Value>("interest_actor")
+        .ok()
+        .and_then(|value| value_to_actor_handle(&value));
     Ok(ObjectSnapshot {
         handle,
         name,
@@ -2443,6 +2543,7 @@ fn read_object_snapshot(_lua: &Lua, object: &Table, handle: i64) -> LuaResult<Ob
         position,
         range,
         touchable,
+        interest_actor,
     })
 }
 

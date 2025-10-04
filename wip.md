@@ -62,10 +62,10 @@
    without parsing console output.
 3. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
-4. Capture real transforms for Manny's Office interactables so head-control math has
-   something meaningful to work with. That means plumbing interest-actor position updates
-   out of `_objects`, extending the host snapshots, and teaching `GetAngleBetweenActors` to
-   read those positions instead of logging `no pos`.
+4. Correlate the captured Manny/object transforms with the head-control scripts so we
+   can start replacing the canned sector heuristics with real geometry data. That means
+   diffing runtime bearings against the static analysis timeline and planning how to surface
+   visibility/collision metadata next.
 
 
 ## Current Iteration — Manny's Office Prototype
@@ -127,7 +127,7 @@
   `MakeCurrentSetup`, `GetCurrentSetup`, `rebuildButtons`, `NewObjectState`,
   `SendObjectToFront`, `SetActiveCommentary`) alongside script introspection
   shims (`next_script`, `identify_script`, `FunctionName`), so `_system` finishes
-  `FINALIZEBOOT` and Manny's Office trackers run on real tables. Head control still
-  falls back to zero-degree angles whenever the interest actors never publish a
-  position, which is why the next iteration focuses on piping those coordinates
-  out of `_objects`.
+  `FINALIZEBOOT` and Manny's Office trackers run on real tables. Interest-actor
+  positions now flow back into `GetAngleBetweenActors`, yielding real Manny-to-object
+  bearings; next up is feeding those transforms into the visibility and cut-scene
+  helpers that still rely on canned sector hits.
