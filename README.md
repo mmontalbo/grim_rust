@@ -175,7 +175,7 @@ we mirror the original selection heuristics precisely). Sector toggles routed th
 `MakeSectorActive` now update those parsed walk/camera records as well, so door passages and
 hot-box scripts flip the same polygons the original engine used instead of relying on
 logging-only placeholders. Visible hotspot sweeps now drop any object whose sectors are
-currently inactive, so `GetVisibleThings` mirrors the walkbox changes `MakeSectorActive` introduces.
+currently inactive, so `GetVisibleThings` mirrors the walkbox changes `MakeSectorActive` introduces. Objects bound to interest actors now inherit their parent actor's set and live transforms, so Manny's commentary/head-control trackers follow the same walkbox toggles after he moves around the office.
 
 Every visibility sweep now stores the matching object snapshot, including distance, bearing,
 range heuristics, and the derived hotlist so the runtime summary mirrors what `Head_Control`

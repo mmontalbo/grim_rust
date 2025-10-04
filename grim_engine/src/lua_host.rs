@@ -1690,12 +1690,30 @@ impl EngineContext {
                 self.objects_by_actor.remove(&actor_handle);
             }
         }
-        if let (Some(set_file), Some(position)) = (snapshot.set_file.clone(), snapshot.position) {
-            let sectors = self.compute_object_sectors(&set_file, position);
-            snapshot.sectors = sectors;
-        } else {
-            snapshot.sectors = Vec::new();
+        if snapshot.set_file.is_none() {
+            if let Some(actor_handle) = snapshot.interest_actor {
+                if let Some(actor_id) = self.actor_handles.get(&actor_handle) {
+                    if let Some(actor) = self.actors.get(actor_id) {
+                        if let Some(set_file) = actor.current_set.clone() {
+                            snapshot.set_file = Some(set_file);
+                        }
+                    }
+                }
+            }
+            if snapshot.set_file.is_none() {
+                if let Some(current) = &self.current_set {
+                    snapshot.set_file = Some(current.set_file.clone());
+                }
+            }
         }
+        let sectors = if let (Some(set_file), Some(position)) =
+            (snapshot.set_file.as_ref(), snapshot.position)
+        {
+            self.compute_object_sectors(set_file, position)
+        } else {
+            Vec::new()
+        };
+        snapshot.sectors = sectors;
         let interest_actor = snapshot.interest_actor;
         let name = snapshot.name.clone();
         let set_label = snapshot
@@ -1868,10 +1886,39 @@ impl EngineContext {
 
     fn update_object_position_for_actor(&mut self, actor_handle: u32, position: Vec3) {
         if let Some(object_handle) = self.objects_by_actor.get(&actor_handle).copied() {
+            let actor_set = self
+                .actor_handles
+                .get(&actor_handle)
+                .and_then(|id| self.actors.get(id))
+                .and_then(|actor| actor.current_set.clone())
+                .or_else(|| {
+                    self.current_set
+                        .as_ref()
+                        .map(|snapshot| snapshot.set_file.clone())
+                });
             let mut object_name = None;
-            if let Some(object) = self.objects.get_mut(&object_handle) {
-                object.position = Some(position);
-                object_name = Some(object.name.clone());
+            let mut set_for_recalc: Option<(String, Vec3)> = None;
+            {
+                if let Some(object) = self.objects.get_mut(&object_handle) {
+                    object.position = Some(position);
+                    object_name = Some(object.name.clone());
+                    if object.set_file.is_none() {
+                        if let Some(set_file) = actor_set.clone() {
+                            object.set_file = Some(set_file);
+                        }
+                    }
+                    if let Some(ref set_file) = object.set_file {
+                        set_for_recalc = Some((set_file.clone(), position));
+                    } else {
+                        object.sectors.clear();
+                    }
+                }
+            }
+            if let Some((set_file, pos)) = set_for_recalc {
+                let sectors = self.compute_object_sectors(&set_file, pos);
+                if let Some(object) = self.objects.get_mut(&object_handle) {
+                    object.sectors = sectors;
+                }
             }
             if let Some(name) = object_name {
                 self.log_event(format!(
@@ -6470,5 +6517,46 @@ mod tests {
         assert!(ctx.visible_object_handles().is_empty());
         let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
         assert_eq!(ctx.visible_object_handles(), vec![object_handle]);
+    }
+
+    #[test]
+    fn interest_actor_objects_track_sector_activation() {
+        let mut ctx = make_context();
+        ctx.set_geometry.insert(
+            "mo.set".to_string(),
+            ParsedSetGeometry::from_set_file(sample_geometry_set()),
+        );
+        ctx.switch_to_set("mo.set");
+        let (actor_id, actor_handle) = ctx.register_actor_with_handle("Helper", Some(2100));
+        ctx.put_actor_in_set(&actor_id, "Helper", "mo.set");
+        ctx.register_object(ObjectSnapshot {
+            handle: 3200,
+            name: "helper".to_string(),
+            string_name: Some("helper".to_string()),
+            set_file: None,
+            position: None,
+            range: 0.5,
+            touchable: true,
+            visible: true,
+            interest_actor: Some(actor_handle),
+            sectors: Vec::new(),
+        });
+        ctx.set_actor_position(
+            &actor_id,
+            "Helper",
+            Vec3 {
+                x: 0.25,
+                y: 0.25,
+                z: 0.0,
+            },
+        );
+        assert_eq!(ctx.visible_object_handles(), vec![3200]);
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
+        assert!(ctx.visible_object_handles().is_empty());
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
+        assert_eq!(ctx.visible_object_handles(), vec![3200]);
+        let sectors = ctx.objects.get(&3200).expect("object").sectors.clone();
+        assert!(!sectors.is_empty(), "expected computed sectors");
+        assert!(sectors.iter().any(|sector| sector.name == "desk_walk"));
     }
 }

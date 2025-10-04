@@ -52,9 +52,10 @@
 
 ## Next Steps
 1. Carry the parsed set geometry through the remaining boot-time trackers so they consume the
-   real walk polygons instead of logging placeholders. Head-control now respects the active
-   walkboxes (`GetVisibleThings` drops objects inside inactive sectors); the follow-up is wiring the
-   same state into the commentary/cut-scene routines that still rely on stubbed visibility only.
+   real walk polygons instead of logging placeholders. Interest-actor hotspots now inherit their
+   parent actor's set/position, so head-control and commentary visibility respect the active
+   walkboxes; the next step is teaching the cut-scene/commentary helpers to use those sector toggles
+   for real scheduling instead of logging placeholders.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
