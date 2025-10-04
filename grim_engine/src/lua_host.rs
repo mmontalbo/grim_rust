@@ -26,9 +26,39 @@ struct ScriptCleanup {
 }
 
 #[derive(Debug, Clone)]
+struct SetupInfo {
+    label: String,
+    index: i32,
+}
+
+#[derive(Debug, Clone)]
 struct SetDescriptor {
     variable_name: String,
     display_name: Option<String>,
+    setups: Vec<SetupInfo>,
+}
+
+impl SetDescriptor {
+    fn setup_index(&self, label: &str) -> Option<i32> {
+        self.setups.iter().find_map(|slot| {
+            if slot.label.eq_ignore_ascii_case(label) {
+                Some(slot.index)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn setup_label_for_index(&self, index: i32) -> Option<&str> {
+        self.setups
+            .iter()
+            .find(|slot| slot.index == index)
+            .map(|slot| slot.label.as_str())
+    }
+
+    fn first_setup(&self) -> Option<&SetupInfo> {
+        self.setups.first()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -319,11 +349,20 @@ impl EngineContext {
     fn new(resources: Rc<ResourceGraph>, verbose: bool) -> Self {
         let mut available_sets = BTreeMap::new();
         for meta in &resources.sets {
+            let setups = meta
+                .setup_slots
+                .iter()
+                .map(|slot| SetupInfo {
+                    label: slot.label.clone(),
+                    index: slot.index as i32,
+                })
+                .collect();
             available_sets.insert(
                 meta.set_file.clone(),
                 SetDescriptor {
                     variable_name: meta.variable_name.clone(),
                     display_name: meta.display_name.clone(),
+                    setups,
                 },
             );
         }
@@ -581,6 +620,11 @@ impl EngineContext {
             .map(|kind| kind.trim().to_ascii_lowercase())
             .filter(|kind| !kind.is_empty())
             .unwrap_or_else(|| "walk".to_string());
+
+        if let Some(hit) = self.resolve_sector_hit(actor_id, &normalized) {
+            return hit;
+        }
+
         if actor_id.eq_ignore_ascii_case("manny") {
             match normalized.as_str() {
                 "camera" | "2" => SectorHit::new(6000, "mo_mcecu", "CAMERA"),
@@ -596,6 +640,100 @@ impl EngineContext {
             let kind = normalized.to_ascii_uppercase();
             SectorHit::new(1000, format!("{}_sector", actor_id), kind)
         }
+    }
+
+    fn resolve_sector_hit(&self, actor_id: &str, kind: &str) -> Option<SectorHit> {
+        let normalized_kind = if kind.is_empty() { "walk" } else { kind };
+
+        if actor_id.eq_ignore_ascii_case("manny") {
+            if let Some(hit) = self.manny_office_sector(normalized_kind) {
+                return Some(hit);
+            }
+        }
+
+        if let Some(current) = &self.current_set {
+            if let Some(descriptor) = self.available_sets.get(&current.set_file) {
+                if normalized_kind == "camera" || normalized_kind == "2" {
+                    if let Some(current_setup) = self.current_setup_for(&current.set_file) {
+                        if let Some(label) = descriptor.setup_label_for_index(current_setup) {
+                            return Some(SectorHit::new(
+                                current_setup,
+                                label.to_string(),
+                                "CAMERA",
+                            ));
+                        }
+                    }
+                    if let Some(info) = descriptor.first_setup() {
+                        return Some(SectorHit::new(info.index, info.label.clone(), "CAMERA"));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn sector_hit_from_setup(&self, set_file: &str, label: &str, kind: &str) -> Option<SectorHit> {
+        let descriptor = self.available_sets.get(set_file)?;
+        let index = descriptor.setup_index(label)?;
+        let kind_upper = match kind {
+            "2" => "CAMERA".to_string(),
+            "1" => "HOT".to_string(),
+            "0" => "WALK".to_string(),
+            other => other.to_ascii_uppercase(),
+        };
+        Some(SectorHit::new(index, label.to_string(), kind_upper))
+    }
+
+    fn manny_office_sector(&self, raw_kind: &str) -> Option<SectorHit> {
+        let current_set = self.current_set.as_ref()?;
+        if !current_set.set_file.eq_ignore_ascii_case("mo.set") {
+            return None;
+        }
+        let normalized_kind = match raw_kind {
+            "2" => "camera",
+            "1" => "hot",
+            "0" => "walk",
+            other => other,
+        };
+
+        let manny = self.actors.get("manny")?;
+        let position = manny.position.unwrap_or(MANNY_OFFICE_SEED_POS);
+
+        enum MannyZone {
+            Desk,
+            Window,
+            Door,
+            Closet,
+        }
+
+        let zone = if position.y < 0.6 {
+            MannyZone::Door
+        } else if position.x > 1.15 {
+            MannyZone::Closet
+        } else if position.x < 0.35 {
+            MannyZone::Window
+        } else {
+            MannyZone::Desk
+        };
+
+        let label = match (zone, normalized_kind) {
+            (MannyZone::Desk, "camera") => "mo_mcecu",
+            (MannyZone::Desk, "hot") => "mo_ddtws",
+            (MannyZone::Desk, "walk") => "mo_ddtws",
+            (MannyZone::Window, "camera") => "mo_winws",
+            (MannyZone::Window, "hot") => "mo_winws",
+            (MannyZone::Window, "walk") => "mo_winws",
+            (MannyZone::Closet, "camera") => "mo_cornr",
+            (MannyZone::Closet, "hot") => "mo_cornr",
+            (MannyZone::Closet, "walk") => "mo_cornr",
+            (MannyZone::Door, "camera") => "mo_mnycu",
+            (MannyZone::Door, "hot") => "mo_comin",
+            (MannyZone::Door, "walk") => "mo_comin",
+            (_, _) => "mo_mcecu",
+        };
+
+        self.sector_hit_from_setup(&current_set.set_file, label, normalized_kind)
     }
 
     fn evaluate_sector_name(&self, actor_id: &str, query: &str) -> bool {
@@ -4093,9 +4231,11 @@ fn describe_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_paths, value_slice_to_vec3};
+    use super::{candidate_paths, value_slice_to_vec3, EngineContext, Vec3};
+    use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use mlua::Value;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     #[test]
     fn candidate_paths_cover_decompiled_variants() {
@@ -4113,5 +4253,95 @@ mod tests {
         assert!((vec.x - 1.0).abs() < f32::EPSILON);
         assert!((vec.y - 2.0).abs() < f32::EPSILON);
         assert!((vec.z - 3.5).abs() < f32::EPSILON);
+    }
+
+    fn make_context() -> EngineContext {
+        let set_metadata = SetMetadata {
+            lua_file: "mo.lua".to_string(),
+            variable_name: "mo".to_string(),
+            set_file: "mo.set".to_string(),
+            display_name: Some("Manny's Office".to_string()),
+            setup_slots: vec![
+                SetupSlot {
+                    label: "mo_ddtws".to_string(),
+                    index: 0,
+                },
+                SetupSlot {
+                    label: "mo_ddtws2".to_string(),
+                    index: 0,
+                },
+                SetupSlot {
+                    label: "mo_winws".to_string(),
+                    index: 1,
+                },
+                SetupSlot {
+                    label: "mo_winws2".to_string(),
+                    index: 1,
+                },
+                SetupSlot {
+                    label: "mo_comin".to_string(),
+                    index: 2,
+                },
+                SetupSlot {
+                    label: "mo_cornr".to_string(),
+                    index: 3,
+                },
+                SetupSlot {
+                    label: "overhead".to_string(),
+                    index: 4,
+                },
+                SetupSlot {
+                    label: "mo_mcecu".to_string(),
+                    index: 5,
+                },
+                SetupSlot {
+                    label: "mo_mnycu".to_string(),
+                    index: 6,
+                },
+            ],
+            methods: Vec::new(),
+        };
+        let mut graph = ResourceGraph::default();
+        graph.sets.push(set_metadata);
+        EngineContext::new(Rc::new(graph), false)
+    }
+
+    fn prepare_manny(ctx: &mut EngineContext, position: Vec3) {
+        let (id, _handle) = ctx.register_actor_with_handle("Manny", Some(1001));
+        ctx.put_actor_in_set(&id, "Manny", "mo.set");
+        ctx.switch_to_set("mo.set");
+        ctx.set_actor_position(&id, "Manny", position);
+    }
+
+    #[test]
+    fn manny_camera_defaults_to_desk_zone() {
+        let mut ctx = make_context();
+        prepare_manny(
+            &mut ctx,
+            Vec3 {
+                x: 0.62,
+                y: 2.05,
+                z: 0.0,
+            },
+        );
+        let hit = ctx.manny_office_sector("camera").expect("desk sector");
+        assert_eq!(hit.name, "mo_mcecu");
+    }
+
+    #[test]
+    fn manny_near_door_selects_entry_sector() {
+        let mut ctx = make_context();
+        prepare_manny(
+            &mut ctx,
+            Vec3 {
+                x: 1.35,
+                y: 0.2,
+                z: 0.0,
+            },
+        );
+        let camera_hit = ctx.manny_office_sector("camera").expect("door camera");
+        assert_eq!(camera_hit.name, "mo_mnycu");
+        let hot_hit = ctx.manny_office_sector("hot").expect("door hot");
+        assert_eq!(hot_hit.name, "mo_comin");
     }
 }

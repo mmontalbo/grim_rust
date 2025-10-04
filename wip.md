@@ -53,17 +53,18 @@
 ## Next Steps
 1. Flesh out the boot-time trackers (visibility queries, sector lookups,
    menu helpers, cut-scene services, control handlers) inside the coroutine
-   host so the embedded runtime can march further into Manny's Office. With
-   camera/hot sector queries faked in Rust, the next blockers are wiring
-   `Head_Control`/dialog state and feeding real visibility data back into the
-   loop so the trackers stop idling.
+   host so the embedded runtime can march further into Manny's Office.
+   Camera/hot sector queries now use Manny's live transforms to pick zone
+   specific setups, so the next blockers are wiring `Head_Control`/dialog
+   state and feeding real visibility data back into the loop so the trackers
+   stop idling.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
 3. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
 4. Correlate the captured Manny/object transforms with the head-control scripts so we
-   can start replacing the canned sector heuristics with real geometry data. That means
+   can graduate the new zone heuristics into real geometry-driven sector data. That means
    diffing runtime bearings against the static analysis timeline and planning how to surface
    visibility/collision metadata next.
 
@@ -119,9 +120,11 @@
   helpers (`SetActorConstrain`, `GetVisibleThings`) so those trackers yield
   cleanly while we layer in real visibility/camera behaviour.
 - Sector tracker: `Actor:find_sector_type`/`find_sector_name` now
-  return canned camera and hotspot hits for Manny, record the requested kinds
-  in the event log, and surface the latest sectors in the runtime summary so
-  `FINALIZEBOOT` can pick `mo_mcecu` without the original geometry tables.
+  derive Manny's camera/hot/walk selections from his live position, emitting
+  zone-specific setup names instead of the old canned responses. Requests are
+  still logged for diffing, the runtime summary surfaces the latest sectors,
+  and we added unit tests that cover the desk vs door heuristics while we work
+  toward feeding in real geometry tables.
 - Set hook: wrap `Set.create` at runtime so every set table inherits the stock
   methods. We now re-export the legacy helpers (`MakeCurrentSet`,
   `MakeCurrentSetup`, `GetCurrentSetup`, `rebuildButtons`, `NewObjectState`,
