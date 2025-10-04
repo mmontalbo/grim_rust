@@ -324,6 +324,37 @@ enum SectorToggleResult {
 #[derive(Debug, Clone)]
 struct CutSceneRecord {
     label: Option<String>,
+    #[allow(dead_code)]
+    flags: Vec<String>,
+    set_file: Option<String>,
+    sector: Option<String>,
+    suppressed: bool,
+}
+
+impl CutSceneRecord {
+    fn display_label(&self) -> &str {
+        self.label
+            .as_deref()
+            .filter(|label| !label.is_empty())
+            .unwrap_or("<unnamed>")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CommentaryRecord {
+    label: Option<String>,
+    object_handle: Option<i64>,
+    active: bool,
+    suppressed_reason: Option<String>,
+}
+
+impl CommentaryRecord {
+    fn display_label(&self) -> &str {
+        self.label
+            .as_deref()
+            .filter(|label| !label.is_empty())
+            .unwrap_or("<none>")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -630,6 +661,7 @@ struct EngineContext {
     hotlist_handles: Vec<i64>,
     cut_scene_stack: Vec<CutSceneRecord>,
     override_stack: Vec<OverrideRecord>,
+    commentary: Option<CommentaryRecord>,
     active_dialog: Option<DialogState>,
     speaking_actor: Option<String>,
     message_active: bool,
@@ -692,6 +724,7 @@ impl EngineContext {
             hotlist_handles: Vec::new(),
             cut_scene_stack: Vec::new(),
             override_stack: Vec::new(),
+            commentary: None,
             active_dialog: None,
             speaking_actor: None,
             message_active: false,
@@ -707,20 +740,53 @@ impl EngineContext {
 
     fn push_cut_scene(&mut self, label: Option<String>, flags: Vec<String>) {
         let display = label.clone().unwrap_or_else(|| "<unnamed>".to_string());
-        if flags.is_empty() {
-            self.log_event(format!("cut_scene.start {}", display));
+        let set_file = self
+            .current_set
+            .as_ref()
+            .map(|snapshot| snapshot.set_file.clone());
+        let sector_hit = set_file.as_ref().and_then(|_| {
+            self.geometry_sector_hit("manny", "hot")
+                .or_else(|| self.geometry_sector_hit("manny", "walk"))
+        });
+        let sector = sector_hit.as_ref().map(|hit| hit.name.clone());
+        let suppressed = if let (Some(set), Some(name)) = (&set_file, &sector) {
+            !self.is_sector_active(set, name)
         } else {
-            let flag_list = flags.join(", ");
-            self.log_event(format!("cut_scene.start {} [{}]", display, flag_list));
+            false
+        };
+        let flag_list = if flags.is_empty() {
+            None
+        } else {
+            Some(flags.join(", "))
+        };
+        let mut message = if let Some(flags) = flag_list.as_ref() {
+            format!("cut_scene.start {} [{}]", display, flags)
+        } else {
+            format!("cut_scene.start {}", display)
+        };
+        if suppressed {
+            let sector_name = sector.as_deref().unwrap_or("<unknown>");
+            message.push_str(&format!(" (sector {} inactive)", sector_name));
         }
-        self.cut_scene_stack.push(CutSceneRecord { label });
+        self.log_event(message);
+        self.cut_scene_stack.push(CutSceneRecord {
+            label,
+            flags,
+            set_file,
+            sector,
+            suppressed,
+        });
     }
 
     fn pop_cut_scene(&mut self) -> Option<CutSceneRecord> {
         let record = self.cut_scene_stack.pop();
         if let Some(record) = &record {
-            let display = record.label.as_deref().unwrap_or("<unnamed>");
-            self.log_event(format!("cut_scene.end {}", display));
+            let display = record.display_label();
+            if record.suppressed {
+                self.log_event(format!("cut_scene.end {} (suppressed)", display));
+            } else {
+                self.log_event(format!("cut_scene.end {}", display));
+            }
         }
         record
     }
@@ -1095,26 +1161,30 @@ impl EngineContext {
         let previous = states.insert(canonical.clone(), active);
         let state = if active { "on" } else { "off" };
 
-        match previous {
+        let result = match previous {
             Some(prev) if prev == active => {
                 self.log_event(format!(
                     "sector.active {set_file}:{canonical} already {state}"
                 ));
                 SectorToggleResult::NoChange {
-                    set_file,
-                    sector: canonical,
+                    set_file: set_file.clone(),
+                    sector: canonical.clone(),
                     known_sector,
                 }
             }
             _ => {
                 self.log_event(format!("sector.active {set_file}:{canonical} {state}"));
                 SectorToggleResult::Applied {
-                    set_file,
-                    sector: canonical,
+                    set_file: set_file.clone(),
+                    sector: canonical.clone(),
                     known_sector,
                 }
             }
-        }
+        };
+
+        self.handle_sector_dependents(&set_file, &canonical, active);
+
+        result
     }
 
     fn is_sector_active(&self, set_file: &str, sector_name: &str) -> bool {
@@ -1732,6 +1802,7 @@ impl EngineContext {
             "object.register"
         };
         self.log_event(format!("{verb} {name} (#{handle}) @ {set_label}"));
+        self.refresh_commentary_visibility();
     }
 
     fn unregister_object(&mut self, handle: i64) {
@@ -1742,6 +1813,7 @@ impl EngineContext {
             self.objects_by_name.retain(|_, value| *value != handle);
             self.log_event(format!("object.remove {} (#{handle})", snapshot.name));
         }
+        self.refresh_commentary_visibility();
     }
 
     fn visible_object_handles(&self) -> Vec<i64> {
@@ -1875,6 +1947,7 @@ impl EngineContext {
             .map(|info| info.handle)
             .collect();
         self.visible_objects = visible_infos;
+        self.refresh_commentary_visibility();
     }
 
     fn object_position_by_actor(&self, actor_handle: u32) -> Option<Vec3> {
@@ -1927,6 +2000,7 @@ impl EngineContext {
                 ));
             }
         }
+        self.refresh_commentary_visibility();
     }
 
     fn set_object_touchable(&mut self, handle: i64, touchable: bool) {
@@ -1939,6 +2013,7 @@ impl EngineContext {
             "untouchable"
         };
         self.log_event(format!("object.touchable #{handle} {state}"));
+        self.refresh_commentary_visibility();
     }
 
     fn set_object_visibility(&mut self, handle: i64, visible: bool) {
@@ -1951,6 +2026,137 @@ impl EngineContext {
                 object.visible = visible;
             }
         }
+        self.refresh_commentary_visibility();
+    }
+
+    fn commentary_candidate_handle(&self) -> Option<i64> {
+        self.hotlist_handles
+            .first()
+            .copied()
+            .or_else(|| self.visible_objects.first().map(|info| info.handle))
+    }
+
+    fn commentary_object_visible(&self, record: &CommentaryRecord) -> bool {
+        if let Some(handle) = record.object_handle {
+            if let Some(object) = self.objects.get(&handle) {
+                if !object.visible || !object.touchable {
+                    return false;
+                }
+                if let Some(set_file) = object.set_file.as_ref() {
+                    if let Some(current) = &self.current_set {
+                        if !current.set_file.eq_ignore_ascii_case(set_file) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                    return self.object_is_in_active_sector(set_file, object);
+                }
+            } else {
+                return false;
+            }
+        }
+        !self.hotlist_handles.is_empty() || !self.visible_objects.is_empty()
+    }
+
+    fn refresh_commentary_visibility(&mut self) {
+        let Some(mut record) = self.commentary.take() else {
+            return;
+        };
+        let visible = self.commentary_object_visible(&record);
+        let mut log_message = None;
+        match (record.active, visible) {
+            (true, false) => {
+                record.active = false;
+                record.suppressed_reason = Some("not_visible".to_string());
+                let label = record.display_label().to_string();
+                log_message = Some(format!("commentary.suspend {label}"));
+            }
+            (false, true) => {
+                record.active = true;
+                record.suppressed_reason = None;
+                let label = record.display_label().to_string();
+                log_message = Some(format!("commentary.resume {label}"));
+            }
+            _ => {}
+        }
+        if let Some(message) = log_message {
+            self.log_event(message);
+        }
+        self.commentary = Some(record);
+    }
+
+    fn set_commentary_active(&mut self, enabled: bool, label: Option<String>) {
+        if !enabled {
+            if let Some(record) = self.commentary.take() {
+                let display = record.display_label().to_string();
+                self.log_event(format!("commentary.active off ({display})"));
+            } else {
+                self.log_event("commentary.active off".to_string());
+            }
+            return;
+        }
+
+        let mut record = CommentaryRecord {
+            label,
+            object_handle: self.commentary_candidate_handle(),
+            active: true,
+            suppressed_reason: None,
+        };
+
+        if !self.commentary_object_visible(&record) {
+            record.active = false;
+            record.suppressed_reason = Some("not_visible".to_string());
+        }
+
+        let log_needed = match self.commentary.as_ref() {
+            Some(existing) => {
+                existing.label != record.label
+                    || existing.object_handle != record.object_handle
+                    || existing.active != record.active
+                    || existing.suppressed_reason != record.suppressed_reason
+            }
+            None => true,
+        };
+
+        let display = record.display_label().to_string();
+        if log_needed {
+            if record.active {
+                self.log_event(format!("commentary.active {display}"));
+            } else {
+                self.log_event(format!("commentary.suppressed {display}"));
+            }
+        }
+        self.commentary = Some(record);
+    }
+
+    fn handle_sector_dependents(&mut self, set_file: &str, sector: &str, active: bool) {
+        let mut log_messages = Vec::new();
+        for record in self.cut_scene_stack.iter_mut() {
+            let matches_set = record
+                .set_file
+                .as_ref()
+                .map(|file| file.eq_ignore_ascii_case(set_file))
+                .unwrap_or(false);
+            if !matches_set {
+                continue;
+            }
+            if let Some(record_sector) = record.sector.as_ref() {
+                if record_sector.eq_ignore_ascii_case(sector) {
+                    if active && record.suppressed {
+                        record.suppressed = false;
+                        log_messages.push(format!("cut_scene.unblock {}", record.display_label()));
+                    } else if !active && !record.suppressed {
+                        record.suppressed = true;
+                        log_messages.push(format!("cut_scene.block {}", record.display_label()));
+                    }
+                }
+            }
+        }
+        for message in log_messages {
+            self.log_event(message);
+        }
+        self.refresh_commentary_visibility();
     }
 
     fn actor_position_by_handle(&self, handle: u32) -> Option<Vec3> {
@@ -2639,11 +2845,22 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     globals.set(
         "SetActiveCommentary",
         lua.create_function(move |_, args: Variadic<Value>| {
-            let enabled = args.get(0).map(value_to_bool).unwrap_or(false);
-            commentary_ctx.borrow_mut().log_event(format!(
-                "commentary.active {}",
-                if enabled { "on" } else { "off" }
-            ));
+            let value = args.get(0).cloned().unwrap_or(Value::Nil);
+            let label = match &value {
+                Value::String(text) => Some(text.to_str()?.to_string()),
+                _ => None,
+            };
+            let enabled = match &value {
+                Value::Nil => false,
+                Value::Boolean(flag) => *flag,
+                Value::Integer(i) => *i != 0,
+                Value::Number(n) => *n != 0.0,
+                Value::String(_) => true,
+                other => value_to_bool(other),
+            };
+            commentary_ctx
+                .borrow_mut()
+                .set_commentary_active(enabled, label);
             Ok(())
         })?,
     )?;
@@ -5778,6 +5995,47 @@ fn dump_runtime_summary(state: &EngineContext) {
             }
         }
     }
+    if let Some(commentary) = &state.commentary {
+        let status = if commentary.active {
+            "active".to_string()
+        } else {
+            commentary
+                .suppressed_reason
+                .as_deref()
+                .unwrap_or("suppressed")
+                .to_string()
+        };
+        println!("  Commentary: {} ({})", commentary.display_label(), status);
+    }
+    if !state.cut_scene_stack.is_empty() {
+        println!("  Cut scenes:");
+        for record in &state.cut_scene_stack {
+            let status = if record.suppressed {
+                "blocked"
+            } else {
+                "active"
+            };
+            match (&record.set_file, &record.sector) {
+                (Some(set), Some(sector)) => println!(
+                    "    {} [{}] {}:{}",
+                    record.display_label(),
+                    status,
+                    set,
+                    sector
+                ),
+                (Some(set), None) => {
+                    println!("    {} [{}] {}", record.display_label(), status, set)
+                }
+                (None, Some(sector)) => println!(
+                    "    {} [{}] sector={}",
+                    record.display_label(),
+                    status,
+                    sector
+                ),
+                (None, None) => println!("    {} [{}]", record.display_label(), status),
+            }
+        }
+    }
     if !state.inventory.is_empty() {
         let mut items: Vec<_> = state.inventory.iter().collect();
         items.sort();
@@ -6558,5 +6816,79 @@ mod tests {
         let sectors = ctx.objects.get(&3200).expect("object").sectors.clone();
         assert!(!sectors.is_empty(), "expected computed sectors");
         assert!(sectors.iter().any(|sector| sector.name == "desk_walk"));
+    }
+
+    #[test]
+    fn commentary_respects_sector_activation() {
+        let mut ctx = make_context();
+        ctx.set_geometry.insert(
+            "mo.set".to_string(),
+            ParsedSetGeometry::from_set_file(sample_geometry_set()),
+        );
+        ctx.switch_to_set("mo.set");
+        let object_handle = 3300;
+        ctx.register_object(ObjectSnapshot {
+            handle: object_handle,
+            name: "tube_commentary".to_string(),
+            string_name: Some("tube".to_string()),
+            set_file: Some("mo.set".to_string()),
+            position: Some(Vec3 {
+                x: 0.25,
+                y: 0.25,
+                z: 0.0,
+            }),
+            range: 0.5,
+            touchable: true,
+            visible: true,
+            interest_actor: None,
+            sectors: Vec::new(),
+        });
+        ctx.record_visible_objects(&[object_handle]);
+        ctx.set_commentary_active(true, Some("Year1MannysOfficeDesign".to_string()));
+        let commentary = ctx.commentary.as_ref().expect("commentary state");
+        assert!(commentary.active, "commentary should start active");
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
+        let commentary = ctx.commentary.as_ref().expect("commentary state");
+        assert!(
+            !commentary.active,
+            "commentary should suspend when sector is inactive"
+        );
+        assert_eq!(commentary.suppressed_reason.as_deref(), Some("not_visible"));
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
+        let commentary = ctx.commentary.as_ref().expect("commentary state");
+        assert!(
+            commentary.active,
+            "commentary should resume once the sector is reactivated"
+        );
+    }
+
+    #[test]
+    fn cut_scene_tracks_sector_activation() {
+        let mut ctx = make_context();
+        ctx.set_geometry.insert(
+            "mo.set".to_string(),
+            ParsedSetGeometry::from_set_file(sample_geometry_set()),
+        );
+        ctx.switch_to_set("mo.set");
+        let (manny_id, _handle) = ctx.register_actor_with_handle("Manny", Some(1001));
+        ctx.put_actor_in_set(&manny_id, "Manny", "mo.set");
+        ctx.set_actor_position(
+            &manny_id,
+            "Manny",
+            Vec3 {
+                x: 0.25,
+                y: 0.25,
+                z: 0.0,
+            },
+        );
+        ctx.push_cut_scene(Some("demo".to_string()), Vec::new());
+        let record = ctx.cut_scene_stack.last().expect("cut scene record");
+        assert_eq!(record.set_file.as_deref(), Some("mo.set"));
+        assert_eq!(record.sector.as_deref(), Some("desk_walk"));
+        assert!(!record.suppressed, "cut scene should start active");
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
+        assert!(ctx.cut_scene_stack.last().expect("cut scene").suppressed);
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
+        assert!(!ctx.cut_scene_stack.last().expect("cut scene").suppressed);
     }
 }

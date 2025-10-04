@@ -175,11 +175,11 @@ we mirror the original selection heuristics precisely). Sector toggles routed th
 `MakeSectorActive` now update those parsed walk/camera records as well, so door passages and
 hot-box scripts flip the same polygons the original engine used instead of relying on
 logging-only placeholders. Visible hotspot sweeps now drop any object whose sectors are
-currently inactive, so `GetVisibleThings` mirrors the walkbox changes `MakeSectorActive` introduces. Objects bound to interest actors now inherit their parent actor's set and live transforms, so Manny's commentary/head-control trackers follow the same walkbox toggles after he moves around the office.
+currently inactive, so `GetVisibleThings` mirrors the walkbox changes `MakeSectorActive` introduces. Objects bound to interest actors now inherit their parent actor's set and live transforms, so Manny's commentary/head-control trackers follow the same walkbox toggles after he moves around the office. Commentary toggles track the active hotlist entry and automatically suspend or resume when the covering walkboxes flip, while the cut-scene ledger records the originating set/sector and flags when a sequence is blocked or unblocked by geometry overrides.
 
 Every visibility sweep now stores the matching object snapshot, including distance, bearing,
 range heuristics, and the derived hotlist so the runtime summary mirrors what `Head_Control`
-is considering each frame.
+is considering each frame. The end-of-run summary also reports the current commentary label and any cut scenes still blocked by sector overrides so we can diff runtime vs analysis expectations.
 
 Costume state now mirrors the Lua side: the host tracks each actor's base
 and active costumes, `Actor:get_costume` surfaces the current wardrobe to Lua,

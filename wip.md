@@ -51,19 +51,15 @@
   counts for future bindings.
 
 ## Next Steps
-1. Carry the parsed set geometry through the remaining boot-time trackers so they consume the
-   real walk polygons instead of logging placeholders. Interest-actor hotspots now inherit their
-   parent actor's set/position, so head-control and commentary visibility respect the active
-   walkboxes; the next step is teaching the cut-scene/commentary helpers to use those sector toggles
-   for real scheduling instead of logging placeholders.
-2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
-   machine-readable placement log) so other tooling can validate set geometry
-   without parsing console output.
-3. Keep widening the legacy normalisation pass (additional helper keywords,
+1. Emit a machine-readable geometry/visibility snapshot from the runtime so other tooling can
+   validate placements without scraping verbose logs.
+2. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
-4. Replace the Manny-specific camera fallback with geometry-driven selection and extend the
+3. Replace the Manny-specific camera fallback with geometry-driven selection and extend the
    parser/lookup path to other sets once their data is decoded. Diff the runtime results against
    the static analysis timeline to keep sector coverage honest.
+4. Start wiring the geometry-backed commentary/cut-scene state into the remaining runtime services
+   (audio/menu helpers) so later scenes can react without falling back to placeholder logging.
 
 
 ## Current Iteration — Manny's Office Prototype
@@ -114,9 +110,10 @@
 - Sector toggles: host-side `MakeSectorActive` updates the LAB-derived sector map,
   so door passages and scripted hotspots enable/disable the same walk/camera
   polygons the original runtime used. Runtime summaries now highlight overrides
-  whenever scripts diverge from the set file defaults, and `GetVisibleThings` now
-  omits hotspots when their covering sectors are inactive so head-control mirrors
-  the walkbox state flips.
+  whenever scripts diverge from the set file defaults, `GetVisibleThings` now
+  omits hotspots when their covering sectors are inactive, and the commentary/cut-scene helpers
+  consume the same state so `SetActiveCommentary` auto-suspends/resumes and the cut-scene ledger
+  reports when geometry overrides block or unblock a sequence.
 - Scheduler polish: function-based threads now carry source-derived labels
   (e.g., `_system.decompiled.lua:667` for `TrackManny`), and the host seeds
   Manny's set scaffolding (`setups`, `current_setup`, `cameraman`) plus engine
@@ -139,9 +136,9 @@
   Lua marks as visible. Manny-to-object bearings now log real angles, and the
   runtime loads Manny's Office walk/camera sectors by parsing the shipping
   `mo.set` through `grim_formats::set`. Walk lookups now use the parsed polygons
-  while camera/hot queries map through setup interest points; the remaining work
-  is teaching the head-control/cut-scene helpers to consume this data instead of
-  relying on their logging stubs.
+  while camera/hot queries map through setup interest points, and both head-control
+  and the cut-scene/commentary scaffolding now consume that geometry-backed state instead of
+  falling back to placeholder logging.
 - Visibility sweeps now record per-object distance, bearing, range hits, and the
   derived hotlist so the runtime summary mirrors what Head_Control evaluates each frame.
 - Costume/dialogue plumbing: the embedded host now tracks each actor's base
