@@ -564,6 +564,12 @@ const FOOTSTEP_PROFILES: &[FootstepProfile] = &[
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+struct ObjectSectorRef {
+    name: String,
+    kind: SetSectorKind,
+}
+
+#[derive(Debug, Clone)]
 struct ObjectSnapshot {
     handle: i64,
     name: String,
@@ -574,6 +580,7 @@ struct ObjectSnapshot {
     touchable: bool,
     visible: bool,
     interest_actor: Option<u32>,
+    sectors: Vec<ObjectSectorRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -1634,12 +1641,60 @@ impl EngineContext {
         self.actors_installed
     }
 
-    fn register_object(&mut self, snapshot: ObjectSnapshot) {
+    fn compute_object_sectors(&mut self, set_file: &str, position: Vec3) -> Vec<ObjectSectorRef> {
+        if !self.ensure_sector_state_map(set_file) {
+            return Vec::new();
+        }
+        let Some(geometry) = self.set_geometry.get(set_file) else {
+            return Vec::new();
+        };
+        let point = (position.x, position.y);
+        geometry
+            .sectors
+            .iter()
+            .filter(|sector| sector.contains(point))
+            .map(|sector| ObjectSectorRef {
+                name: sector.name.clone(),
+                kind: sector.kind,
+            })
+            .collect()
+    }
+
+    fn object_is_in_active_sector(&self, set_file: &str, snapshot: &ObjectSnapshot) -> bool {
+        if snapshot.sectors.is_empty() {
+            return true;
+        }
+        let mut considered = false;
+        for sector in &snapshot.sectors {
+            if matches!(
+                sector.kind,
+                SetSectorKind::Walk | SetSectorKind::Special | SetSectorKind::Other
+            ) {
+                considered = true;
+                if self.is_sector_active(set_file, &sector.name) {
+                    return true;
+                }
+            }
+        }
+        if considered {
+            false
+        } else {
+            true
+        }
+    }
+
+    fn register_object(&mut self, mut snapshot: ObjectSnapshot) {
         let handle = snapshot.handle;
         if let Some(existing) = self.objects.get(&handle) {
             if let Some(actor_handle) = existing.interest_actor {
                 self.objects_by_actor.remove(&actor_handle);
             }
+        }
+        if let (Some(set_file), Some(position)) = (snapshot.set_file.clone(), snapshot.position) {
+            let sectors = self.compute_object_sectors(&set_file, position);
+            snapshot.sectors = sectors;
+        } else {
+            snapshot.sectors = Vec::new();
         }
         let interest_actor = snapshot.interest_actor;
         let name = snapshot.name.clone();
@@ -1684,6 +1739,7 @@ impl EngineContext {
                             .as_deref()
                             .map(|file| file.eq_ignore_ascii_case(current_file))
                             .unwrap_or(false)
+                        && self.object_is_in_active_sector(current_file, object)
                 })
                 .map(|object| object.handle)
                 .collect()
@@ -4342,6 +4398,7 @@ fn read_object_snapshot(_lua: &Lua, object: &Table, handle: i64) -> LuaResult<Ob
         touchable,
         visible,
         interest_actor,
+        sectors: Vec::new(),
     })
 }
 
@@ -6371,6 +6428,7 @@ mod tests {
             touchable: true,
             visible: true,
             interest_actor: Some(handle),
+            sectors: Vec::new(),
         });
 
         assert_eq!(ctx.visible_object_handles(), vec![3000]);
@@ -6380,5 +6438,37 @@ mod tests {
 
         ctx.set_actor_visibility(&id, "Lamp", true);
         assert_eq!(ctx.visible_object_handles(), vec![3000]);
+    }
+
+    #[test]
+    fn visible_objects_respect_sector_activation() {
+        let mut ctx = make_context();
+        ctx.set_geometry.insert(
+            "mo.set".to_string(),
+            ParsedSetGeometry::from_set_file(sample_geometry_set()),
+        );
+        ctx.switch_to_set("mo.set");
+        let object_handle = 3100;
+        ctx.register_object(ObjectSnapshot {
+            handle: object_handle,
+            name: "desk".to_string(),
+            string_name: Some("desk".to_string()),
+            set_file: Some("mo.set".to_string()),
+            position: Some(Vec3 {
+                x: 0.25,
+                y: 0.25,
+                z: 0.0,
+            }),
+            range: 0.5,
+            touchable: true,
+            visible: true,
+            interest_actor: None,
+            sectors: Vec::new(),
+        });
+        assert_eq!(ctx.visible_object_handles(), vec![object_handle]);
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
+        assert!(ctx.visible_object_handles().is_empty());
+        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
+        assert_eq!(ctx.visible_object_handles(), vec![object_handle]);
     }
 }
