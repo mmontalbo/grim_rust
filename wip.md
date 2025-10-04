@@ -62,8 +62,10 @@
    without parsing console output.
 3. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
-4. Stub the remaining engine globals that `_sets` expects (e.g., `system_prefs:read`,
-   `footsteps`, `PutActorInSet`) so `CommonEnter` can finish booting Manny's Office.
+4. Capture real transforms for Manny's Office interactables so head-control math has
+   something meaningful to work with. That means plumbing interest-actor position updates
+   out of `_objects`, extending the host snapshots, and teaching `GetAngleBetweenActors` to
+   read those positions instead of logging `no pos`.
 
 
 ## Current Iteration — Manny's Office Prototype
@@ -121,7 +123,11 @@
   in the event log, and surface the latest sectors in the runtime summary so
   `FINALIZEBOOT` can pick `mo_mcecu` without the original geometry tables.
 - Set hook: wrap `Set.create` at runtime so every set table inherits the stock
-  methods; Manny now transitions into `mo.lua` with the real `CommonEnter`
-  flow before stalling on missing globals. Boot currently stops once
-  `_sets` looks for extras such as `system_prefs:read`, `footsteps`, and
-  other legacy helpers we still need to stub out.
+  methods. We now re-export the legacy helpers (`MakeCurrentSet`,
+  `MakeCurrentSetup`, `GetCurrentSetup`, `rebuildButtons`, `NewObjectState`,
+  `SendObjectToFront`, `SetActiveCommentary`) alongside script introspection
+  shims (`next_script`, `identify_script`, `FunctionName`), so `_system` finishes
+  `FINALIZEBOOT` and Manny's Office trackers run on real tables. Head control still
+  falls back to zero-degree angles whenever the interest actors never publish a
+  position, which is why the next iteration focuses on piping those coordinates
+  out of `_objects`.

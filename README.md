@@ -155,6 +155,14 @@ Scripts now run on a cooperative coroutine scheduler: `start_script` and
 stay resident with their yield counts so we can flesh out their behaviours
 without forcing the scaffolding to finish immediately.
 
+The host also mirrors the legacy script inspection utilities (`next_script`,
+`identify_script`, `FunctionName`) and set/setup helpers (`MakeCurrentSet`,
+`MakeCurrentSetup`, `GetCurrentSetup`), plus UI/object glue such as
+`rebuildButtons`, `NewObjectState`, `SendObjectToFront`, and commentary toggles.
+With those in place Manny's Office completes `FINALIZEBOOT` before the head-control
+trackers spin, even though the current geometry data still feeds placeholder
+angles until we propagate the real positions out of `_objects`.
+
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
 emitted by `grim_engine`, and reads assets straight from their LAB offsets to

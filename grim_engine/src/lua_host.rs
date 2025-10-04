@@ -83,6 +83,187 @@ struct MenuState {
     last_action: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+struct FootstepProfile {
+    key: &'static str,
+    prefix: &'static str,
+    left_walk: u8,
+    right_walk: u8,
+    left_run: Option<u8>,
+    right_run: Option<u8>,
+}
+
+const FOOTSTEP_PROFILES: &[FootstepProfile] = &[
+    FootstepProfile {
+        key: "concrete",
+        prefix: "fscon",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "dirt",
+        prefix: "fsdrt",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "gravel",
+        prefix: "fsgrv",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "creak",
+        prefix: "fscrk",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: Some(2),
+        right_run: Some(2),
+    },
+    FootstepProfile {
+        key: "marble",
+        prefix: "fsmar",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: Some(2),
+        right_run: Some(2),
+    },
+    FootstepProfile {
+        key: "metal",
+        prefix: "fsmet",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "pavement",
+        prefix: "fspav",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "rug",
+        prefix: "fsrug",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "sand",
+        prefix: "fssnd",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "snow",
+        prefix: "fssno",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "trapdoor",
+        prefix: "fstrp",
+        left_walk: 1,
+        right_walk: 1,
+        left_run: Some(1),
+        right_run: Some(1),
+    },
+    FootstepProfile {
+        key: "echo",
+        prefix: "fseko",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(4),
+        right_run: Some(4),
+    },
+    FootstepProfile {
+        key: "reverb",
+        prefix: "fsrvb",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: Some(2),
+        right_run: Some(2),
+    },
+    FootstepProfile {
+        key: "metal2",
+        prefix: "fs3mt",
+        left_walk: 4,
+        right_walk: 4,
+        left_run: Some(2),
+        right_run: Some(2),
+    },
+    FootstepProfile {
+        key: "wet",
+        prefix: "fswet",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: Some(2),
+        right_run: Some(2),
+    },
+    FootstepProfile {
+        key: "flowers",
+        prefix: "fsflw",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: Some(2),
+        right_run: Some(2),
+    },
+    FootstepProfile {
+        key: "glottis",
+        prefix: "fsglt",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: None,
+        right_run: None,
+    },
+    FootstepProfile {
+        key: "jello",
+        prefix: "fsjll",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: None,
+        right_run: None,
+    },
+    FootstepProfile {
+        key: "nick_virago",
+        prefix: "fsnic",
+        left_walk: 2,
+        right_walk: 2,
+        left_run: None,
+        right_run: None,
+    },
+    FootstepProfile {
+        key: "underwater",
+        prefix: "fswtr",
+        left_walk: 3,
+        right_walk: 3,
+        left_run: Some(2),
+        right_run: Some(2),
+    },
+    FootstepProfile {
+        key: "velasco",
+        prefix: "fsbcn",
+        left_walk: 3,
+        right_walk: 2,
+        left_run: None,
+        right_run: None,
+    },
+];
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct ObjectSnapshot {
@@ -107,6 +288,7 @@ struct EngineContext {
     actors: BTreeMap<String, ActorSnapshot>,
     available_sets: BTreeMap<String, SetDescriptor>,
     loaded_sets: BTreeSet<String>,
+    current_setups: BTreeMap<String, i32>,
     inventory: BTreeSet<String>,
     inventory_rooms: BTreeSet<String>,
     menus: BTreeMap<String, Rc<RefCell<MenuState>>>,
@@ -114,6 +296,7 @@ struct EngineContext {
     actor_handles: BTreeMap<u32, String>,
     next_actor_handle: u32,
     actors_installed: bool,
+    voice_effect: Option<String>,
     objects: BTreeMap<i64, ObjectSnapshot>,
     objects_by_name: BTreeMap<String, i64>,
 }
@@ -142,6 +325,7 @@ impl EngineContext {
             actors: BTreeMap::new(),
             available_sets,
             loaded_sets: BTreeSet::new(),
+            current_setups: BTreeMap::new(),
             inventory: BTreeSet::new(),
             inventory_rooms: BTreeSet::new(),
             menus: BTreeMap::new(),
@@ -149,6 +333,7 @@ impl EngineContext {
             actor_handles: BTreeMap::new(),
             next_actor_handle: 1100,
             actors_installed: false,
+            voice_effect: None,
             objects: BTreeMap::new(),
             objects_by_name: BTreeMap::new(),
         }
@@ -258,18 +443,20 @@ impl EngineContext {
     }
 
     fn switch_to_set(&mut self, set_file: &str) {
-        let (variable_name, display_name) = match self.available_sets.get(set_file) {
+        let set_key = set_file.to_string();
+        let (variable_name, display_name) = match self.available_sets.get(&set_key) {
             Some(descriptor) => (
                 descriptor.variable_name.clone(),
                 descriptor.display_name.clone(),
             ),
-            None => (set_file.to_string(), None),
+            None => (set_key.clone(), None),
         };
         self.current_set = Some(SetSnapshot {
-            set_file: set_file.to_string(),
+            set_file: set_key.clone(),
             variable_name,
             display_name,
         });
+        self.current_setups.entry(set_key.clone()).or_insert(0);
         self.log_event(format!("set.switch {set_file}"));
     }
 
@@ -277,6 +464,14 @@ impl EngineContext {
         if self.loaded_sets.insert(set_file.to_string()) {
             self.log_event(format!("set.load {set_file}"));
         }
+    }
+
+    fn record_current_setup(&mut self, set_file: &str, setup: i32) {
+        self.current_setups.insert(set_file.to_string(), setup);
+    }
+
+    fn current_setup_for(&self, set_file: &str) -> Option<i32> {
+        self.current_setups.get(set_file).copied()
     }
 
     fn set_actor_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
@@ -315,6 +510,11 @@ impl EngineContext {
             "actor.{id}.rot {:.3},{:.3},{:.3}",
             rotation.x, rotation.y, rotation.z
         ));
+    }
+
+    fn set_voice_effect(&mut self, effect: &str) {
+        self.voice_effect = Some(effect.to_string());
+        self.log_event(format!("prefs.voice_effect {}", effect));
     }
 
     fn add_inventory_item(&mut self, name: &str) {
@@ -723,6 +923,31 @@ fn handle_special_dofile<'lua>(
     Ok(None)
 }
 
+fn install_footsteps_table(lua: &Lua) -> LuaResult<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("footsteps"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let table = lua.create_table()?;
+    for profile in FOOTSTEP_PROFILES {
+        let entry = lua.create_table()?;
+        entry.set("prefix", profile.prefix)?;
+        entry.set("left_walk", profile.left_walk)?;
+        entry.set("right_walk", profile.right_walk)?;
+        if let Some(count) = profile.left_run {
+            entry.set("left_run", count)?;
+        }
+        if let Some(count) = profile.right_run {
+            entry.set("right_run", count)?;
+        }
+        table.set(profile.key, entry)?;
+    }
+
+    globals.set("footsteps", table)?;
+    Ok(())
+}
+
 fn install_color_constants(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
@@ -971,6 +1196,15 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         }
     }
 
+    if let Ok(math_table) = globals.get::<_, Table>("math") {
+        if let Ok(sqrt_fn) = math_table.get::<_, Function>("sqrt") {
+            globals.set("sqrt", sqrt_fn.clone())?;
+        }
+        if let Ok(abs_fn) = math_table.get::<_, Function>("abs") {
+            globals.set("abs", abs_fn)?;
+        }
+    }
+
     let noop = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     let nil_return = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?;
 
@@ -1013,9 +1247,81 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         .eval::<Function>()?;
     globals.set("break_here", break_here)?;
     globals.set("HideVerbSkull", noop.clone())?;
-    globals.set("MakeCurrentSet", noop.clone())?;
-    globals.set("MakeCurrentSetup", noop.clone())?;
+    let make_set_ctx = context.clone();
+    globals.set(
+        "MakeCurrentSet",
+        lua.create_function(move |_, value: Value| {
+            if let Some(set_file) = value_to_set_file(&value) {
+                make_set_ctx.borrow_mut().switch_to_set(&set_file);
+            } else {
+                let description = describe_value(&value);
+                make_set_ctx
+                    .borrow_mut()
+                    .log_event(format!("set.switch <unknown> ({description})"));
+            }
+            Ok(())
+        })?,
+    )?;
+    let make_setup_ctx = context.clone();
+    globals.set(
+        "MakeCurrentSetup",
+        lua.create_function(move |_, value: Value| {
+            let description = describe_value(&value);
+            if let Some(setup) = value_to_i32(&value) {
+                let mut ctx = make_setup_ctx.borrow_mut();
+                if let Some(current) = ctx.current_set.clone() {
+                    let file = current.set_file.clone();
+                    ctx.record_current_setup(&file, setup);
+                    ctx.log_event(format!("set.setup.make {file} -> {setup}"));
+                } else {
+                    ctx.log_event(format!("set.setup.make <none> -> {setup}"));
+                }
+            } else {
+                make_setup_ctx
+                    .borrow_mut()
+                    .log_event(format!("set.setup.make <invalid> ({description})"));
+            }
+            Ok(())
+        })?,
+    )?;
+    let get_setup_ctx = context.clone();
+    globals.set(
+        "GetCurrentSetup",
+        lua.create_function(move |_, value: Value| {
+            let set_file_opt = value_to_set_file(&value);
+            let (label, setup) = {
+                let ctx = get_setup_ctx.borrow();
+                if let Some(set_file) = set_file_opt.clone() {
+                    let setup = ctx.current_setup_for(&set_file).unwrap_or(0);
+                    (set_file, setup)
+                } else if let Some(current) = ctx.current_set.as_ref() {
+                    let file = current.set_file.clone();
+                    let setup = ctx.current_setup_for(&file).unwrap_or(0);
+                    (file, setup)
+                } else {
+                    ("<none>".to_string(), 0)
+                }
+            };
+            {
+                let mut ctx = get_setup_ctx.borrow_mut();
+                ctx.log_event(format!("set.setup.get {label} -> {setup}"));
+            }
+            Ok(Value::Integer(setup as i64))
+        })?,
+    )?;
     globals.set("SetAmbientLight", noop.clone())?;
+    let commentary_ctx = context.clone();
+    globals.set(
+        "SetActiveCommentary",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let enabled = args.get(0).map(value_to_bool).unwrap_or(false);
+            commentary_ctx.borrow_mut().log_event(format!(
+                "commentary.active {}",
+                if enabled { "on" } else { "off" }
+            ));
+            Ok(())
+        })?,
+    )?;
     globals.set("LightMgrSetChange", noop.clone())?;
     globals.set("HideMouseCursor", noop.clone())?;
     globals.set("ShowCursor", noop.clone())?;
@@ -1024,6 +1330,80 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     globals.set("SetActorShadowPoint", noop.clone())?;
     globals.set("SetActorShadowPlane", noop.clone())?;
     globals.set("AddShadowPlane", noop.clone())?;
+    let new_object_state_ctx = context.clone();
+    globals.set(
+        "NewObjectState",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let setup = args
+                .get(0)
+                .map(|value| describe_value(value))
+                .unwrap_or_else(|| "<nil>".to_string());
+            let kind = args
+                .get(1)
+                .map(|value| describe_value(value))
+                .unwrap_or_else(|| "<nil>".to_string());
+            let bitmap = args
+                .get(2)
+                .map(|value| value_to_string(value).unwrap_or_else(|| describe_value(value)))
+                .unwrap_or_else(|| "<nil>".to_string());
+            let zbitmap = args
+                .get(3)
+                .map(|value| value_to_string(value).unwrap_or_else(|| describe_value(value)))
+                .unwrap_or_else(|| "<nil>".to_string());
+            let enabled = args
+                .get(4)
+                .map(|value| value_to_bool(value))
+                .unwrap_or(false);
+            new_object_state_ctx.borrow_mut().log_event(format!(
+                "object.state.new setup={setup} kind={kind} bm={bitmap} zbm={zbitmap} {}",
+                if enabled { "enabled" } else { "disabled" }
+            ));
+            Ok(())
+        })?,
+    )?;
+    let send_front_ctx = context.clone();
+    globals.set(
+        "SendObjectToFront",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut label = args
+                .get(0)
+                .map(|value| describe_value(value))
+                .unwrap_or_else(|| "<nil>".to_string());
+            let mut handle: Option<i64> = None;
+            if let Some(Value::Table(table)) = args.get(0) {
+                if let Some(name) = table.get::<_, Option<String>>("name").ok().flatten() {
+                    label = name;
+                }
+                if let Some(string_name) =
+                    table.get::<_, Option<String>>("string_name").ok().flatten()
+                {
+                    label = string_name;
+                }
+                handle = table
+                    .get::<_, Option<i64>>("handle")
+                    .ok()
+                    .flatten()
+                    .or_else(|| table.get::<_, Option<i64>>("object_handle").ok().flatten());
+                if handle.is_none() {
+                    handle = table.get::<_, Option<i64>>("hObject").ok().flatten();
+                }
+            }
+            if handle.is_none() {
+                let lookup = {
+                    let ctx = send_front_ctx.borrow();
+                    ctx.objects_by_name.get(&label).copied()
+                };
+                if let Some(found) = lookup {
+                    handle = Some(found);
+                }
+            }
+            let description = handle.map(|id| format!("{label} (#{id})")).unwrap_or(label);
+            send_front_ctx
+                .borrow_mut()
+                .log_event(format!("object.front {description}"));
+            Ok(())
+        })?,
+    )?;
     let constrain_ctx = context.clone();
     globals.set(
         "SetActorConstrain",
@@ -1042,6 +1422,80 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
                 if enabled { "on" } else { "off" }
             ));
             Ok(())
+        })?,
+    )?;
+    let next_script_ctx = context.clone();
+    globals.set(
+        "next_script",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let current = args.get(0).and_then(|value| match value {
+                Value::Nil => None,
+                Value::Integer(i) if *i >= 0 => Some(*i as u32),
+                Value::Number(n) if *n >= 0.0 => Some(*n as u32),
+                _ => None,
+            });
+            let handles = {
+                let ctx = next_script_ctx.borrow();
+                let mut handles = ctx.active_script_handles();
+                handles.sort_unstable();
+                handles
+            };
+            let next = if let Some(current) = current {
+                handles.into_iter().find(|handle| *handle > current)
+            } else {
+                handles.into_iter().next()
+            };
+            {
+                let mut ctx = next_script_ctx.borrow_mut();
+                let from = current
+                    .map(|handle| format!("#{handle}"))
+                    .unwrap_or_else(|| "<nil>".to_string());
+                let to = next
+                    .map(|handle| format!("#{handle}"))
+                    .unwrap_or_else(|| "<nil>".to_string());
+                ctx.log_event(format!("script.next {from} -> {to}"));
+            }
+            if let Some(handle) = next {
+                Ok(Value::Integer(handle as i64))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?,
+    )?;
+    let identify_script_ctx = context.clone();
+    globals.set(
+        "identify_script",
+        lua.create_function(move |lua_ctx, value: Value| {
+            let handle = match value {
+                Value::Nil => None,
+                Value::Integer(i) if i >= 0 => Some(i as u32),
+                Value::Number(n) if n >= 0.0 => Some(n as u32),
+                _ => None,
+            };
+            if let Some(handle) = handle {
+                if let Some(label) = {
+                    let ctx = identify_script_ctx.borrow();
+                    ctx.script_label(handle).map(|s| s.to_string())
+                } {
+                    return Ok(Value::String(lua_ctx.create_string(&label)?));
+                }
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+    globals.set(
+        "FunctionName",
+        lua.create_function(move |lua_ctx, value: Value| {
+            let name = match &value {
+                Value::String(text) => text.to_str()?.to_string(),
+                Value::Function(func) => {
+                    let pointer = func.to_pointer();
+                    format!("function {pointer:p}")
+                }
+                Value::Thread(thread) => format!("thread {:?}", thread.status()),
+                other => describe_value(other),
+            };
+            Ok(Value::String(lua_ctx.create_string(&name)?))
         })?,
     )?;
     globals.set("LoadCostume", noop.clone())?;
@@ -1124,6 +1578,43 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         })?,
     )?;
 
+    let angle_between_ctx = context.clone();
+    globals.set(
+        "GetAngleBetweenActors",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let handle_a = args.get(0).and_then(value_to_actor_handle);
+            let handle_b = args.get(1).and_then(value_to_actor_handle);
+            let (mut angle, label) = {
+                let ctx = angle_between_ctx.borrow();
+                if let (Some(a), Some(b)) = (handle_a, handle_b) {
+                    let pos_a = ctx.actor_position_by_handle(a);
+                    let pos_b = ctx.actor_position_by_handle(b);
+                    if let (Some(a_pos), Some(b_pos)) = (pos_a, pos_b) {
+                        let dx = (b_pos.x - a_pos.x) as f64;
+                        let dy = (b_pos.y - a_pos.y) as f64;
+                        let mut angle = dy.atan2(dx).to_degrees();
+                        if angle < 0.0 {
+                            angle += 360.0;
+                        }
+                        (angle, format!("#{a} -> #{b}"))
+                    } else {
+                        (0.0, format!("#{a} -> #{b} (no pos)"))
+                    }
+                } else {
+                    (0.0, "<invalid>".to_string())
+                }
+            };
+            if angle.is_nan() {
+                angle = 0.0;
+            }
+            {
+                let mut ctx = angle_between_ctx.borrow_mut();
+                ctx.log_event(format!("actor.angle_between {label} -> {:.2}", angle));
+            }
+            Ok(angle)
+        })?,
+    )?;
+
     let put_actor_set_ctx = context.clone();
     globals.set(
         "PutActorInSet",
@@ -1158,6 +1649,19 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     prefs.set(
         "read",
         lua.create_function(|_, (_this, _key): (Table, Value)| Ok(0))?,
+    )?;
+    let voice_context = context.clone();
+    prefs.set(
+        "set_voice_effect",
+        lua.create_function(move |_, (_this, value): (Table, Value)| {
+            let effect = match value {
+                Value::String(text) => text.to_str()?.to_string(),
+                Value::Nil => "OFF".to_string(),
+                other => format!("{:?}", other),
+            };
+            voice_context.borrow_mut().set_voice_effect(&effect);
+            Ok(())
+        })?,
     )?;
     globals.set("system_prefs", prefs)?;
 
@@ -1302,10 +1806,16 @@ fn install_actor_scaffold(
     context: Rc<RefCell<EngineContext>>,
     system_key: Rc<RegistryKey>,
 ) -> LuaResult<()> {
-    if context.borrow().actors_installed() {
+    let already_installed = {
+        let borrow = context.borrow();
+        borrow.actors_installed()
+    };
+
+    install_footsteps_table(lua)?;
+
+    if already_installed {
         return Ok(());
     }
-    drop(context.borrow());
 
     ensure_actor_prototype(lua, context.clone(), system_key.clone())?;
 
@@ -1783,6 +2293,34 @@ fn value_to_f32(value: &Value) -> Option<f32> {
     match value {
         Value::Integer(i) => Some(*i as f32),
         Value::Number(n) => Some(*n as f32),
+        _ => None,
+    }
+}
+
+fn value_to_i32(value: &Value) -> Option<i32> {
+    match value {
+        Value::Integer(i) => Some(*i as i32),
+        Value::Number(n) => Some(*n as i32),
+        Value::String(text) => text.to_str().ok()?.parse().ok(),
+        _ => None,
+    }
+}
+
+fn value_to_set_file(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.to_str().ok()?.to_string()),
+        Value::Table(table) => {
+            if let Ok(Some(file)) = table.get::<_, Option<String>>("setFile") {
+                return Some(file);
+            }
+            if let Ok(Some(name)) = table.get::<_, Option<String>>("name") {
+                return Some(name);
+            }
+            if let Ok(Some(label)) = table.get::<_, Option<String>>("label") {
+                return Some(label);
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -2531,6 +3069,17 @@ fn install_ui_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
 
     globals.set("UI", ui)?;
 
+    let rebuild_context = context.clone();
+    globals.set(
+        "rebuildButtons",
+        lua.create_function(move |_, _: mlua::Variadic<mlua::Value>| {
+            rebuild_context
+                .borrow_mut()
+                .log_event("ui.rebuildButtons".to_string());
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }
 
@@ -2970,6 +3519,9 @@ fn dump_runtime_summary(state: &EngineContext) {
         "  Selected actor: {}",
         state.selected_actor.as_deref().unwrap_or("<none>")
     );
+    if let Some(effect) = &state.voice_effect {
+        println!("  Voice effect: {}", effect);
+    }
     if let Some(manny) = state.actors.get("manny") {
         if let Some(set) = &manny.current_set {
             println!("  Manny in set: {set}");
