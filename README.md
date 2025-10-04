@@ -185,6 +185,12 @@ colors, head targets) and emits log entries so we can diff behaviour against
 the original engine while keeping Lua-visible fields like `walk_chore` and
 `talk_drop_chore` in sync.
 
+Achievements bootstrap now run through the embedded host as well: requests for
+`_achievement.lua` install a stateful stub that tracks eligibility flags such as
+`ACHIEVE_CLASSIC_DRIVER`, ensuring Manny's Office exit scripts can toggle the
+classic-driver achievement without crashing while the real platform bridges are
+still out of scope for this prototype.
+
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
 emitted by `grim_engine`, and reads assets straight from their LAB offsets to

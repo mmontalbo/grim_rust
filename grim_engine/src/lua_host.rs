@@ -132,6 +132,12 @@ struct ActorSnapshot {
 }
 
 #[derive(Debug, Default, Clone)]
+struct AchievementState {
+    eligible: bool,
+    established: bool,
+}
+
+#[derive(Debug, Default, Clone)]
 struct MenuState {
     visible: bool,
     auto_freeze: bool,
@@ -358,6 +364,7 @@ struct EngineContext {
     objects: BTreeMap<i64, ObjectSnapshot>,
     objects_by_name: BTreeMap<String, i64>,
     objects_by_actor: BTreeMap<u32, i64>,
+    achievements: BTreeMap<String, AchievementState>,
 }
 
 impl EngineContext {
@@ -405,6 +412,7 @@ impl EngineContext {
             objects: BTreeMap::new(),
             objects_by_name: BTreeMap::new(),
             objects_by_actor: BTreeMap::new(),
+            achievements: BTreeMap::new(),
         }
     }
 
@@ -417,6 +425,31 @@ impl EngineContext {
             .entry(name.to_string())
             .or_insert_with(|| Rc::new(RefCell::new(MenuState::default())))
             .clone()
+    }
+
+    fn set_achievement_eligibility(&mut self, id: &str, eligible: bool) {
+        let entry = self
+            .achievements
+            .entry(id.to_string())
+            .or_insert_with(AchievementState::default);
+        entry.eligible = eligible;
+        entry.established = true;
+        let state = if eligible { "eligible" } else { "ineligible" };
+        self.log_event(format!("achievement.{id} {state}"));
+    }
+
+    fn achievement_is_eligible(&self, id: &str) -> bool {
+        self.achievements
+            .get(id)
+            .map(|state| state.eligible)
+            .unwrap_or(false)
+    }
+
+    fn achievement_has_been_established(&self, id: &str) -> bool {
+        self.achievements
+            .get(id)
+            .map(|state| state.established)
+            .unwrap_or(false)
     }
 
     fn start_script(&mut self, label: String, callable: Option<RegistryKey>) -> u32 {
@@ -1330,6 +1363,10 @@ fn handle_special_dofile<'lua>(
             }
             "_ui.lua" | "_ui.decompiled.lua" => {
                 install_ui_scaffold(lua, context.clone()).map_err(LuaError::external)?;
+                return Ok(Some(Value::Nil));
+            }
+            "_achievement.lua" | "_achievement.decompiled.lua" => {
+                install_achievement_scaffold(lua, context.clone()).map_err(LuaError::external)?;
                 return Ok(Some(Value::Nil));
             }
             "_actors.lua" | "_actors.decompiled.lua" => {
@@ -3856,6 +3893,97 @@ fn install_dialog_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     Ok(())
 }
 
+fn install_achievement_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("achievement"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let table = lua.create_table()?;
+
+    let set_context = context.clone();
+    table.set(
+        "setEligible",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_self_table, values) = split_self(args);
+            let id = values
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let eligible = values.get(1).map(value_to_bool).unwrap_or(true);
+            set_context
+                .borrow_mut()
+                .set_achievement_eligibility(&id, eligible);
+            Ok(())
+        })?,
+    )?;
+
+    let established_context = context.clone();
+    table.set(
+        "hasEligibilityBeenEstablished",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_self_table, values) = split_self(args);
+            let id = values
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let established = {
+                let ctx = established_context.borrow();
+                ctx.achievement_has_been_established(&id)
+            };
+            established_context.borrow_mut().log_event(format!(
+                "achievement.check_established {id} -> {established}"
+            ));
+            Ok(established)
+        })?,
+    )?;
+
+    let query_context = context.clone();
+    table.set(
+        "isEligible",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (_self_table, values) = split_self(args);
+            let id = values
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let eligible = {
+                let ctx = query_context.borrow();
+                ctx.achievement_is_eligible(&id)
+            };
+            query_context
+                .borrow_mut()
+                .log_event(format!("achievement.query {id} -> {eligible}"));
+            Ok(eligible)
+        })?,
+    )?;
+
+    let fallback_context = context.clone();
+    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
+        if let Value::String(method) = key {
+            fallback_context
+                .borrow_mut()
+                .log_event(format!("achievement.stub {}", method.to_str()?));
+        }
+        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        Ok(Value::Function(noop))
+    })?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", fallback)?;
+    table.set_metatable(Some(metatable));
+
+    globals.set("achievement", table)?;
+
+    match globals.get::<_, Value>("ACHIEVE_CLASSIC_DRIVER") {
+        Ok(Value::Nil) | Err(_) => {
+            globals.set("ACHIEVE_CLASSIC_DRIVER", "ACHIEVE_CLASSIC_DRIVER")?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 fn install_music_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
     if matches!(globals.get::<_, Value>("music"), Ok(Value::Table(_))) {
@@ -4965,6 +5093,17 @@ mod tests {
         assert!((vec.x - 1.0).abs() < f32::EPSILON);
         assert!((vec.y - 2.0).abs() < f32::EPSILON);
         assert!((vec.z - 3.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn achievement_flags_are_tracked() {
+        let mut ctx = make_context();
+        assert!(!ctx.achievement_has_been_established("ACHIEVE_CLASSIC_DRIVER"));
+        ctx.set_achievement_eligibility("ACHIEVE_CLASSIC_DRIVER", true);
+        assert!(ctx.achievement_has_been_established("ACHIEVE_CLASSIC_DRIVER"));
+        assert!(ctx.achievement_is_eligible("ACHIEVE_CLASSIC_DRIVER"));
+        ctx.set_achievement_eligibility("ACHIEVE_CLASSIC_DRIVER", false);
+        assert!(!ctx.achievement_is_eligible("ACHIEVE_CLASSIC_DRIVER"));
     }
 
     fn make_context() -> EngineContext {

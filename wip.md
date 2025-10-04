@@ -147,3 +147,8 @@
   The event log captures every chore/costume swap while the actor tables mirror
   the new fields (`walk_chore`, `talk_drop_chore`, `ignoring_boxes`, etc.) for
   downstream Lua helpers.
+- Achievement scaffold: `_achievement.lua` now resolves to a host-provided
+  table that remembers eligibility toggles (e.g., `ACHIEVE_CLASSIC_DRIVER`) and
+  reports them back to Lua, letting Manny's Office fall back to the classic
+  driver checks without waiting on Steam platform bindings. Future platform
+  bridges can layer on top of this stub once real services are available.
