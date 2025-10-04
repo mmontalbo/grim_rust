@@ -45,17 +45,17 @@
     {
       "slug": "menu_ui",
       "description": "Menu/UI runtime bindings",
-      "prompt": "Run ./wip status to review the current plan, then focus on finishing the Manny menu helpers. Replace the remaining stubs in grim_engine/src/lua_host.rs (search for install_menu_) with stateful implementations that mirror the original Lua behaviour, add regression tests covering menu visibility/autofreeze, run cargo fmt && cargo test -p grim_engine, and prepare a descriptive commit message summarising the menu-runtime work."
+      "prompt": "Objective: implement the Manny boot menu helpers using real state. Work only in grim_engine/src/lua_host.rs and its unit tests. Replace the remaining install_menu_*_stub functions (start with install_menu_common_stub and install_menu_dialog_stub) with stateful tables that track visibility, autopause, and respond to show, hide, auto_freeze, and game_pauser expectations. Add regression tests near the existing menu coverage to confirm show/hide toggles and auto-freeze behaviour. Run cargo fmt and cargo test -p grim_engine. Constraints: you may consult code/documentation sources (e.g. GitHub) but avoid general search engines, and stop once the helpers and tests succeed; leave TODO comments if more scripting work remains."
     },
     {
       "slug": "audio_bridge",
       "description": "Audio playback bridge",
-      "prompt": "Review the new music and sfx scaffolds described in ./wip status, design a minimal playback adapter (feature-gated if needed) that can trigger sample decoding in grim_viewer, update grim_engine/src/lua_host.rs and any shared modules accordingly, add coverage ensuring cues/handles round-trip through the adapter, run cargo fmt && cargo test -p grim_engine -p grim_viewer, and stage a commit summarising the audio bridge."
+      "prompt": "Objective: introduce a minimal audio playback adapter inside grim_engine so menu/runtime events can trigger viewer hooks later. Work within grim_engine/src/lua_host.rs, optionally creating a helper module under grim_engine/src/audio_bridge.rs, but do not add new crates. Expose a lightweight trait (for example AudioCallback) and thread it through EngineContext, updating music and sfx helpers to invoke the callback. Add unit tests verifying callbacks receive play and stop events while existing state tracking remains intact. Run cargo fmt and cargo test -p grim_engine. Constraints: limit external references to code/documentation sources; stop after the callbacks and tests are in place."
     },
     {
       "slug": "interaction_loop",
       "description": "Interaction loop polish",
-      "prompt": "Run ./wip status for the latest context, then cross-reference the geometry snapshot and interaction state captured by grim_engine --run-lua. Implement the missing object/inventory helpers (see TODOs in grim_engine/src/lua_host.rs around object controls), add integration coverage that walks Manny through the initial office interactions, run cargo fmt && cargo test -p grim_engine, and craft a commit message documenting the interaction-loop milestone."
+      "prompt": "Objective: flesh out the remaining object and inventory helpers needed for Manny's office interactions. Focus on the TODOs around object controls in grim_engine/src/lua_host.rs (e.g. install_runtime_tables, make_object_touchable, inventory helpers). Implement the missing helpers so Manny can interact with the desk tube/computer path when running grim_engine --run-lua --verbose. Add an integration test that drives Manny through the boot sequence and asserts the interaction log includes the expected touchable state changes. Run cargo fmt and cargo test -p grim_engine. Constraints: reference only code/documentation sources online; stop once the helpers and tests are committed and note any remaining gaps instead of continuing beyond the scope."
     }
   ]
 }

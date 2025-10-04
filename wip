@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 from textwrap import indent
 import subprocess
@@ -32,6 +33,7 @@ for section in WIP_STATE.get('sections', []):
     SECTION_BODIES[section['title']] = '\n'.join(section.get('body', []))
 SECTION_ORDER = [DOC_TITLE, *SECTION_TITLES]
 RAW_WORKSTREAMS = WIP_STATE.get('workstreams', [])
+WORKSTREAM_TIMEOUT = int(os.environ.get('WIP_WORKSTREAM_TIMEOUT', '600'))
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,10 @@ class Workstream:
             self.prompt,
         ]
         run_string = shlex.join(args)
-        return ['nix-shell', str(CODEX_SHELL), '--run', run_string]
+        prefix: List[str] = []
+        if WORKSTREAM_TIMEOUT > 0:
+            prefix = ['timeout', f'{WORKSTREAM_TIMEOUT}s']
+        return prefix + ['nix-shell', str(CODEX_SHELL), '--run', run_string]
 
 
 """Git/worktree helpers"""
