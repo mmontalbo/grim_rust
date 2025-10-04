@@ -108,6 +108,7 @@ impl SectorHit {
 struct ActorSnapshot {
     name: String,
     costume: Option<String>,
+    base_costume: Option<String>,
     current_set: Option<String>,
     at_interest: bool,
     position: Option<Vec3>,
@@ -552,9 +553,31 @@ impl EngineContext {
     fn set_actor_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
         let actor = self.ensure_actor_mut(id, label);
         actor.costume = costume.clone();
-        if let Some(name) = costume {
-            self.log_event(format!("actor.{id}.costume {name}"));
+        match costume {
+            Some(name) => self.log_event(format!("actor.{id}.costume {name}")),
+            None => self.log_event(format!("actor.{id}.costume <nil>")),
         }
+    }
+
+    fn set_actor_base_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
+        let actor = self.ensure_actor_mut(id, label);
+        actor.base_costume = costume.clone();
+        match costume {
+            Some(name) => self.log_event(format!("actor.{id}.base_costume {name}")),
+            None => self.log_event(format!("actor.{id}.base_costume <nil>")),
+        }
+    }
+
+    fn actor_costume(&self, id: &str) -> Option<&str> {
+        self.actors
+            .get(id)
+            .and_then(|actor| actor.costume.as_deref())
+    }
+
+    fn actor_base_costume(&self, id: &str) -> Option<&str> {
+        self.actors
+            .get(id)
+            .and_then(|actor| actor.base_costume.as_deref())
     }
 
     fn put_actor_in_set(&mut self, id: &str, label: &str, set_file: &str) {
@@ -2415,9 +2438,21 @@ fn install_actor_methods(
                     _ => None,
                 });
                 let (id, name) = actor_identity(&table)?;
-                costume_context
-                    .borrow_mut()
-                    .set_actor_costume(&id, &name, costume);
+                {
+                    let mut ctx = costume_context.borrow_mut();
+                    ctx.set_actor_base_costume(&id, &name, costume.clone());
+                    ctx.set_actor_costume(&id, &name, costume.clone());
+                }
+                match costume {
+                    Some(ref value) => {
+                        table.set("base_costume", value.clone())?;
+                        table.set("current_costume", value.clone())?;
+                    }
+                    None => {
+                        table.set("base_costume", Value::Nil)?;
+                        table.set("current_costume", Value::Nil)?;
+                    }
+                }
             }
             Ok(())
         })?,
@@ -2429,14 +2464,130 @@ fn install_actor_methods(
         lua.create_function(move |_, args: Variadic<Value>| {
             let (self_table, values) = split_self(args);
             if let Some(table) = self_table {
-                if let Some(Value::String(costume)) = values.get(0) {
-                    let (id, name) = actor_identity(&table)?;
-                    default_context.borrow_mut().set_actor_costume(
-                        &id,
-                        &name,
-                        Some(costume.to_str()?.to_string()),
-                    );
+                let costume = values.get(0).and_then(|value| match value {
+                    Value::String(text) => Some(text.to_str().ok()?.to_string()),
+                    Value::Nil => None,
+                    _ => None,
+                });
+                let (id, name) = actor_identity(&table)?;
+                {
+                    let mut ctx = default_context.borrow_mut();
+                    ctx.set_actor_base_costume(&id, &name, costume.clone());
+                    ctx.set_actor_costume(&id, &name, costume.clone());
                 }
+                match costume {
+                    Some(ref value) => {
+                        table.set("base_costume", value.clone())?;
+                        table.set("current_costume", value.clone())?;
+                    }
+                    None => {
+                        table.set("base_costume", Value::Nil)?;
+                        table.set("current_costume", Value::Nil)?;
+                    }
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let get_costume_context = context.clone();
+    actor.set(
+        "get_costume",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, _label) = actor_identity(&table)?;
+                if let Some(costume) = get_costume_context.borrow().actor_costume(&id) {
+                    return Ok(Value::String(lua_ctx.create_string(costume)?));
+                }
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    let say_context = context.clone();
+    let say_system_key = system_key.clone();
+    actor.set(
+        "normal_say_line",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| -> LuaResult<()> {
+            let (self_table, values) = split_self(args);
+            if let Some(actor_table) = self_table {
+                let (id, _label) = actor_identity(&actor_table)?;
+                let line = values
+                    .get(0)
+                    .and_then(|value| value_to_string(value))
+                    .unwrap_or_else(|| "<nil>".to_string());
+                let options_table = values.get(1).and_then(|value| match value {
+                    Value::Table(table) => Some(table.clone()),
+                    _ => None,
+                });
+
+                let mut background = false;
+                let mut skip_log = false;
+
+                if let Ok(Value::Table(defaults)) = actor_table.get::<_, Value>("saylineTable") {
+                    if let Ok(value) = defaults.get::<_, Value>("background") {
+                        background = value_to_bool(&value);
+                    }
+                    if let Ok(value) = defaults.get::<_, Value>("skip_log") {
+                        skip_log = value_to_bool(&value);
+                    }
+                }
+
+                if let Some(options) = options_table {
+                    if let Ok(value) = options.get::<_, Value>("background") {
+                        background = value_to_bool(&value);
+                    }
+                    if let Ok(value) = options.get::<_, Value>("skip_log") {
+                        skip_log = value_to_bool(&value);
+                    }
+                }
+
+                {
+                    let mut ctx = say_context.borrow_mut();
+                    ctx.log_event(format!("dialog.say {id} {line}"));
+                    if !skip_log {
+                        ctx.log_event(format!("dialog.log {id} {line}"));
+                    }
+                }
+
+                if !background {
+                    let system: Table = lua_ctx.registry_value(say_system_key.as_ref())?;
+                    system.set("lastActorTalking", actor_table.clone())?;
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let complete_chore_context = context.clone();
+    actor.set(
+        "complete_chore",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, _label) = actor_identity(&table)?;
+                let (has_costume, base_costume) = {
+                    let ctx = complete_chore_context.borrow();
+                    (
+                        ctx.actor_costume(&id).is_some(),
+                        ctx.actor_base_costume(&id).map(str::to_string),
+                    )
+                };
+                if !has_costume {
+                    return Ok(());
+                }
+                let chore = values
+                    .get(0)
+                    .and_then(|value| value_to_string(value))
+                    .unwrap_or_else(|| "<nil>".to_string());
+                let costume_override = values.get(1).and_then(|value| value_to_string(value));
+                let costume_label = costume_override
+                    .or(base_costume)
+                    .unwrap_or_else(|| "<nil>".to_string());
+                complete_chore_context
+                    .borrow_mut()
+                    .log_event(format!("actor.{id}.complete_chore {chore} {costume_label}"));
             }
             Ok(())
         })?,

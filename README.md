@@ -168,6 +168,14 @@ real angles instead of the earlier zero-degree placeholders; next we need to
 pipe this geometry into the cut-scene and visibility trackers that still expect
 real walkbox data.
 
+Costume state now mirrors the Lua side: the host tracks each actor's base
+and active costumes, `Actor:get_costume` surfaces the current wardrobe to Lua,
+and helpers such as `Actor:complete_chore` respect the stored defaults instead
+of stubbing out. Dialogue calls route through a real `Actor:normal_say_line`
+implementation that updates `system.lastActorTalking` and records say-line/log
+events, giving the cut-scene trackers the speaker context they expect while we
+wire up the remaining audio plumbing.
+
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
 emitted by `grim_engine`, and reads assets straight from their LAB offsets to
