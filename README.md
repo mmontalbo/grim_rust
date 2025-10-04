@@ -164,9 +164,14 @@ trackers spin. The host now captures `_objects` interest-actor transforms and
 feeds them back into `GetAngleBetweenActors`, and the new `Actor:set_visibility`
 binding mirrors each toggle into the runtime snapshots so `GetVisibleThings`
 returns the same interactables the scripts expose. Manny-to-object bearings log
-real angles instead of the earlier zero-degree placeholders; next we need to
-pipe this geometry into the cut-scene and visibility trackers that still expect
-real walkbox data.
+real angles instead of the earlier zero-degree placeholders, and the host now
+loads Manny's Office geometry straight from the shipping `mo.set`. A new
+`grim_formats::set` parser plus the shared `LabCollection` let `grim_engine`
+hydrate walk and camera sectors from the LAB archives so runtime sector queries
+no longer rely solely on hard-coded zones. Walk-sector lookups are driven by the
+parsed polygons, while camera/hot requests map through the setup interest
+points (Manny's introductory camera still uses the compatibility fallback until
+we mirror the original selection heuristics precisely).
 
 Every visibility sweep now stores the matching object snapshot, including distance, bearing,
 range heuristics, and the derived hotlist so the runtime summary mirrors what `Head_Control`
@@ -178,7 +183,14 @@ and helpers such as `Actor:complete_chore` respect the stored defaults instead
 of stubbing out. Dialogue calls route through a real `Actor:normal_say_line`
 implementation that updates `system.lastActorTalking` and records say-line/log
 events, giving the cut-scene trackers the speaker context they expect while we
-wire up the remaining audio plumbing.
+wire up the remaining audio plumbing. The host now keeps a cut-scene stack and
+mirrors override handlers: `START_CUT_SCENE`/`END_CUT_SCENE`, `set_override`,
+`kill_override`, and their helpers run through Rust shims that log transitions
+and retain the active override description for later diffs. Message waiting is
+stateful too—`wait_for_message`, `Actor:wait_for_message`, and
+`IsMessageGoing` all consult the embedded dialogue ledger—so scripted waits now
+clear the speaking actor and log the resume point instead of spinning on silent
+stubs.
 
 Choreography and movement bindings are now stateful as well: the host
 implements the classic helpers (`Actor:play_chore`, `push_costume`,

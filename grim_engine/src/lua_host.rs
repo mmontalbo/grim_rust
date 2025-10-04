@@ -4,8 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::lab_collection::LabCollection;
 use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::{normalize_legacy_lua, ResourceGraph};
+use grim_formats::{SectorKind as SetSectorKind, SetFile as SetFileData, Vec3 as SetVec3};
 use mlua::{
     Error as LuaError, Function, Lua, LuaOptions, MultiValue, RegistryKey, Result as LuaResult,
     StdLib, Table, Thread, ThreadStatus, Value, Variadic,
@@ -68,6 +70,184 @@ struct SetSnapshot {
     display_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct SectorPolygon {
+    name: String,
+    id: i32,
+    kind: SetSectorKind,
+    vertices: Vec<(f32, f32)>,
+    centroid: (f32, f32),
+}
+
+impl SectorPolygon {
+    fn new(name: String, id: i32, kind: SetSectorKind, vertices: Vec<(f32, f32)>) -> Self {
+        let centroid = if vertices.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let (sum_x, sum_y) = vertices
+                .iter()
+                .fold((0.0, 0.0), |acc, (x, y)| (acc.0 + x, acc.1 + y));
+            let count = vertices.len() as f32;
+            (sum_x / count, sum_y / count)
+        };
+        Self {
+            name,
+            id,
+            kind,
+            vertices,
+            centroid,
+        }
+    }
+
+    fn contains(&self, point: (f32, f32)) -> bool {
+        if self.vertices.len() < 3 {
+            return false;
+        }
+        if point_on_polygon_edge(point, &self.vertices) {
+            return true;
+        }
+        ray_cast_contains(point, &self.vertices)
+    }
+
+    fn distance_squared(&self, point: (f32, f32)) -> f32 {
+        let dx = point.0 - self.centroid.0;
+        let dy = point.1 - self.centroid.1;
+        dx * dx + dy * dy
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSetup {
+    name: String,
+    interest: Option<(f32, f32)>,
+    position: Option<(f32, f32)>,
+}
+
+impl ParsedSetup {
+    fn target_point(&self) -> Option<(f32, f32)> {
+        self.interest.or(self.position)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSetGeometry {
+    sectors: Vec<SectorPolygon>,
+    setups: Vec<ParsedSetup>,
+}
+
+impl ParsedSetGeometry {
+    fn from_set_file(file: SetFileData) -> Self {
+        let sectors = file
+            .sectors
+            .into_iter()
+            .map(|sector| {
+                let vertices = sector
+                    .vertices
+                    .into_iter()
+                    .map(|SetVec3 { x, y, .. }| (x, y))
+                    .collect();
+                SectorPolygon::new(sector.name, sector.id, sector.kind, vertices)
+            })
+            .collect();
+
+        let setups = file
+            .setups
+            .into_iter()
+            .map(|setup| ParsedSetup {
+                name: setup.name,
+                interest: setup.interest.map(|SetVec3 { x, y, .. }| (x, y)),
+                position: setup.position.map(|SetVec3 { x, y, .. }| (x, y)),
+            })
+            .collect();
+
+        ParsedSetGeometry { sectors, setups }
+    }
+
+    fn has_geometry(&self) -> bool {
+        !self.sectors.is_empty() || !self.setups.is_empty()
+    }
+
+    fn find_polygon(&self, kind: SetSectorKind, point: (f32, f32)) -> Option<&SectorPolygon> {
+        let mut fallback = None;
+        let mut fallback_dist = f32::MAX;
+        for sector in self.sectors.iter().filter(|sector| sector.kind == kind) {
+            if sector.contains(point) {
+                return Some(sector);
+            }
+            let dist = sector.distance_squared(point);
+            if dist < fallback_dist {
+                fallback_dist = dist;
+                fallback = Some(sector);
+            }
+        }
+        fallback
+    }
+
+    fn best_setup_for_point(&self, point: (f32, f32)) -> Option<&ParsedSetup> {
+        let mut best = None;
+        let mut best_dist = f32::MAX;
+        for setup in &self.setups {
+            if let Some(target) = setup.target_point() {
+                let dx = point.0 - target.0;
+                let dy = point.1 - target.1;
+                let dist = dx * dx + dy * dy;
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = Some(setup);
+                }
+            }
+        }
+        best.or_else(|| self.setups.first())
+    }
+}
+
+fn point_on_polygon_edge(point: (f32, f32), vertices: &[(f32, f32)]) -> bool {
+    if vertices.len() < 2 {
+        return false;
+    }
+    let mut prev = vertices.last().copied().unwrap();
+    for &current in vertices {
+        if point_on_segment(point, prev, current) {
+            return true;
+        }
+        prev = current;
+    }
+    false
+}
+
+fn point_on_segment(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> bool {
+    let (px, py) = point;
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    let cross = (py - ay) * (bx - ax) - (px - ax) * (by - ay);
+    if cross.abs() > 1e-4 {
+        return false;
+    }
+    let dot = (px - ax) * (px - bx) + (py - ay) * (py - by);
+    dot <= 0.0
+}
+
+fn ray_cast_contains(point: (f32, f32), vertices: &[(f32, f32)]) -> bool {
+    let (px, py) = point;
+    let mut inside = false;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (xi, yi) = vertices[i];
+        let (xj, yj) = vertices[j];
+        if (yi > py) != (yj > py) {
+            let denom = yj - yi;
+            if denom.abs() > 1e-6 {
+                let xinters = (py - yi) * (xj - xi) / denom + xi;
+                if xinters > px {
+                    inside = !inside;
+                }
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
 #[derive(Debug, Copy, Clone)]
 struct Vec3 {
     x: f32,
@@ -104,6 +284,23 @@ impl SectorHit {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CutSceneRecord {
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct OverrideRecord {
+    description: String,
+}
+
+#[derive(Debug, Clone)]
+struct DialogState {
+    actor_id: String,
+    actor_label: String,
+    line: String,
+}
+
 #[derive(Debug, Default, Clone)]
 struct ActorSnapshot {
     name: String,
@@ -129,6 +326,8 @@ struct ActorSnapshot {
     collision_mode: Option<String>,
     ignoring_boxes: bool,
     last_chore_costume: Option<String>,
+    speaking: bool,
+    last_line: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -385,10 +584,21 @@ struct EngineContext {
     achievements: BTreeMap<String, AchievementState>,
     visible_objects: Vec<VisibleObjectInfo>,
     hotlist_handles: Vec<i64>,
+    cut_scene_stack: Vec<CutSceneRecord>,
+    override_stack: Vec<OverrideRecord>,
+    active_dialog: Option<DialogState>,
+    speaking_actor: Option<String>,
+    message_active: bool,
+    lab_collection: Option<Rc<LabCollection>>,
+    set_geometry: BTreeMap<String, ParsedSetGeometry>,
 }
 
 impl EngineContext {
-    fn new(resources: Rc<ResourceGraph>, verbose: bool) -> Self {
+    fn new(
+        resources: Rc<ResourceGraph>,
+        verbose: bool,
+        lab_collection: Option<Rc<LabCollection>>,
+    ) -> Self {
         let mut available_sets = BTreeMap::new();
         for meta in &resources.sets {
             let setups = meta
@@ -435,11 +645,97 @@ impl EngineContext {
             achievements: BTreeMap::new(),
             visible_objects: Vec::new(),
             hotlist_handles: Vec::new(),
+            cut_scene_stack: Vec::new(),
+            override_stack: Vec::new(),
+            active_dialog: None,
+            speaking_actor: None,
+            message_active: false,
+            lab_collection,
+            set_geometry: BTreeMap::new(),
         }
     }
 
     fn log_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
+    }
+
+    fn push_cut_scene(&mut self, label: Option<String>, flags: Vec<String>) {
+        let display = label.clone().unwrap_or_else(|| "<unnamed>".to_string());
+        if flags.is_empty() {
+            self.log_event(format!("cut_scene.start {}", display));
+        } else {
+            let flag_list = flags.join(", ");
+            self.log_event(format!("cut_scene.start {} [{}]", display, flag_list));
+        }
+        self.cut_scene_stack.push(CutSceneRecord { label });
+    }
+
+    fn pop_cut_scene(&mut self) -> Option<CutSceneRecord> {
+        let record = self.cut_scene_stack.pop();
+        if let Some(record) = &record {
+            let display = record.label.as_deref().unwrap_or("<unnamed>");
+            self.log_event(format!("cut_scene.end {}", display));
+        }
+        record
+    }
+
+    fn push_override(&mut self, description: String) {
+        self.log_event(format!("cut_scene.override.push {}", description));
+        self.override_stack.push(OverrideRecord { description });
+    }
+
+    fn pop_override(&mut self) -> Option<OverrideRecord> {
+        let record = self.override_stack.pop();
+        if let Some(record) = &record {
+            self.log_event(format!("cut_scene.override.pop {}", record.description));
+        }
+        record
+    }
+
+    fn begin_dialog_line(&mut self, id: &str, label: &str, line: &str) {
+        let actor = self.ensure_actor_mut(id, label);
+        actor.speaking = true;
+        actor.last_line = Some(line.to_string());
+        self.speaking_actor = Some(id.to_string());
+        self.message_active = true;
+        let record = DialogState {
+            actor_id: id.to_string(),
+            actor_label: label.to_string(),
+            line: line.to_string(),
+        };
+        self.log_event(format!("dialog.begin {} {}", id, line));
+        self.active_dialog = Some(record);
+    }
+
+    fn finish_dialog_line(&mut self, expected_actor: Option<&str>) -> Option<DialogState> {
+        let should_finish = match (self.active_dialog.as_ref(), expected_actor) {
+            (None, _) => false,
+            (Some(state), Some(expected)) => state.actor_id.eq_ignore_ascii_case(expected),
+            (Some(_), None) => true,
+        };
+        if !should_finish {
+            return None;
+        }
+        let record = self.active_dialog.take();
+        if let Some(state) = &record {
+            if let Some(actor) = self.actors.get_mut(&state.actor_id) {
+                actor.speaking = false;
+            }
+            self.log_event(format!("dialog.end {} {}", state.actor_id, state.line));
+        } else {
+            self.log_event("dialog.end <none>".to_string());
+        }
+        self.speaking_actor = None;
+        self.message_active = false;
+        record
+    }
+
+    fn is_message_active(&self) -> bool {
+        self.message_active
+    }
+
+    fn speaking_actor(&self) -> Option<&str> {
+        self.speaking_actor.as_deref()
     }
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
@@ -606,6 +902,57 @@ impl EngineContext {
     fn mark_set_loaded(&mut self, set_file: &str) {
         if self.loaded_sets.insert(set_file.to_string()) {
             self.log_event(format!("set.load {set_file}"));
+        }
+        self.load_set_geometry(set_file);
+    }
+
+    fn load_set_geometry(&mut self, set_file: &str) {
+        if self.set_geometry.contains_key(set_file) {
+            return;
+        }
+        let Some(collection) = &self.lab_collection else {
+            return;
+        };
+        match collection.find_entry(set_file) {
+            Some((archive, entry)) => {
+                let bytes = archive.read_entry_bytes(entry);
+                match SetFileData::parse(&bytes) {
+                    Ok(file) => {
+                        let geometry = ParsedSetGeometry::from_set_file(file);
+                        if geometry.has_geometry() {
+                            if self.verbose {
+                                self.log_event(format!(
+                                    "set.geometry {set_file} sectors={} setups={}",
+                                    geometry.sectors.len(),
+                                    geometry.setups.len()
+                                ));
+                            }
+                            self.set_geometry.insert(set_file.to_string(), geometry);
+                        } else if self.verbose {
+                            eprintln!(
+                                "[grim_engine] info: {} contained no geometry data",
+                                set_file
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        if self.verbose {
+                            eprintln!(
+                                "[grim_engine] warning: failed to parse {}: {:?}",
+                                set_file, err
+                            );
+                        }
+                    }
+                }
+            }
+            None => {
+                if self.verbose {
+                    eprintln!(
+                        "[grim_engine] info: no LAB entry for {} when loading geometry",
+                        set_file
+                    );
+                }
+            }
         }
     }
 
@@ -917,6 +1264,22 @@ impl EngineContext {
 
     fn resolve_sector_hit(&self, actor_id: &str, kind: &str) -> Option<SectorHit> {
         let normalized_kind = if kind.is_empty() { "walk" } else { kind };
+
+        if actor_id.eq_ignore_ascii_case("manny") {
+            if let Some(current) = &self.current_set {
+                if current.set_file.eq_ignore_ascii_case("mo.set")
+                    && matches!(normalized_kind, "camera" | "2" | "hot" | "1")
+                {
+                    if let Some(hit) = self.manny_office_sector(normalized_kind) {
+                        return Some(hit);
+                    }
+                }
+            }
+        }
+
+        if let Some(hit) = self.geometry_sector_hit(actor_id, normalized_kind) {
+            return Some(hit);
+        }
 
         if actor_id.eq_ignore_ascii_case("manny") {
             if let Some(hit) = self.manny_office_sector(normalized_kind) {
@@ -1332,6 +1695,56 @@ impl EngineContext {
             .and_then(|actor| actor.rotation)
     }
 
+    fn actor_position_xy(&self, actor_id: &str) -> Option<(f32, f32)> {
+        if let Some(actor) = self.actors.get(actor_id) {
+            return actor.position.map(|pos| (pos.x, pos.y));
+        }
+        let lowercase = actor_id.to_ascii_lowercase();
+        self.actors
+            .get(&lowercase)
+            .and_then(|actor| actor.position)
+            .map(|pos| (pos.x, pos.y))
+    }
+
+    fn geometry_sector_hit(&self, actor_id: &str, raw_kind: &str) -> Option<SectorHit> {
+        let current = self.current_set.as_ref()?;
+        let geometry = self.set_geometry.get(&current.set_file)?;
+        let point = self.actor_position_xy(actor_id)?;
+        match raw_kind {
+            "camera" | "2" | "hot" | "1" => {
+                let request = if matches!(raw_kind, "hot" | "1") {
+                    "hot"
+                } else {
+                    "camera"
+                };
+                if let Some(setup) = geometry.best_setup_for_point(point) {
+                    return self.sector_hit_from_setup(&current.set_file, &setup.name, request);
+                }
+            }
+            "walk" | "0" => {
+                if let Some(polygon) = geometry.find_polygon(SetSectorKind::Walk, point) {
+                    return Some(SectorHit::new(polygon.id, polygon.name.clone(), "WALK"));
+                }
+            }
+            _ => {
+                if let Some(kind) = match raw_kind {
+                    "camera" | "2" => Some(SetSectorKind::Camera),
+                    "walk" | "0" => Some(SetSectorKind::Walk),
+                    _ => None,
+                } {
+                    if let Some(polygon) = geometry.find_polygon(kind, point) {
+                        return Some(SectorHit::new(
+                            polygon.id,
+                            polygon.name.clone(),
+                            raw_kind.to_ascii_uppercase(),
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn set_actor_visibility(&mut self, actor_id: &str, label: &str, visible: bool) {
         let state = if visible { "visible" } else { "hidden" };
         self.log_event(format!("actor.visibility {} {state}", label));
@@ -1353,15 +1766,44 @@ impl EngineContext {
     }
 }
 
-pub fn run_boot_sequence(data_root: &Path, verbose: bool) -> Result<()> {
+pub fn run_boot_sequence(data_root: &Path, lab_root: Option<&Path>, verbose: bool) -> Result<()> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
             .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
     );
 
+    let lab_root_path = lab_root
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("dev-install"));
+    let lab_collection = if lab_root_path.is_dir() {
+        match LabCollection::load_from_dir(&lab_root_path) {
+            Ok(collection) => Some(Rc::new(collection)),
+            Err(err) => {
+                eprintln!(
+                    "[grim_engine] warning: failed to load LAB archives from {}: {:?}",
+                    lab_root_path.display(),
+                    err
+                );
+                None
+            }
+        }
+    } else {
+        if verbose {
+            eprintln!(
+                "[grim_engine] info: LAB root {} missing; continuing without geometry",
+                lab_root_path.display()
+            );
+        }
+        None
+    };
+
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
         .context("initialising Lua runtime with standard libraries")?;
-    let context = Rc::new(RefCell::new(EngineContext::new(resources, verbose)));
+    let context = Rc::new(RefCell::new(EngineContext::new(
+        resources,
+        verbose,
+        lab_collection,
+    )));
 
     install_package_path(&lua, data_root)?;
     install_globals(&lua, data_root, context.clone())?;
@@ -2146,14 +2588,130 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
             Ok(table)
         })?,
     )?;
-    globals.set("sleep_for", noop.clone())?;
-    globals.set("set_override", noop.clone())?;
-    globals.set("kill_override", noop.clone())?;
-    globals.set("FadeInChore", noop.clone())?;
-    globals.set("START_CUT_SCENE", noop.clone())?;
-    globals.set("END_CUT_SCENE", noop.clone())?;
-    globals.set("wait_for_message", noop.clone())?;
-    globals.set("IsMessageGoing", lua.create_function(|_, ()| Ok(false))?)?;
+    let sleep_context = context.clone();
+    globals.set(
+        "sleep_for",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let desc = if args.is_empty() {
+                "<none>".to_string()
+            } else {
+                args.iter()
+                    .map(|value| describe_value(value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            sleep_context
+                .borrow_mut()
+                .log_event(format!("sleep_for {}", desc));
+            Ok(())
+        })?,
+    )?;
+
+    let set_override_context = context.clone();
+    globals.set(
+        "set_override",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut ctx = set_override_context.borrow_mut();
+            match args.get(0) {
+                Some(Value::Nil) | None => {
+                    ctx.pop_override();
+                }
+                Some(value) => {
+                    let description = describe_value(value);
+                    ctx.push_override(description);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let kill_override_context = context.clone();
+    globals.set(
+        "kill_override",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            let mut ctx = kill_override_context.borrow_mut();
+            while ctx.pop_override().is_some() {}
+            Ok(())
+        })?,
+    )?;
+
+    let fade_context = context.clone();
+    globals.set(
+        "FadeInChore",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let desc = if args.is_empty() {
+                "<none>".to_string()
+            } else {
+                args.iter()
+                    .map(|value| describe_value(value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            fade_context
+                .borrow_mut()
+                .log_event(format!("actor.fade_in {}", desc));
+            Ok(())
+        })?,
+    )?;
+
+    let start_cut_scene_context = context.clone();
+    globals.set(
+        "START_CUT_SCENE",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let label = args.get(0).and_then(|value| value_to_string(value));
+            let flags: Vec<String> = args
+                .iter()
+                .skip(1)
+                .map(|value| describe_value(value))
+                .collect();
+            start_cut_scene_context
+                .borrow_mut()
+                .push_cut_scene(label, flags);
+            Ok(())
+        })?,
+    )?;
+
+    let end_cut_scene_context = context.clone();
+    globals.set(
+        "END_CUT_SCENE",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            end_cut_scene_context.borrow_mut().pop_cut_scene();
+            Ok(())
+        })?,
+    )?;
+
+    let wait_context = context.clone();
+    globals.set(
+        "wait_for_message",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let actor_hint = if let Some(Value::Table(table)) = args.get(0) {
+                Some(actor_identity(&table)?)
+            } else {
+                None
+            };
+            let mut ctx = wait_context.borrow_mut();
+            let ended = ctx.finish_dialog_line(actor_hint.as_ref().map(|(id, _)| id.as_str()));
+            match ended {
+                Some(state) => {
+                    ctx.log_event(format!("dialog.wait {} {}", state.actor_label, state.line));
+                }
+                None => {
+                    let label = actor_hint
+                        .as_ref()
+                        .map(|(_, label)| label.as_str())
+                        .unwrap_or("<none>");
+                    ctx.log_event(format!("dialog.wait {} <idle>", label));
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let message_context = context.clone();
+    globals.set(
+        "IsMessageGoing",
+        lua.create_function(move |_, ()| Ok(message_context.borrow().is_message_active()))?,
+    )?;
     globals.set(
         "Load",
         lua.create_function(|_, _args: Variadic<Value>| Ok(()))?,
@@ -2847,7 +3405,7 @@ fn install_actor_methods(
         lua.create_function(move |lua_ctx, args: Variadic<Value>| -> LuaResult<()> {
             let (self_table, values) = split_self(args);
             if let Some(actor_table) = self_table {
-                let (id, _label) = actor_identity(&actor_table)?;
+                let (id, label) = actor_identity(&actor_table)?;
                 let line = values
                     .get(0)
                     .and_then(|value| value_to_string(value))
@@ -2883,6 +3441,9 @@ fn install_actor_methods(
                     ctx.log_event(format!("dialog.say {id} {line}"));
                     if !skip_log {
                         ctx.log_event(format!("dialog.log {id} {line}"));
+                    }
+                    if !background {
+                        ctx.begin_dialog_line(&id, &label, &line);
                     }
                 }
 
@@ -2937,13 +3498,30 @@ fn install_actor_methods(
                 let (id, _name) = actor_identity(&table)?;
                 let speaking = speak_context
                     .borrow()
-                    .selected_actor
-                    .as_deref()
-                    .map(|selected| selected == id)
+                    .speaking_actor()
+                    .map(|selected| selected.eq_ignore_ascii_case(&id))
                     .unwrap_or(false);
                 return Ok(speaking);
             }
             Ok(false)
+        })?,
+    )?;
+
+    let actor_wait_context = context.clone();
+    actor.set(
+        "wait_for_message",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, label) = actor_identity(&table)?;
+                let mut ctx = actor_wait_context.borrow_mut();
+                if let Some(state) = ctx.finish_dialog_line(Some(&id)) {
+                    ctx.log_event(format!("dialog.wait {} {}", state.actor_label, state.line));
+                } else {
+                    ctx.log_event(format!("dialog.wait {} <idle>", label));
+                }
+            }
+            Ok(())
         })?,
     )?;
 
@@ -3613,6 +4191,143 @@ fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
         })?,
     )?;
 
+    wrap_start_cut_scene(lua, context.clone())?;
+    wrap_end_cut_scene(lua, context.clone())?;
+    wrap_set_override(lua, context.clone())?;
+    wrap_kill_override(lua, context.clone())?;
+    wrap_wait_for_message(lua, context.clone())?;
+
+    Ok(())
+}
+
+fn wrap_start_cut_scene(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let original: Function = match globals.get("START_CUT_SCENE") {
+        Ok(func) => func,
+        Err(_) => return Ok(()),
+    };
+    let registry_key = lua.create_registry_value(original)?;
+    let ctx = context.clone();
+    let wrapper = lua.create_function(
+        move |lua_ctx, args: Variadic<Value>| -> LuaResult<MultiValue> {
+            let values: Vec<Value> = args.into_iter().collect();
+            let label = values.get(0).and_then(|value| value_to_string(value));
+            let flags: Vec<String> = values
+                .iter()
+                .skip(1)
+                .map(|value| describe_value(value))
+                .collect();
+            ctx.borrow_mut().push_cut_scene(label, flags);
+            let original: Function = lua_ctx.registry_value(&registry_key)?;
+            let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
+            Ok(result)
+        },
+    )?;
+    globals.set("START_CUT_SCENE", wrapper)?;
+    Ok(())
+}
+
+fn wrap_end_cut_scene(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let original: Function = match globals.get("END_CUT_SCENE") {
+        Ok(func) => func,
+        Err(_) => return Ok(()),
+    };
+    let registry_key = lua.create_registry_value(original)?;
+    let ctx = context.clone();
+    let wrapper = lua.create_function(
+        move |lua_ctx, args: Variadic<Value>| -> LuaResult<MultiValue> {
+            let values: Vec<Value> = args.into_iter().collect();
+            let original: Function = lua_ctx.registry_value(&registry_key)?;
+            let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
+            ctx.borrow_mut().pop_cut_scene();
+            Ok(result)
+        },
+    )?;
+    globals.set("END_CUT_SCENE", wrapper)?;
+    Ok(())
+}
+
+fn wrap_set_override(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let original: Function = match globals.get("set_override") {
+        Ok(func) => func,
+        Err(_) => return Ok(()),
+    };
+    let registry_key = lua.create_registry_value(original)?;
+    let ctx = context.clone();
+    let wrapper = lua.create_function(
+        move |lua_ctx, args: Variadic<Value>| -> LuaResult<MultiValue> {
+            let values: Vec<Value> = args.into_iter().collect();
+            let original: Function = lua_ctx.registry_value(&registry_key)?;
+            let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
+            {
+                let mut ctx = ctx.borrow_mut();
+                match values.get(0) {
+                    Some(Value::Nil) | None => {
+                        ctx.pop_override();
+                    }
+                    Some(value) => {
+                        ctx.push_override(describe_value(value));
+                    }
+                }
+            }
+            Ok(result)
+        },
+    )?;
+    globals.set("set_override", wrapper)?;
+    Ok(())
+}
+
+fn wrap_kill_override(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let original: Function = match globals.get("kill_override") {
+        Ok(func) => func,
+        Err(_) => return Ok(()),
+    };
+    let registry_key = lua.create_registry_value(original)?;
+    let ctx = context.clone();
+    let wrapper = lua.create_function(
+        move |lua_ctx, args: Variadic<Value>| -> LuaResult<MultiValue> {
+            let values: Vec<Value> = args.into_iter().collect();
+            let original: Function = lua_ctx.registry_value(&registry_key)?;
+            let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
+            {
+                let mut ctx = ctx.borrow_mut();
+                while ctx.pop_override().is_some() {}
+            }
+            Ok(result)
+        },
+    )?;
+    globals.set("kill_override", wrapper)?;
+    Ok(())
+}
+
+fn wrap_wait_for_message(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    let original: Function = match globals.get("wait_for_message") {
+        Ok(func) => func,
+        Err(_) => return Ok(()),
+    };
+    let registry_key = lua.create_registry_value(original)?;
+    let ctx = context.clone();
+    let wrapper = lua.create_function(
+        move |lua_ctx, args: Variadic<Value>| -> LuaResult<MultiValue> {
+            let values: Vec<Value> = args.into_iter().collect();
+            let original: Function = lua_ctx.registry_value(&registry_key)?;
+            let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
+            {
+                let mut ctx = ctx.borrow_mut();
+                if let Some(state) = ctx.finish_dialog_line(None) {
+                    ctx.log_event(format!("dialog.wait {} {}", state.actor_label, state.line));
+                } else {
+                    ctx.log_event("dialog.wait global <idle>".to_string());
+                }
+            }
+            Ok(result)
+        },
+    )?;
+    globals.set("wait_for_message", wrapper)?;
     Ok(())
 }
 
@@ -5227,8 +5942,12 @@ fn distance_between(a: Vec3, b: Vec3) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_paths, value_slice_to_vec3, EngineContext, ObjectSnapshot, Vec3};
+    use super::{
+        candidate_paths, value_slice_to_vec3, EngineContext, ObjectSnapshot, ParsedSetGeometry,
+        Vec3,
+    };
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
+    use grim_formats::SetFile as SetFileData;
     use mlua::Value;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -5310,7 +6029,7 @@ mod tests {
         };
         let mut graph = ResourceGraph::default();
         graph.sets.push(set_metadata);
-        EngineContext::new(Rc::new(graph), false)
+        EngineContext::new(Rc::new(graph), false, None)
     }
 
     fn prepare_manny(ctx: &mut EngineContext, position: Vec3) {
@@ -5350,6 +6069,38 @@ mod tests {
         assert_eq!(camera_hit.name, "mo_mnycu");
         let hot_hit = ctx.manny_office_sector("hot").expect("door hot");
         assert_eq!(hot_hit.name, "mo_comin");
+    }
+    fn sample_geometry_set() -> SetFileData {
+        let raw = "section: setups\n\tnumsetups\t1\n\tsetup\tcam_a\n\tposition\t0.0\t0.0\t0.0\n\tinterest\t0.3\t0.3\t0.0\n\troll\t\t0.0\n\tfov\t\t45.0\n\tnclip\t\t0.1\n\tfclip\t\t100.0\n\nsection: sectors\n\tsector\t\tdesk_walk\n\tID\t\t10\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t0.0\t0.0\t0.0\n\t         \t\t1.0\t0.0\t0.0\n\t         \t\t1.0\t1.0\t0.0\n\t         \t\t0.0\t1.0\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n";
+        SetFileData::parse(raw.as_bytes()).expect("parse sample set")
+    }
+
+    #[test]
+    fn geometry_walk_sector_selected_for_point() {
+        let mut ctx = make_context();
+        ctx.set_geometry.insert(
+            "mo.set".to_string(),
+            ParsedSetGeometry::from_set_file(sample_geometry_set()),
+        );
+        ctx.current_set = Some(super::SetSnapshot {
+            set_file: "mo.set".to_string(),
+            variable_name: "mo".to_string(),
+            display_name: None,
+        });
+        let (id, _handle) = ctx.register_actor_with_handle("Guard", Some(2002));
+        ctx.put_actor_in_set(&id, "Guard", "mo.set");
+        ctx.set_actor_position(
+            &id,
+            "Guard",
+            Vec3 {
+                x: 0.25,
+                y: 0.25,
+                z: 0.0,
+            },
+        );
+        let hit = ctx.geometry_sector_hit(&id, "walk").expect("walk sector");
+        assert_eq!(hit.name, "desk_walk");
+        assert_eq!(hit.kind, "WALK");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use grim_formats::{decode_bm, peek_bm_metadata, LabArchive, LabEntry};
 use serde::Serialize;
 
+#[derive(Debug)]
 pub struct LabCollection {
     archives: Vec<LabArchive>,
 }

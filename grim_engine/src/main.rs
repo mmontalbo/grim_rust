@@ -92,7 +92,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.run_lua {
-        run_boot_sequence(&args.data_root, args.verbose)?;
+        run_boot_sequence(&args.data_root, args.lab_root.as_deref(), args.verbose)?;
         return Ok(());
     }
 

@@ -51,22 +51,17 @@
   counts for future bindings.
 
 ## Next Steps
-1. Flesh out the boot-time trackers (cut-scene services, control handlers,
-   and geometry-driven visibility/collision lookups) inside the coroutine host
-   so the embedded runtime can march further into Manny's Office.
-   Camera/hot sector queries now use Manny's live transforms and
-   `Actor:set_visibility` keeps `GetVisibleThings` aligned with the script state,
-   so the next blockers are wiring `Head_Control`/dialog logic to real walkbox
-   data instead of heuristics.
+1. Carry the parsed set geometry through the remaining boot-time trackers (head-control,
+   commentary, and cut-scene helpers) so they consume the real walk polygons instead of logging
+   placeholders.
 2. Feed the new marker overlay data back into `grim_engine` (e.g., emit a
    machine-readable placement log) so other tooling can validate set geometry
    without parsing console output.
 3. Keep widening the legacy normalisation pass (additional helper keywords,
    comment forms) so parsing never regresses.
-4. Correlate the captured Manny/object transforms with the head-control scripts so we
-   can graduate the new zone heuristics into real geometry-driven sector data. That means
-   diffing runtime bearings against the static analysis timeline and planning how to surface
-   visibility/collision metadata next.
+4. Replace the Manny-specific camera fallback with geometry-driven selection and extend the
+   parser/lookup path to other sets once their data is decoded. Diff the runtime results against
+   the static analysis timeline to keep sector coverage honest.
 
 
 ## Current Iteration — Manny's Office Prototype
@@ -123,8 +118,8 @@
   derive Manny's camera/hot/walk selections from his live position, emitting
   zone-specific setup names instead of the old canned responses. Requests are
   still logged for diffing, the runtime summary surfaces the latest sectors,
-  and we added unit tests that cover the desk vs door heuristics while we work
-  toward feeding in real geometry tables.
+  and we added unit tests that cover both the legacy desk/door heuristics and the
+  new geometry-backed walk lookups.
 - Set hook: wrap `Set.create` at runtime so every set table inherits the stock
   methods. We now re-export the legacy helpers (`MakeCurrentSet`,
   `MakeCurrentSetup`, `GetCurrentSetup`, `rebuildButtons`, `NewObjectState`,
@@ -133,15 +128,24 @@
   `FINALIZEBOOT` and Manny's Office trackers run on real tables. Interest-actor
   positions now flow back into `GetAngleBetweenActors`, and the host mirrors
   `Actor:set_visibility` toggles so `GetVisibleThings` returns the same objects
-  Lua marks as visible. Manny-to-object bearings now log real angles; the next
-  blocker is feeding this geometry into the cut-scene and visibility trackers
-  that still expect real walkbox data.
+  Lua marks as visible. Manny-to-object bearings now log real angles, and the
+  runtime loads Manny's Office walk/camera sectors by parsing the shipping
+  `mo.set` through `grim_formats::set`. Walk lookups now use the parsed polygons
+  while camera/hot queries map through setup interest points; the remaining work
+  is teaching the head-control/cut-scene helpers to consume this data instead of
+  relying on their logging stubs.
 - Visibility sweeps now record per-object distance, bearing, range hits, and the
   derived hotlist so the runtime summary mirrors what Head_Control evaluates each frame.
 - Costume/dialogue plumbing: the embedded host now tracks each actor's base
   and active costume, surfaces `Actor:get_costume`, respects `Actor:complete_chore`,
   and routes `Actor:normal_say_line` through `system.lastActorTalking` while logging
   the line so cut-scene monitors see real wardrobe and speaker context.
+- Cut-scene ledger: the host now keeps a stack of active cut scenes and override
+  handlers, wrapping `START_CUT_SCENE`/`END_CUT_SCENE`, `set_override`,
+  `kill_override`, and both global and actor `wait_for_message` calls.
+  The instrumentation logs every transition, clears the speaking actor when dialogs
+  finish, and ensures `IsMessageGoing` mirrors the embedded ledger instead of
+  staying false.
 - Choreography helpers: the host now implements `Actor:play_chore`,
   `push_costume`/`pop_costume`, `set_walk_chore`, `set_talk_chore`,
   `set_mumble_chore`, head look controls, and collision toggles so Manny's
