@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""Project WIP tracker: renders the living document and launches workstreams."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shlex
+from textwrap import indent
+import subprocess
+import shutil
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional
+
+REPO_ROOT = Path(__file__).resolve().parent
+DEFAULT_WORKDIR = REPO_ROOT
+DEFAULT_LOG_DIR = REPO_ROOT / 'artifacts' / 'workstreams'
+CODEX_ROOT = Path.home() / 'Developer' / 'codex' / 'codex-rs'
+CODEX_SHELL = CODEX_ROOT / 'shell.nix'
+WORKTREE_ROOT = REPO_ROOT / 'artifacts' / 'worktrees'
+WIP_STATE_PATH = REPO_ROOT / 'wip_state.json'
+try:
+    WIP_STATE = json.loads(WIP_STATE_PATH.read_text())
+except FileNotFoundError as exc:
+    raise SystemExit(f'missing {WIP_STATE_PATH}') from exc
+DOC_TITLE = WIP_STATE.get('title', 'Work in Progress')
+SECTION_TITLES = [section['title'] for section in WIP_STATE.get('sections', [])]
+SECTION_BODIES: Dict[str, str] = {DOC_TITLE: ''}
+for section in WIP_STATE.get('sections', []):
+    SECTION_BODIES[section['title']] = '\n'.join(section.get('body', []))
+SECTION_ORDER = [DOC_TITLE, *SECTION_TITLES]
+RAW_WORKSTREAMS = WIP_STATE.get('workstreams', [])
+
+
+@dataclass(frozen=True)
+class Workstream:
+    slug: str
+    description: str
+    prompt: str
+
+    def command(self, workdir: Path) -> List[str]:
+        args = [
+            'cargo',
+            'run',
+            '--bin',
+            'codex-exec',
+            '--',
+            '--model',
+            'gpt-5-codex',
+            '--sandbox',
+            'danger-full-access',
+            '-c',
+            'approval_policy=\"never\"',
+            '-C',
+            str(workdir),
+            self.prompt,
+        ]
+        run_string = shlex.join(args)
+        return ['nix-shell', str(CODEX_SHELL), '--run', run_string]
+
+
+"""Git/worktree helpers"""
+def git_run(args: List[str], *, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        ['git', *args],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=capture_output,
+    )
+    if check and result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {stderr}")
+    return result
+
+
+def git_rev_parse(reference: str) -> str:
+    return git_run(['rev-parse', reference], capture_output=True).stdout.strip()
+
+
+def branch_exists(branch: str) -> bool:
+    result = git_run(
+        ['show-ref', '--verify', f'refs/heads/{branch}'],
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def reset_branch(branch: str, base_rev: str) -> None:
+    if branch_exists(branch):
+        git_run(['branch', '-f', branch, base_rev])
+    else:
+        git_run(['branch', branch, base_rev])
+
+
+def remove_worktree(path: Path) -> None:
+    git_run(['worktree', 'remove', '--force', str(path)], check=False, capture_output=True)
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def prepare_worktree(slug: str, base_rev: str) -> tuple[Path, str]:
+    WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
+    worktree_path = WORKTREE_ROOT / slug
+    remove_worktree(worktree_path)
+    branch = f'workstream/{slug}'
+    reset_branch(branch, base_rev)
+    git_run(['worktree', 'add', str(worktree_path), branch])
+    return worktree_path, branch
+
+
+WORKSTREAM_ORDER = [data['slug'] for data in RAW_WORKSTREAMS]
+WORKSTREAMS: Dict[str, Workstream] = {
+    data['slug']: Workstream(
+        slug=data['slug'],
+        description=data.get('description', ''),
+        prompt=data.get('prompt', ''),
+    )
+    for data in RAW_WORKSTREAMS
+}
+
+
+
+
+
+def render_section(title: str) -> str:
+    if title not in SECTION_BODIES:
+        raise KeyError(title)
+    heading = '#' if title == DOC_TITLE else '##'
+    body = SECTION_BODIES.get(title, '')
+    if body:
+        return f"{heading} {title}\n{body}"
+    return f"{heading} {title}"
+
+
+def render_document() -> str:
+    return '\n\n'.join(render_section(title) for title in SECTION_ORDER)
+
+
+def print_section(title: str) -> None:
+    if title not in SECTION_BODIES:
+        valid = ', '.join(SECTION_ORDER)
+        print(f"unknown section '{title}'. Available: {valid}", file=sys.stderr)
+        raise SystemExit(1)
+    print(render_section(title))
+
+
+def print_status(section: Optional[str]) -> None:
+    if section is None:
+        print(render_document())
+    else:
+        print_section(section)
+
+
+def list_sections() -> None:
+    for title in SECTION_ORDER:
+        print(title)
+
+
+def list_workstreams(verbose: bool) -> None:
+    for slug in WORKSTREAM_ORDER:
+        ws = WORKSTREAMS[slug]
+        print(f"{ws.slug}: {ws.description}")
+        if verbose:
+            cmd = ' '.join(ws.command(WORKTREE_ROOT / ws.slug))
+            print(f"  prompt: {ws.prompt}")
+            print(f"  command: {cmd}")
+
+
+def run_workstreams(slugs: Optional[List[str]], dry_run: bool, workdir: Path, logs_dir: Path) -> int:
+    if slugs:
+        missing = [slug for slug in slugs if slug not in WORKSTREAMS]
+        if missing:
+            valid = ', '.join(sorted(WORKSTREAMS))
+            print(f"unknown workstream(s): {', '.join(missing)}. Available: {valid}", file=sys.stderr)
+            return 1
+        selected = [WORKSTREAMS[slug] for slug in slugs]
+    else:
+        selected = [WORKSTREAMS[slug] for slug in WORKSTREAM_ORDER]
+
+    logs_dir = logs_dir.resolve()
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    if dry_run:
+        base_rev = None
+    else:
+        git_run(['worktree', 'prune'], check=False, capture_output=True)
+        base_rev = git_rev_parse('HEAD')
+
+    processes = []
+    log_handles = []
+
+    for ws in selected:
+        branch = f'workstream/{ws.slug}'
+        if dry_run:
+            worktree_path = WORKTREE_ROOT / ws.slug
+        else:
+            worktree_path, branch = prepare_worktree(ws.slug, base_rev)
+        cmd = ws.command(worktree_path)
+        log_path = logs_dir / f"{ws.slug}.log"
+        status_path = logs_dir / f"{ws.slug}.status"
+        if dry_run:
+            print(f"[{ws.slug}] {' '.join(cmd)}  # branch={branch} worktree={worktree_path} log -> {log_path}")
+            continue
+        status_payload = {
+            'status': 'running',
+            'exit_code': None,
+            'branch': branch,
+            'worktree': str(worktree_path),
+        }
+        status_path.write_text(json.dumps(status_payload))
+        log_handle = log_path.open('w', encoding='utf-8')
+        log_handles.append(log_handle)
+        print(f"[{ws.slug}] launching, logging to {log_path}")
+        proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, cwd=CODEX_ROOT)
+        processes.append((ws, branch, worktree_path, proc, log_path, status_path))
+
+    if dry_run:
+        return 0
+
+    exit_code = 0
+    for ws, branch, worktree_path, proc, log_path, status_path in processes:
+        ret = proc.wait()
+        status = 'success' if ret == 0 else 'failure'
+        print(f"[{ws.slug}] completed with exit code {ret} (log: {log_path})")
+        status_payload = {
+            'status': status,
+            'exit_code': ret,
+            'branch': branch,
+            'worktree': str(worktree_path),
+        }
+        status_path.write_text(json.dumps(status_payload))
+        if ret != 0 and exit_code == 0:
+            exit_code = ret
+
+    for handle in log_handles:
+        handle.close()
+
+    return exit_code
+
+def read_status(status_path: Path) -> dict:
+    if status_path.exists():
+        try:
+            return json.loads(status_path.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {'status': 'pending', 'exit_code': None}
+
+
+def tail_file(path: Path, lines: int) -> str:
+    if lines == 0:
+        return ''
+    try:
+        data = path.read_text().splitlines()
+    except FileNotFoundError:
+        return ''
+    if lines is None or lines >= len(data):
+        selected = data
+    else:
+        selected = data[-lines:]
+    return '\n'.join(selected)
+
+
+def git_output(args: List[str]) -> str:
+    result = subprocess.run(['git', *args], capture_output=True, text=True, cwd=REPO_ROOT)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or 'unknown error'
+        return f"(git {' '.join(args)} failed: {stderr})"
+    return result.stdout
+
+
+def review_workstreams(slugs: Optional[List[str]], logs_dir: Path, tail: int, show_logs: bool, show_git: bool) -> int:
+    logs_dir = logs_dir.resolve()
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    if slugs:
+        missing = [slug for slug in slugs if slug not in WORKSTREAMS]
+        if missing:
+            valid = ', '.join(sorted(WORKSTREAMS))
+            print(f"unknown workstream(s): {', '.join(missing)}. Available: {valid}", file=sys.stderr)
+            return 1
+        selected = [WORKSTREAMS[slug] for slug in slugs]
+    else:
+        selected = list(WORKSTREAMS.values())
+
+    overall_exit = 0
+    for ws in selected:
+        log_path = logs_dir / f"{ws.slug}.log"
+        status_path = logs_dir / f"{ws.slug}.status"
+        status_payload = read_status(status_path)
+        status = status_payload.get('status', 'pending')
+        exit_code = status_payload.get('exit_code')
+        print(f"[{ws.slug}] {status.upper()} (exit {exit_code if exit_code is not None else 'unknown'})")
+        print(f"    log: {log_path if log_path.exists() else 'missing'}")
+        branch = status_payload.get('branch')
+        worktree = status_payload.get('worktree')
+        if branch:
+            print(f"    branch: {branch}")
+        if worktree:
+            print(f"    worktree: {worktree}")
+        if show_logs:
+            if log_path.exists():
+                snippet = tail_file(log_path, tail)
+                if snippet:
+                    print(indent(snippet, '    '))
+                else:
+                    print('    (log is empty)')
+            else:
+                print('    (no log file found)')
+        if status != 'success':
+            overall_exit = 1
+
+    if show_git:
+        status_output = git_output(['status', '--short'])
+        if status_output.strip():
+            print('\nGit status:')
+            print(indent(status_output.rstrip(), '  '))
+        else:
+            print('\nGit status: clean')
+
+        diff_output = git_output(['diff', '--stat'])
+        if diff_output.strip():
+            print('\nGit diff --stat:')
+            print(indent(diff_output.rstrip(), '  '))
+        else:
+            print('\nGit diff --stat: (no changes)')
+
+    return overall_exit
+
+
+def iterate_workstreams(slugs: Optional[List[str]], workdir: Path, logs_dir: Path, tail: int, show_logs: bool, show_git: bool, dry_run: bool) -> int:
+    if dry_run:
+        return run_workstreams(slugs=slugs, dry_run=True, workdir=workdir, logs_dir=logs_dir)
+
+    run_exit = run_workstreams(slugs=slugs, dry_run=False, workdir=workdir, logs_dir=logs_dir)
+    review_exit = review_workstreams(slugs=slugs, logs_dir=logs_dir, tail=tail, show_logs=show_logs, show_git=show_git)
+    return run_exit if run_exit != 0 else review_exit
+
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description='Inspect the project WIP document or launch executable workstreams.'
+    )
+    subparsers = parser.add_subparsers(dest='command')
+
+    status = subparsers.add_parser('status', help='print the WIP document (optionally a single section)')
+    status.add_argument('--section', help='limit output to a single section title')
+
+    subparsers.add_parser('sections', help='list available section titles')
+
+    workstreams = subparsers.add_parser('workstreams', help='list workstreams and prompts')
+    workstreams.add_argument('--verbose', action='store_true', help='print prompts and full commands')
+
+    continue_cmd = subparsers.add_parser('continue', help='launch workstreams in parallel')
+    continue_cmd.add_argument('--slug', action='append', help='limit to specific workstream slug (repeatable)')
+    continue_cmd.add_argument('--workdir', type=Path, default=DEFAULT_WORKDIR, help='override repo root for -C')
+    continue_cmd.add_argument('--logs-dir', type=Path, default=DEFAULT_LOG_DIR, help='log directory (default artifacts/workstreams)')
+    continue_cmd.add_argument('--dry-run', action='store_true', help='print commands without launching')
+
+    prompt_cmd = subparsers.add_parser('prompt', help='print the prompt/command for a single workstream')
+    prompt_cmd.add_argument('slug', help='workstream slug to inspect')
+
+    review_cmd = subparsers.add_parser('review', help='summarise recent workstream runs')
+    review_cmd.add_argument('--slug', action='append', help='limit to specific workstream slug (repeatable)')
+    review_cmd.add_argument('--logs-dir', type=Path, default=DEFAULT_LOG_DIR, help='log directory (default artifacts/workstreams)')
+    review_cmd.add_argument('--tail', type=int, default=40, help='number of log lines to show per workstream')
+    review_cmd.add_argument('--no-logs', action='store_true', help='suppress log tail output')
+    review_cmd.add_argument('--no-git', action='store_true', help='skip git status/diff summaries')
+
+    iterate_cmd = subparsers.add_parser('iterate', help='run workstreams and immediately review outputs')
+    iterate_cmd.add_argument('--slug', action='append', help='limit to specific workstream slug (repeatable)')
+    iterate_cmd.add_argument('--workdir', type=Path, default=DEFAULT_WORKDIR, help='override repo root for -C')
+    iterate_cmd.add_argument('--logs-dir', type=Path, default=DEFAULT_LOG_DIR, help='log directory (default artifacts/workstreams)')
+    iterate_cmd.add_argument('--tail', type=int, default=40, help='number of log lines to show per workstream')
+    iterate_cmd.add_argument('--no-logs', action='store_true', help='suppress log tail output during review')
+    iterate_cmd.add_argument('--no-git', action='store_true', help='skip git status/diff summaries during review')
+    iterate_cmd.add_argument('--dry-run', action='store_true', help='print commands without launching workstreams')
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    command = args.command or 'status'
+
+    if command == 'status':
+        print_status(getattr(args, 'section', None))
+        return 0
+    if command == 'sections':
+        list_sections()
+        return 0
+    if command == 'workstreams':
+        list_workstreams(verbose=getattr(args, 'verbose', False))
+        return 0
+    if command == 'continue':
+        slugs = getattr(args, 'slug', None)
+        return run_workstreams(slugs=slugs, dry_run=args.dry_run, workdir=args.workdir, logs_dir=args.logs_dir)
+    if command == 'review':
+        slugs = getattr(args, 'slug', None)
+        show_logs = not getattr(args, 'no_logs', False)
+        show_git = not getattr(args, 'no_git', False)
+        return review_workstreams(slugs=slugs, logs_dir=args.logs_dir, tail=args.tail, show_logs=show_logs, show_git=show_git)
+    if command == 'iterate':
+        slugs = getattr(args, 'slug', None)
+        show_logs = not getattr(args, 'no_logs', False)
+        show_git = not getattr(args, 'no_git', False)
+        return iterate_workstreams(slugs=slugs, workdir=args.workdir, logs_dir=args.logs_dir, tail=args.tail, show_logs=show_logs, show_git=show_git, dry_run=args.dry_run)
+    if command == 'prompt':
+        slug = args.slug
+        if slug not in WORKSTREAMS:
+            valid = ', '.join(sorted(WORKSTREAMS))
+            print(f"unknown workstream '{slug}'. Available: {valid}", file=sys.stderr)
+            return 1
+        ws = WORKSTREAMS[slug]
+        print(f"{ws.slug}: {ws.description}\n")
+        print(ws.prompt)
+        print("\nCommand:")
+        print(' '.join(ws.command(WORKTREE_ROOT / ws.slug)))
+        return 0
+
+    parser.print_help()
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
