@@ -140,3 +140,10 @@
   and active costume, surfaces `Actor:get_costume`, respects `Actor:complete_chore`,
   and routes `Actor:normal_say_line` through `system.lastActorTalking` while logging
   the line so cut-scene monitors see real wardrobe and speaker context.
+- Choreography helpers: the host now implements `Actor:play_chore`,
+  `push_costume`/`pop_costume`, `set_walk_chore`, `set_talk_chore`,
+  `set_mumble_chore`, head look controls, and collision toggles so Manny's
+  office scripts mutate the same stacks and flags the original runtime exposed.
+  The event log captures every chore/costume swap while the actor tables mirror
+  the new fields (`walk_chore`, `talk_drop_chore`, `ignoring_boxes`, etc.) for
+  downstream Lua helpers.

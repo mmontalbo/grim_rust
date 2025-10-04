@@ -117,6 +117,18 @@ struct ActorSnapshot {
     is_visible: bool,
     handle: u32,
     sectors: BTreeMap<String, SectorHit>,
+    costume_stack: Vec<String>,
+    current_chore: Option<String>,
+    walk_chore: Option<String>,
+    talk_chore: Option<String>,
+    talk_drop_chore: Option<String>,
+    mumble_chore: Option<String>,
+    talk_color: Option<String>,
+    head_target: Option<String>,
+    head_look_rate: Option<f32>,
+    collision_mode: Option<String>,
+    ignoring_boxes: bool,
+    last_chore_costume: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -554,16 +566,30 @@ impl EngineContext {
         let actor = self.ensure_actor_mut(id, label);
         actor.costume = costume.clone();
         match costume {
-            Some(name) => self.log_event(format!("actor.{id}.costume {name}")),
-            None => self.log_event(format!("actor.{id}.costume <nil>")),
+            Some(ref name) => {
+                if let Some(slot) = actor.costume_stack.last_mut() {
+                    *slot = name.clone();
+                } else {
+                    actor.costume_stack.push(name.clone());
+                }
+                self.log_event(format!("actor.{id}.costume {name}"));
+            }
+            None => {
+                actor.costume_stack.clear();
+                self.log_event(format!("actor.{id}.costume <nil>"));
+            }
         }
     }
 
     fn set_actor_base_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
         let actor = self.ensure_actor_mut(id, label);
         actor.base_costume = costume.clone();
+        actor.costume_stack.clear();
         match costume {
-            Some(name) => self.log_event(format!("actor.{id}.base_costume {name}")),
+            Some(ref name) => {
+                actor.costume_stack.push(name.clone());
+                self.log_event(format!("actor.{id}.base_costume {name}"));
+            }
             None => self.log_event(format!("actor.{id}.base_costume <nil>")),
         }
     }
@@ -578,6 +604,172 @@ impl EngineContext {
         self.actors
             .get(id)
             .and_then(|actor| actor.base_costume.as_deref())
+    }
+
+    fn push_actor_costume(&mut self, id: &str, label: &str, costume: String) -> usize {
+        let depth;
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.costume_stack.push(costume.clone());
+            actor.costume = Some(costume.clone());
+            depth = actor.costume_stack.len();
+        }
+        self.log_event(format!("actor.{id}.push_costume {costume} depth {depth}"));
+        depth
+    }
+
+    fn pop_actor_costume(&mut self, id: &str, label: &str) -> Option<String> {
+        let mut removed: Option<String> = None;
+        let mut next: Option<String> = None;
+        let blocked;
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            if actor.costume_stack.len() <= 1 {
+                blocked = true;
+            } else {
+                blocked = false;
+                removed = actor.costume_stack.pop();
+                next = actor.costume_stack.last().cloned();
+                actor.costume = next.clone();
+            }
+        }
+        if blocked {
+            self.log_event(format!("actor.{id}.pop_costume blocked"));
+            None
+        } else {
+            let name = removed.as_deref().unwrap_or("<nil>").to_string();
+            self.log_event(format!("actor.{id}.pop_costume {name}"));
+            next
+        }
+    }
+
+    fn set_actor_current_chore(
+        &mut self,
+        id: &str,
+        label: &str,
+        chore: Option<String>,
+        costume: Option<String>,
+    ) {
+        let (chore_label, costume_label);
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.current_chore = chore.clone();
+            actor.last_chore_costume = costume.clone();
+            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
+            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
+        }
+        self.log_event(format!("actor.{id}.chore {chore_label} {costume_label}"));
+    }
+
+    fn set_actor_walk_chore(
+        &mut self,
+        id: &str,
+        label: &str,
+        chore: Option<String>,
+        costume: Option<String>,
+    ) {
+        let (chore_label, costume_label);
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.walk_chore = chore.clone();
+            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
+            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
+        }
+        self.log_event(format!(
+            "actor.{id}.walk_chore {chore_label} {costume_label}"
+        ));
+    }
+
+    fn set_actor_talk_chore(
+        &mut self,
+        id: &str,
+        label: &str,
+        chore: Option<String>,
+        drop: Option<String>,
+        costume: Option<String>,
+    ) {
+        let (chore_label, drop_label, costume_label);
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.talk_chore = chore.clone();
+            actor.talk_drop_chore = drop.clone();
+            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
+            drop_label = drop.as_deref().unwrap_or("<nil>").to_string();
+            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
+        }
+        self.log_event(format!(
+            "actor.{id}.talk_chore {chore_label} drop {drop_label} costume {costume_label}"
+        ));
+    }
+
+    fn set_actor_mumble_chore(
+        &mut self,
+        id: &str,
+        label: &str,
+        chore: Option<String>,
+        costume: Option<String>,
+    ) {
+        let (chore_label, costume_label);
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.mumble_chore = chore.clone();
+            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
+            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
+        }
+        self.log_event(format!(
+            "actor.{id}.mumble_chore {chore_label} costume {costume_label}"
+        ));
+    }
+
+    fn set_actor_talk_color(&mut self, id: &str, label: &str, color: Option<String>) {
+        let display;
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.talk_color = color.clone();
+            display = color.as_deref().unwrap_or("<nil>").to_string();
+        }
+        self.log_event(format!("actor.{id}.talk_color {display}"));
+    }
+
+    fn set_actor_head_target(&mut self, id: &str, label: &str, target: Option<String>) {
+        let display;
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.head_target = target.clone();
+            display = target.as_deref().unwrap_or("<nil>").to_string();
+        }
+        self.log_event(format!("actor.{id}.head_target {display}"));
+    }
+
+    fn set_actor_head_look_rate(&mut self, id: &str, label: &str, rate: Option<f32>) {
+        let snapshot;
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.head_look_rate = rate;
+            snapshot = actor.head_look_rate;
+        }
+        match snapshot {
+            Some(value) => self.log_event(format!("actor.{id}.head_rate {value:.3}")),
+            None => self.log_event(format!("actor.{id}.head_rate <nil>")),
+        }
+    }
+
+    fn set_actor_collision_mode(&mut self, id: &str, label: &str, mode: Option<String>) {
+        let display;
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.collision_mode = mode.clone();
+            display = mode.as_deref().unwrap_or("<nil>").to_string();
+        }
+        self.log_event(format!("actor.{id}.collision_mode {display}"));
+    }
+
+    fn set_actor_ignore_boxes(&mut self, id: &str, label: &str, ignore: bool) {
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.ignoring_boxes = ignore;
+        }
+        self.log_event(format!("actor.{id}.ignore_boxes {}", ignore));
     }
 
     fn put_actor_in_set(&mut self, id: &str, label: &str, set_file: &str) {
@@ -2612,19 +2804,336 @@ fn install_actor_methods(
         })?,
     )?;
 
-    let noop = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-    actor.set("play_chore", noop.clone())?;
-    actor.set("pop_costume", noop.clone())?;
-    actor.set("head_look_at", noop.clone())?;
-    actor.set("push_costume", noop.clone())?;
-    actor.set("set_walk_chore", noop.clone())?;
-    actor.set("set_talk_color", noop.clone())?;
-    actor.set("set_mumble_chore", noop.clone())?;
-    actor.set("set_talk_chore", noop.clone())?;
-    actor.set("set_head", noop.clone())?;
-    actor.set("set_look_rate", noop.clone())?;
-    actor.set("set_collision_mode", noop.clone())?;
-    actor.set("ignore_boxes", noop.clone())?;
+    let play_chore_context = context.clone();
+    actor.set(
+        "play_chore",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let chore = values.get(0).and_then(|value| value_to_string(value));
+                let costume = values.get(1).and_then(|value| value_to_string(value));
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = play_chore_context.borrow_mut();
+                    ctx.set_actor_current_chore(&id, &label, chore.clone(), costume.clone());
+                }
+                match chore {
+                    Some(ref value) => {
+                        table.set("last_chore_played", value.clone())?;
+                        table.set("current_chore", value.clone())?;
+                    }
+                    None => {
+                        table.set("last_chore_played", Value::Nil)?;
+                        table.set("current_chore", Value::Nil)?;
+                    }
+                }
+                match costume {
+                    Some(ref value) => table.set("last_cos_played", value.clone())?,
+                    None => table.set("last_cos_played", Value::Nil)?,
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let pop_costume_context = context.clone();
+    actor.set(
+        "pop_costume",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, label) = actor_identity(&table)?;
+                let success = {
+                    let mut ctx = pop_costume_context.borrow_mut();
+                    ctx.pop_actor_costume(&id, &label).is_some()
+                };
+                {
+                    let ctx = pop_costume_context.borrow();
+                    if let Some(costume) = ctx.actor_costume(&id) {
+                        table.set("current_costume", costume.to_string())?;
+                    } else {
+                        table.set("current_costume", Value::Nil)?;
+                    }
+                }
+                return Ok(success);
+            }
+            Ok(false)
+        })?,
+    )?;
+
+    let head_look_context = context.clone();
+    actor.set(
+        "head_look_at",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let target_label = values
+                    .get(0)
+                    .map(|value| match value {
+                        Value::Table(actor_table) => {
+                            if let Ok(name) = actor_table.get::<_, String>("name") {
+                                name
+                            } else if let Ok(id) = actor_table.get::<_, String>("id") {
+                                format!("table:{id}")
+                            } else {
+                                describe_value(value)
+                            }
+                        }
+                        other => describe_value(other),
+                    })
+                    .unwrap_or_else(|| "<nil>".to_string());
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = head_look_context.borrow_mut();
+                    ctx.set_actor_head_target(&id, &label, Some(target_label.clone()));
+                }
+                table.set("head_target_label", target_label)?;
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let push_costume_context = context.clone();
+    actor.set(
+        "push_costume",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let Some(costume) = values.get(0).and_then(|value| value_to_string(value)) else {
+                    return Ok(false);
+                };
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = push_costume_context.borrow_mut();
+                    ctx.push_actor_costume(&id, &label, costume.clone());
+                }
+                table.set("current_costume", costume)?;
+                return Ok(true);
+            }
+            Ok(false)
+        })?,
+    )?;
+
+    let walk_chore_context = context.clone();
+    actor.set(
+        "set_walk_chore",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let chore = values.get(0).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let costume = values.get(1).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = walk_chore_context.borrow_mut();
+                    ctx.set_actor_walk_chore(&id, &label, chore.clone(), costume.clone());
+                }
+                match chore {
+                    Some(ref value) => table.set("walk_chore", value.clone())?,
+                    None => table.set("walk_chore", Value::Nil)?,
+                }
+                match costume {
+                    Some(ref value) => table.set("walk_chore_costume", value.clone())?,
+                    None => table.set("walk_chore_costume", Value::Nil)?,
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let talk_color_context = context.clone();
+    actor.set(
+        "set_talk_color",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let color = values.get(0).and_then(|value| value_to_string(value));
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = talk_color_context.borrow_mut();
+                    ctx.set_actor_talk_color(&id, &label, color.clone());
+                }
+                match color {
+                    Some(ref value) => table.set("talk_color", value.clone())?,
+                    None => table.set("talk_color", Value::Nil)?,
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let mumble_chore_context = context.clone();
+    actor.set(
+        "set_mumble_chore",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let chore = values.get(0).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let costume = values.get(1).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = mumble_chore_context.borrow_mut();
+                    ctx.set_actor_mumble_chore(&id, &label, chore.clone(), costume.clone());
+                }
+                match chore {
+                    Some(ref value) => table.set("mumble_chore", value.clone())?,
+                    None => table.set("mumble_chore", Value::Nil)?,
+                }
+                match costume {
+                    Some(ref value) => table.set("mumble_costume", value.clone())?,
+                    None => table.set("mumble_costume", Value::Nil)?,
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let talk_chore_context = context.clone();
+    actor.set(
+        "set_talk_chore",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let chore = values.get(0).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let drop = values.get(1).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let costume = values.get(2).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = talk_chore_context.borrow_mut();
+                    ctx.set_actor_talk_chore(
+                        &id,
+                        &label,
+                        chore.clone(),
+                        drop.clone(),
+                        costume.clone(),
+                    );
+                }
+                match chore {
+                    Some(ref value) => table.set("talk_chore", value.clone())?,
+                    None => table.set("talk_chore", Value::Nil)?,
+                }
+                match drop {
+                    Some(ref value) => table.set("talk_drop_chore", value.clone())?,
+                    None => table.set("talk_drop_chore", Value::Nil)?,
+                }
+                match costume {
+                    Some(ref value) => table.set("talk_chore_costume", value.clone())?,
+                    None => table.set("talk_chore_costume", Value::Nil)?,
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let set_head_context = context.clone();
+    actor.set(
+        "set_head",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, label) = actor_identity(&table)?;
+                let params = values
+                    .iter()
+                    .map(|value| describe_value(value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                {
+                    let mut ctx = set_head_context.borrow_mut();
+                    ctx.set_actor_head_target(&id, &label, Some("manual".to_string()));
+                    ctx.log_event(format!("actor.{id}.set_head {params}"));
+                }
+                table.set("head_control", params)?;
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let look_rate_context = context.clone();
+    actor.set(
+        "set_look_rate",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let rate = values.get(0).and_then(|value| value_to_f32(value));
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = look_rate_context.borrow_mut();
+                    ctx.set_actor_head_look_rate(&id, &label, rate);
+                }
+                if let Some(value) = rate {
+                    table.set("head_look_rate", value)?;
+                } else {
+                    table.set("head_look_rate", Value::Nil)?;
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let collision_mode_context = context.clone();
+    actor.set(
+        "set_collision_mode",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let mode = values.get(0).and_then(|value| match value {
+                    Value::Nil => None,
+                    other => value_to_string(other),
+                });
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = collision_mode_context.borrow_mut();
+                    ctx.set_actor_collision_mode(&id, &label, mode.clone());
+                }
+                match mode {
+                    Some(ref value) => table.set("collision_mode", value.clone())?,
+                    None => table.set("collision_mode", Value::Nil)?,
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let ignore_boxes_context = context.clone();
+    actor.set(
+        "ignore_boxes",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let flag = values
+                    .get(0)
+                    .map(|value| value_to_bool(value))
+                    .unwrap_or(true);
+                let (id, label) = actor_identity(&table)?;
+                {
+                    let mut ctx = ignore_boxes_context.borrow_mut();
+                    ctx.set_actor_ignore_boxes(&id, &label, flag);
+                }
+                table.set("ignoring_boxes", flag)?;
+            }
+            Ok(())
+        })?,
+    )?;
 
     Ok(())
 }

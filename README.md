@@ -176,6 +176,15 @@ implementation that updates `system.lastActorTalking` and records say-line/log
 events, giving the cut-scene trackers the speaker context they expect while we
 wire up the remaining audio plumbing.
 
+Choreography and movement bindings are now stateful as well: the host
+implements the classic helpers (`Actor:play_chore`, `push_costume`,
+`pop_costume`, `set_walk_chore`, `set_talk_chore`, `set_mumble_chore`,
+`head_look_at`, `set_collision_mode`, `ignore_boxes`, and friends). Each call
+updates the internal snapshots (costume stacks, active chore labels, talk
+colors, head targets) and emits log entries so we can diff behaviour against
+the original engine while keeping Lua-visible fields like `walk_chore` and
+`talk_drop_chore` in sync.
+
 ## Viewer Spike
 `grim_viewer` boots a wgpu surface on top of winit, consumes the JSON manifest
 emitted by `grim_engine`, and reads assets straight from their LAB offsets to
