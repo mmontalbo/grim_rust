@@ -161,7 +161,12 @@ pub fn decode_bm(bytes: &[u8]) -> Result<BmFile> {
                 let compressed = &bytes[offset..offset + compressed_len];
                 offset += compressed_len;
                 let mut buffer = vec![0u8; raw_size];
-                decompress_codec3(compressed, &mut buffer)
+                let seed = if frame_index > 0 {
+                    Some(&frames[(frame_index - 1) as usize].data[..])
+                } else {
+                    None
+                };
+                decompress_codec3(compressed, &mut buffer, seed)
                     .with_context(|| format!("decompressing frame {frame_index}"))?;
                 buffer
             }
@@ -205,7 +210,7 @@ fn read_u8_from(stream: &mut &[u8]) -> Result<u8> {
     Ok(value)
 }
 
-fn decompress_codec3(mut compressed: &[u8], result: &mut [u8]) -> Result<()> {
+fn decompress_codec3(mut compressed: &[u8], result: &mut [u8], seed: Option<&[u8]>) -> Result<()> {
     ensure!(
         compressed.len() >= 2,
         "BM codec3 payload too small for bitstream initialiser"
@@ -213,68 +218,80 @@ fn decompress_codec3(mut compressed: &[u8], result: &mut [u8]) -> Result<()> {
 
     let mut bitstr_value = read_u16_from(&mut compressed)? as u32;
     let mut bitstr_len = 16u32;
-
-    let mut get_bit = |stream: &mut &[u8]| -> Result<u32> {
-        let bit = bitstr_value & 1;
-        bitstr_len -= 1;
-        bitstr_value >>= 1;
-        if bitstr_len == 0 {
-            bitstr_value = read_u16_from(stream)? as u32;
-            bitstr_len = 16;
-        }
-        Ok(bit)
-    };
+    let mut byte_index: usize = 0;
 
     const WINDOW_SIZE: usize = 0x1000;
     let mut window = vec![0u8; WINDOW_SIZE + result.len()];
+    if let Some(seed) = seed {
+        let seed_tail = seed.len().min(WINDOW_SIZE);
+        let start = WINDOW_SIZE - seed_tail;
+        window[start..WINDOW_SIZE].copy_from_slice(&seed[seed.len() - seed_tail..]);
+    }
     let mut write_pos = WINDOW_SIZE;
 
-    while write_pos - WINDOW_SIZE < result.len() {
-        let bit = get_bit(&mut compressed)?;
+    let read_bit =
+        |stream: &mut &[u8], bitstr_value: &mut u32, bitstr_len: &mut u32| -> Result<u32> {
+            if *bitstr_len == 0 {
+                *bitstr_value = read_u16_from(stream)? as u32;
+                *bitstr_len = 16;
+            }
+            let bit = *bitstr_value & 1;
+            *bitstr_value >>= 1;
+            *bitstr_len -= 1;
+            Ok(bit)
+        };
+
+    while byte_index < result.len() {
+        let bit = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)?;
         if bit == 1 {
-            ensure!(
-                write_pos - WINDOW_SIZE < result.len(),
-                "codec3 literal write exceeds output buffer"
-            );
+            if byte_index >= result.len() {
+                break;
+            }
             let value = read_u8_from(&mut compressed)?;
             window[write_pos] = value;
             write_pos += 1;
+            byte_index += 1;
             continue;
         }
 
-        let bit = get_bit(&mut compressed)?;
-        let (mut copy_len, copy_offset): (usize, isize) = if bit == 0 {
-            let first = get_bit(&mut compressed)? as usize;
+        let bit = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)?;
+        let (mut copy_len, copy_offset) = if bit == 0 {
+            let first = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)? as usize;
             let mut copy_len = first * 2;
-            let second = get_bit(&mut compressed)? as usize;
+            let second = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)? as usize;
             copy_len += second + 3;
             let offset_byte = read_u8_from(&mut compressed)? as i32;
-            (copy_len, offset_byte as isize - 0x100)
+            (copy_len, offset_byte - 0x100)
         } else {
             let lower = read_u8_from(&mut compressed)? as i32;
             let upper = read_u8_from(&mut compressed)? as i32;
             let copy_offset = (lower | ((upper & 0xF0) << 4)) - 0x1000;
             let mut copy_len = (upper & 0x0F) + 3;
             if copy_len == 3 {
-                let extended = read_u8_from(&mut compressed)? as i32 + 1;
-                if extended == 1 {
-                    break;
+                copy_len = read_u8_from(&mut compressed)? as i32 + 1;
+                if copy_len == 1 {
+                    return Ok(());
                 }
-                copy_len = extended;
             }
-            (copy_len as usize, copy_offset as isize)
+            (copy_len as usize, copy_offset)
         };
 
-        while copy_len > 0 && write_pos - WINDOW_SIZE < result.len() {
-            let src_index = write_pos as isize + copy_offset;
+        while copy_len > 0 && byte_index < result.len() {
+            let src_index = write_pos as isize + copy_offset as isize;
             ensure!(
                 (0..write_pos as isize).contains(&src_index),
                 "codec3 copy source out of bounds: {src_index} (write_pos={write_pos}, copy_offset={copy_offset})"
             );
+
             let value = window[src_index as usize];
             window[write_pos] = value;
             write_pos += 1;
+            byte_index += 1;
             copy_len -= 1;
+        }
+
+        if byte_index >= result.len() {
+            break;
         }
     }
 

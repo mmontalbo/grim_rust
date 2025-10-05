@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,6 +17,7 @@ use grim_analysis::timeline::{build_boot_timeline, BootTimeline, HookKind, HookT
 use serde::Serialize;
 
 mod assets;
+mod audio_bridge;
 mod geometry_diff;
 mod geometry_snapshot;
 mod lab_collection;
@@ -23,6 +25,7 @@ mod lua_host;
 mod scheduler;
 mod state;
 use assets::MANNY_OFFICE_ASSETS;
+use audio_bridge::RecordingAudioCallback;
 use geometry_diff::run_geometry_diff;
 use lab_collection::{collect_assets, AssetMetadata, AssetReport, LabCollection};
 use lua_host::run_boot_sequence;
@@ -106,6 +109,10 @@ struct Args {
     /// Generate a runtime geometry snapshot and diff it against the static timeline
     #[arg(long)]
     verify_geometry: bool,
+
+    /// Path to write the audio event log emitted by the Lua runtime (requires --run-lua)
+    #[arg(long)]
+    audio_log_json: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -127,13 +134,37 @@ fn main() -> Result<()> {
                 path.display()
             );
         }
+        if let Some(path) = args.audio_log_json.as_ref() {
+            eprintln!(
+                "[grim_engine] info: capturing audio events to {}",
+                path.display()
+            );
+        }
+
+        let audio_recorder = args
+            .audio_log_json
+            .as_ref()
+            .map(|_| Rc::new(RecordingAudioCallback::new()));
+        let audio_callback = audio_recorder
+            .as_ref()
+            .map(|recorder| recorder.clone() as Rc<dyn lua_host::AudioCallback>);
+
         run_boot_sequence(
             &args.data_root,
             args.lab_root.as_deref(),
             args.verbose,
             args.lua_geometry_json.as_deref(),
-            None,
+            audio_callback,
         )?;
+
+        if let (Some(path), Some(recorder)) = (args.audio_log_json.as_ref(), audio_recorder) {
+            let events = recorder.events();
+            let json = serde_json::to_string_pretty(&events)
+                .context("serializing audio event log to JSON")?;
+            fs::write(path, &json)
+                .with_context(|| format!("writing audio event log to {}", path.display()))?;
+        }
+
         return Ok(());
     }
 
@@ -145,6 +176,12 @@ fn main() -> Result<()> {
         if let Some(path) = args.lua_geometry_json.as_ref() {
             eprintln!(
                 "[grim_engine] warning: --lua-geometry-json={} ignored without --run-lua",
+                path.display()
+            );
+        }
+        if let Some(path) = args.audio_log_json.as_ref() {
+            eprintln!(
+                "[grim_engine] warning: --audio-log-json={} ignored without --run-lua",
                 path.display()
             );
         }

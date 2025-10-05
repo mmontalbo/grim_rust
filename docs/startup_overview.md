@@ -140,6 +140,22 @@ This snapshot should anchor the next wave of work: building minimal Rust
 equivalents for actors, sets, and the boot pipeline while continuing to use the
 original Lua as executable documentation.
 
+## Instrumentation Viewer
+
+`grim_viewer` now accepts an `--audio-log <path>` flag that tails the JSON
+written by `grim_engine --run-lua --audio-log-json <file>`. When the viewer flag
+is present, it renders an overlay that tracks the active music cue plus any
+alive SFX handles; headless runs print the same updates to stdout so automated
+pipelines can monitor the log without spinning up a window. This gives a quick
+sanity check that the runtime bridge is emitting the audio events downstream
+tooling expects.
+
+For a turnkey loop, run `tools/run_manny_boot.sh`. The helper first invokes
+`grim_engine --run-lua` with timeline and audio exports, then launches
+`grim_viewer` against the freshly generated manifests. Any additional arguments
+passed to the script are forwarded to the viewer step, so `tools/run_manny_boot.sh --headless`
+will run the same pipeline without opening a window.
+
 
 ---
 

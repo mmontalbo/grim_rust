@@ -1732,67 +1732,80 @@ impl EngineContext {
             .filter(|kind| !kind.is_empty())
             .unwrap_or_else(|| "walk".to_string());
 
-        if let Some(hit) = self.resolve_sector_hit(actor_id, &normalized) {
+        let request = match normalized.as_str() {
+            "0" => "walk".to_string(),
+            "1" => "hot".to_string(),
+            "2" => "camera".to_string(),
+            other => other.to_string(),
+        };
+
+        if let Some(hit) = self.resolve_sector_hit(actor_id, &request) {
             return hit;
         }
 
-        if actor_id.eq_ignore_ascii_case("manny") {
-            match normalized.as_str() {
-                "camera" | "2" => SectorHit::new(6000, "mo_mcecu", "CAMERA"),
-                "hot" | "1" => SectorHit::new(6001, "mo_ddtws", "HOT"),
-                "walk" | "0" => SectorHit::new(6002, "mo_walk_default", "WALK"),
-                _ => SectorHit::new(
-                    6003,
-                    format!("manny_sector_{}", normalized),
-                    normalized.to_ascii_uppercase(),
-                ),
-            }
-        } else {
-            let kind = normalized.to_ascii_uppercase();
-            SectorHit::new(1000, format!("{}_sector", actor_id), kind)
-        }
+        let kind = match request.as_str() {
+            "walk" => "WALK".to_string(),
+            "hot" => "HOT".to_string(),
+            "camera" => "CAMERA".to_string(),
+            other => other.to_ascii_uppercase(),
+        };
+        SectorHit::new(1000, format!("{}_sector", actor_id), kind)
     }
 
     fn resolve_sector_hit(&self, actor_id: &str, kind: &str) -> Option<SectorHit> {
         let normalized_kind = if kind.is_empty() { "walk" } else { kind };
+        let request = match normalized_kind {
+            "0" => "walk",
+            "1" => "hot",
+            "2" => "camera",
+            other => other,
+        };
 
-        if actor_id.eq_ignore_ascii_case("manny") {
-            if let Some(current) = &self.current_set {
-                if current.set_file.eq_ignore_ascii_case("mo.set")
-                    && matches!(normalized_kind, "camera" | "2" | "hot" | "1")
-                {
-                    if let Some(hit) = self.manny_office_sector(normalized_kind) {
-                        return Some(hit);
-                    }
-                }
-            }
+        let lookup_key = match request {
+            "walk" => "WALK".to_string(),
+            "hot" => "HOT".to_string(),
+            "camera" => "CAMERA".to_string(),
+            other => other.to_ascii_uppercase(),
+        };
+
+        if let Some(hit) = self
+            .actor_snapshot(actor_id)
+            .and_then(|actor| actor.sectors.get(&lookup_key))
+        {
+            return Some(hit.clone());
         }
 
-        if let Some(hit) = self.geometry_sector_hit(actor_id, normalized_kind) {
+        if let Some(hit) = self.geometry_sector_hit(actor_id, request) {
             return Some(hit);
         }
 
-        if actor_id.eq_ignore_ascii_case("manny") {
-            if let Some(hit) = self.manny_office_sector(normalized_kind) {
-                return Some(hit);
-            }
+        if let Some(hit) = self.visible_sector_hit(actor_id, request) {
+            return Some(hit);
         }
 
         if let Some(current) = &self.current_set {
             if let Some(descriptor) = self.available_sets.get(&current.set_file) {
-                if normalized_kind == "camera" || normalized_kind == "2" {
-                    if let Some(current_setup) = self.current_setup_for(&current.set_file) {
-                        if let Some(label) = descriptor.setup_label_for_index(current_setup) {
-                            return Some(SectorHit::new(
-                                current_setup,
-                                label.to_string(),
-                                "CAMERA",
-                            ));
+                match request {
+                    "camera" => {
+                        if let Some(current_setup) = self.current_setup_for(&current.set_file) {
+                            if let Some(label) = descriptor.setup_label_for_index(current_setup) {
+                                return Some(SectorHit::new(
+                                    current_setup,
+                                    label.to_string(),
+                                    "CAMERA",
+                                ));
+                            }
+                        }
+                        if let Some(info) = descriptor.first_setup() {
+                            return Some(SectorHit::new(info.index, info.label.clone(), "CAMERA"));
                         }
                     }
-                    if let Some(info) = descriptor.first_setup() {
-                        return Some(SectorHit::new(info.index, info.label.clone(), "CAMERA"));
+                    "hot" => {
+                        if let Some(info) = descriptor.first_setup() {
+                            return Some(SectorHit::new(info.index, info.label.clone(), "HOT"));
+                        }
                     }
+                    _ => {}
                 }
             }
         }
@@ -1810,61 +1823,6 @@ impl EngineContext {
             other => other.to_ascii_uppercase(),
         };
         Some(SectorHit::new(index, label.to_string(), kind_upper))
-    }
-
-    fn manny_office_sector(&self, raw_kind: &str) -> Option<SectorHit> {
-        let current_set = self.current_set.as_ref()?;
-        if !current_set.set_file.eq_ignore_ascii_case("mo.set") {
-            return None;
-        }
-        let normalized_kind = match raw_kind {
-            "2" => "camera",
-            "1" => "hot",
-            "0" => "walk",
-            other => other,
-        };
-
-        let manny = self.actors.get("manny")?;
-        let position = manny.position.unwrap_or(MANNY_OFFICE_SEED_POS);
-
-        enum MannyZone {
-            Desk,
-            Window,
-            Door,
-            Closet,
-        }
-
-        let zone = if position.y < 0.6 {
-            MannyZone::Door
-        } else if position.x > 1.15 {
-            MannyZone::Closet
-        } else if position.x < 0.35 {
-            MannyZone::Window
-        } else {
-            MannyZone::Desk
-        };
-
-        let label = match (zone, normalized_kind) {
-            (MannyZone::Desk, "camera") => "mo_mcecu",
-            (MannyZone::Desk, "hot") => "mo_ddtws",
-            (MannyZone::Desk, "walk") => "mo_ddtws",
-            (MannyZone::Window, "camera") => "mo_winws",
-            (MannyZone::Window, "hot") => "mo_winws",
-            (MannyZone::Window, "walk") => "mo_winws",
-            (MannyZone::Closet, "camera") => "mo_cornr",
-            (MannyZone::Closet, "hot") => "mo_cornr",
-            (MannyZone::Closet, "walk") => "mo_cornr",
-            (MannyZone::Door, "camera") => "mo_mnycu",
-            (MannyZone::Door, "hot") => "mo_comin",
-            (MannyZone::Door, "walk") => "mo_comin",
-            (_, _) => "mo_mcecu",
-        };
-
-        if !self.is_sector_active(&current_set.set_file, label) {
-            return None;
-        }
-
-        self.sector_hit_from_setup(&current_set.set_file, label, normalized_kind)
     }
 
     fn evaluate_sector_name(&self, actor_id: &str, query: &str) -> bool {
@@ -2422,6 +2380,12 @@ impl EngineContext {
             .and_then(|actor| actor.rotation)
     }
 
+    fn actor_snapshot(&self, actor_id: &str) -> Option<&ActorSnapshot> {
+        self.actors
+            .get(actor_id)
+            .or_else(|| self.actors.get(&actor_id.to_ascii_lowercase()))
+    }
+
     fn actor_position_xy(&self, actor_id: &str) -> Option<(f32, f32)> {
         if let Some(actor) = self.actors.get(actor_id) {
             return actor.position.map(|pos| (pos.x, pos.y));
@@ -2473,6 +2437,90 @@ impl EngineContext {
                 }
             }
         }
+        None
+    }
+
+    fn visible_sector_hit(&self, _actor_id: &str, request: &str) -> Option<SectorHit> {
+        let current = self.current_set.as_ref()?;
+        let geometry = self.set_geometry.get(&current.set_file)?;
+
+        let mut handles: Vec<i64> = Vec::new();
+        handles.extend(self.hotlist_handles.iter().copied());
+        for info in &self.visible_objects {
+            if !handles.contains(&info.handle) {
+                handles.push(info.handle);
+            }
+        }
+
+        if handles.is_empty() {
+            return None;
+        }
+
+        for handle in handles {
+            let object = self.objects.get(&handle)?;
+            if !object.visible || !object.touchable {
+                continue;
+            }
+            if let Some(set_file) = object.set_file.as_ref() {
+                if !set_file.eq_ignore_ascii_case(&current.set_file) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            let point = if let Some(position) = object.position.as_ref() {
+                Some((position.x, position.y))
+            } else if let Some(actor_handle) = object.interest_actor {
+                self.actor_position_by_handle(actor_handle)
+                    .map(|vec| (vec.x, vec.y))
+            } else {
+                None
+            };
+
+            let point = match point {
+                Some(value) => value,
+                None => continue,
+            };
+
+            match request {
+                "camera" | "hot" => {
+                    if let Some(setup) = geometry.best_setup_for_point(point) {
+                        if let Some(hit) =
+                            self.sector_hit_from_setup(&current.set_file, &setup.name, request)
+                        {
+                            return Some(hit);
+                        }
+                    }
+                }
+                "walk" => {
+                    if let Some(polygon) = geometry.find_polygon(SetSectorKind::Walk, point) {
+                        if self.is_sector_active(&current.set_file, &polygon.name) {
+                            return Some(SectorHit::new(polygon.id, polygon.name.clone(), "WALK"));
+                        }
+                    }
+                }
+                other => {
+                    let sector_kind = match other {
+                        "camera" => Some(SetSectorKind::Camera),
+                        "walk" => Some(SetSectorKind::Walk),
+                        _ => None,
+                    };
+                    if let Some(kind) = sector_kind {
+                        if let Some(polygon) = geometry.find_polygon(kind, point) {
+                            if self.is_sector_active(&current.set_file, &polygon.name) {
+                                return Some(SectorHit::new(
+                                    polygon.id,
+                                    polygon.name.clone(),
+                                    other.to_ascii_uppercase(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -7786,9 +7834,24 @@ mod tests {
         }
     }
 
+    fn manny_geometry_set() -> SetFileData {
+        let raw = "section: setups\n\tnumsetups\t5\n\tsetup\tmo_ddtws\n\tposition\t0.6\t2.0\t0.0\n\tinterest\t0.6\t2.2\t0.0\n\tsetup\tmo_winws\n\tposition\t0.2\t2.6\t0.0\n\tinterest\t0.2\t2.8\t0.0\n\tsetup\tmo_comin\n\tposition\t1.35\t0.25\t0.0\n\tinterest\t1.35\t0.45\t0.0\n\tsetup\tmo_mcecu\n\tposition\t0.62\t2.05\t0.0\n\tinterest\t0.62\t2.25\t0.0\n\tsetup\tmo_mnycu\n\tposition\t1.3\t0.2\t0.0\n\tinterest\t1.2\t0.4\t0.0\n\nsection: sectors\n\tsector\t\tmo_walk_default\n\tID\t\t6002\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t0.3\t1.7\t0.0\n\t         \t\t0.9\t1.7\t0.0\n\t         \t\t0.9\t2.3\t0.0\n\t         \t\t0.3\t2.3\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n\tsector\t\tmo_window_walk\n\tID\t\t6100\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t-0.1\t2.3\t0.0\n\t         \t\t0.3\t2.3\t0.0\n\t         \t\t0.3\t2.8\t0.0\n\t         \t\t-0.1\t2.8\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n\tsector\t\tmo_entry_walk\n\tID\t\t6200\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t1.1\t0.0\t0.0\n\t         \t\t1.6\t0.0\t0.0\n\t         \t\t1.6\t0.5\t0.0\n\t         \t\t1.1\t0.5\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n";
+        SetFileData::parse(raw.as_bytes()).expect("parse manny geometry")
+    }
+
+    fn install_manny_geometry(ctx: &mut EngineContext) {
+        ctx.set_geometry.insert(
+            "mo.set".to_string(),
+            ParsedSetGeometry::from_set_file(manny_geometry_set()),
+        );
+        ctx.ensure_sector_state_map("mo.set");
+    }
+
     #[test]
-    fn manny_camera_defaults_to_desk_zone() {
+    fn manny_hot_sector_tracks_room_zones() {
         let mut ctx = make_context();
+        install_manny_geometry(&mut ctx);
+
         prepare_manny(
             &mut ctx,
             Vec3 {
@@ -7797,25 +7860,32 @@ mod tests {
                 z: 0.0,
             },
         );
-        let hit = ctx.manny_office_sector("camera").expect("desk sector");
-        assert_eq!(hit.name, "mo_mcecu");
-    }
+        let desk_hit = ctx.default_sector_hit("manny", Some("hot"));
+        assert_eq!(desk_hit.name, "mo_ddtws");
 
-    #[test]
-    fn manny_near_door_selects_entry_sector() {
-        let mut ctx = make_context();
-        prepare_manny(
-            &mut ctx,
+        ctx.set_actor_position(
+            "manny",
+            "Manny",
             Vec3 {
                 x: 1.35,
                 y: 0.2,
                 z: 0.0,
             },
         );
-        let camera_hit = ctx.manny_office_sector("camera").expect("door camera");
-        assert_eq!(camera_hit.name, "mo_mnycu");
-        let hot_hit = ctx.manny_office_sector("hot").expect("door hot");
-        assert_eq!(hot_hit.name, "mo_comin");
+        let door_hit = ctx.default_sector_hit("manny", Some("hot"));
+        assert_eq!(door_hit.name, "mo_comin");
+
+        ctx.set_actor_position(
+            "manny",
+            "Manny",
+            Vec3 {
+                x: 0.2,
+                y: 2.6,
+                z: 0.0,
+            },
+        );
+        let window_hit = ctx.default_sector_hit("manny", Some("hot"));
+        assert_eq!(window_hit.name, "mo_winws");
     }
 
     #[test]

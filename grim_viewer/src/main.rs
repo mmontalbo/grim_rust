@@ -1,15 +1,22 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    fs::File,
+    fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
+    thread,
+    time::{Duration, Instant, SystemTime},
 };
+
+mod audio_log;
+
+use audio_log::{AudioAggregation, AudioLogTracker};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytemuck::{Pod, Zeroable, cast_slice};
 use clap::Parser;
+use font8x8::legacy::BASIC_LEGACY;
 use grim_formats::decode_bm;
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use pollster::FutureExt;
@@ -44,6 +51,10 @@ struct Args {
     #[arg(long)]
     timeline: Option<PathBuf>,
 
+    /// When set, stream audio cue updates from the given log file
+    #[arg(long)]
+    audio_log: Option<PathBuf>,
+
     /// When set, write the decoded bitmap to disk (PNG) before launching the viewer
     #[arg(long)]
     dump_frame: Option<PathBuf>,
@@ -63,6 +74,246 @@ struct Args {
     /// Skip creating a winit window/event loop; useful for headless automation
     #[arg(long)]
     headless: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AudioStatus {
+    state: AudioAggregation,
+    seen_events: bool,
+}
+
+impl AudioStatus {
+    fn new(state: AudioAggregation, seen_events: bool) -> Self {
+        Self { state, seen_events }
+    }
+}
+
+struct AudioLogWatcher {
+    path: PathBuf,
+    tracker: AudioLogTracker,
+    last_len: Option<u64>,
+    last_modified: Option<SystemTime>,
+    seen_events: bool,
+}
+
+impl AudioLogWatcher {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            tracker: AudioLogTracker::default(),
+            last_len: None,
+            last_modified: None,
+            seen_events: false,
+        }
+    }
+
+    fn poll(&mut self) -> Result<Option<AudioStatus>> {
+        let metadata = match fs::metadata(&self.path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(anyhow!(err))
+                    .with_context(|| format!("reading metadata for {}", self.path.display()));
+            }
+        };
+
+        let len = metadata.len();
+        let modified = metadata.modified().ok();
+        let should_read = self.last_len.map(|prev| prev != len).unwrap_or(true)
+            || match (self.last_modified, modified) {
+                (Some(prev), Some(current)) => prev != current,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+
+        if !should_read {
+            return Ok(None);
+        }
+
+        let mut reset_triggered = false;
+        if self.last_len.map_or(false, |prev| len < prev) {
+            self.reset();
+            reset_triggered = true;
+        }
+
+        let data = match fs::read_to_string(&self.path) {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(anyhow!(err))
+                    .with_context(|| format!("reading audio log from {}", self.path.display()));
+            }
+        };
+
+        let changed = self.tracker.ingest(&data).map_err(|err| anyhow!(err))?;
+
+        self.last_len = Some(len);
+        self.last_modified = modified;
+
+        if changed {
+            self.seen_events = true;
+        }
+
+        if changed || reset_triggered {
+            return Ok(Some(self.current_status()));
+        }
+        Ok(None)
+    }
+
+    fn current_status(&self) -> AudioStatus {
+        AudioStatus::new(self.tracker.state.clone(), self.seen_events)
+    }
+
+    fn has_seen_events(&self) -> bool {
+        self.seen_events
+    }
+
+    fn reset(&mut self) {
+        self.tracker = AudioLogTracker::default();
+        self.seen_events = false;
+    }
+}
+
+fn audio_overlay_lines(status: &AudioStatus) -> Vec<String> {
+    if !status.seen_events {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    lines.push("Audio Monitor".to_string());
+
+    match status.state.current_music.as_ref() {
+        Some(music) => {
+            lines.push(truncate_line(&format!("Music: {}", music.cue), 62));
+            if !music.params.is_empty() {
+                lines.push(truncate_line(
+                    &format!("  params: {}", music.params.join(", ")),
+                    62,
+                ));
+            }
+        }
+        None => {
+            let stop = status.state.last_music_stop_mode.as_deref().unwrap_or("-");
+            lines.push(truncate_line(&format!("Music: <none> (stop: {stop})"), 62));
+        }
+    }
+
+    lines.push("SFX:".to_string());
+    if status.state.active_sfx.is_empty() {
+        lines.push("  (none)".to_string());
+    } else {
+        const MAX_SFX_LINES: usize = 6;
+        for (idx, (handle, entry)) in status.state.active_sfx.iter().enumerate() {
+            if idx >= MAX_SFX_LINES {
+                let remaining = status.state.active_sfx.len() - MAX_SFX_LINES;
+                lines.push(format!("  ... +{} more", remaining));
+                break;
+            }
+            let mut line = format!("  {}: {}", handle, entry.cue);
+            if !entry.params.is_empty() {
+                line.push_str(&format!(" [{}]", entry.params.join(", ")));
+            }
+            lines.push(truncate_line(&line, 62));
+        }
+    }
+
+    lines
+}
+
+fn truncate_line(line: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    let mut count = 0;
+    let mut result = String::new();
+    for ch in line.chars() {
+        if count + 1 >= limit {
+            result.push('…');
+            return result;
+        }
+        result.push(ch);
+        count += 1;
+    }
+    result
+}
+
+fn log_audio_update(status: &AudioStatus) {
+    if !status.seen_events {
+        return;
+    }
+    let music = status
+        .state
+        .current_music
+        .as_ref()
+        .map(|m| m.cue.as_str())
+        .unwrap_or("<none>");
+    let sfx: Vec<&str> = status
+        .state
+        .active_sfx
+        .keys()
+        .map(|key| key.as_str())
+        .collect();
+    println!(
+        "[audio] music={} sfx_handles=[{}]",
+        music,
+        if sfx.is_empty() {
+            String::from("<none>")
+        } else {
+            sfx.join(", ")
+        }
+    );
+}
+
+fn run_audio_log_headless(watcher: &mut AudioLogWatcher) -> Result<()> {
+    let mut last_event = Instant::now();
+    let start = Instant::now();
+
+    println!(
+        "[audio] monitoring {} (Ctrl+C to exit)",
+        watcher.path.display()
+    );
+
+    loop {
+        if let Some(status) = watcher.poll()? {
+            log_audio_update(&status);
+            last_event = Instant::now();
+        }
+
+        if watcher.has_seen_events() {
+            if last_event.elapsed() > Duration::from_secs(1) {
+                break;
+            }
+        } else if start.elapsed() > Duration::from_secs(5) {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    Ok(())
+}
+
+fn spawn_audio_log_thread(mut watcher: AudioLogWatcher) -> mpsc::Receiver<AudioStatus> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        if tx.send(watcher.current_status()).is_err() {
+            return;
+        }
+
+        loop {
+            match watcher.poll() {
+                Ok(Some(status)) => {
+                    if tx.send(status).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => eprintln!("[grim_viewer] audio log polling error: {err:?}"),
+            }
+            thread::sleep(Duration::from_millis(120));
+        }
+    });
+    rx
 }
 
 fn main() -> Result<()> {
@@ -204,14 +455,24 @@ fn main() -> Result<()> {
         println!();
     }
 
+    let audio_log_path = args.audio_log.clone();
+
     if args.headless {
         // Propagate any decoding failure before exiting early.
         decode_result?;
+        if let Some(path) = audio_log_path.as_ref() {
+            let mut watcher = AudioLogWatcher::new(path.clone());
+            run_audio_log_headless(&mut watcher)?;
+        }
         println!("Headless mode requested; viewer window bootstrap skipped.");
         return Ok(());
     }
 
     let scene = scene_data.map(Arc::new);
+
+    let audio_status_rx = audio_log_path
+        .as_ref()
+        .map(|path| spawn_audio_log_thread(AudioLogWatcher::new(path.clone())));
 
     // Bring up the audio stack so the renderer can acquire an output stream later.
     init_audio()?;
@@ -225,14 +486,27 @@ fn main() -> Result<()> {
             .context("creating viewer window")?,
     );
 
+    let audio_overlay_requested = audio_status_rx.is_some();
+
     let mut state = ViewerState::new(
         window,
         &asset_name,
         asset_bytes,
         decode_result,
         scene.clone(),
+        audio_overlay_requested,
     )
     .block_on()?;
+
+    if audio_overlay_requested {
+        let default_status = AudioStatus::new(AudioAggregation::default(), false);
+        let initial_status = audio_status_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+            .unwrap_or_else(|| default_status.clone());
+        state.update_audio_overlay(&initial_status);
+        log_audio_update(&initial_status);
+    }
 
     event_loop
         .run(move |event, target| {
@@ -279,7 +553,15 @@ fn main() -> Result<()> {
                         _ => {}
                     }
                 }
-                Event::AboutToWait => state.window().request_redraw(),
+                Event::AboutToWait => {
+                    if let Some(rx) = audio_status_rx.as_ref() {
+                        while let Ok(status) = rx.try_recv() {
+                            state.update_audio_overlay(&status);
+                            log_audio_update(&status);
+                        }
+                    }
+                    state.window().request_redraw();
+                }
                 _ => {}
             }
         })
@@ -807,6 +1089,240 @@ fn read_asset_slice(path: &Path, offset: u64, size: u32) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
+struct AudioOverlay {
+    texture: wgpu::Texture,
+    _view: wgpu::TextureView,
+    _sampler: wgpu::Sampler,
+    bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    dirty: bool,
+    visible: bool,
+}
+
+impl AudioOverlay {
+    const WIDTH: u32 = 520;
+    const HEIGHT: u32 = 144;
+    const GLYPH_WIDTH: u32 = 8;
+    const GLYPH_HEIGHT: u32 = 8;
+    const PADDING_X: u32 = 8;
+    const PADDING_Y: u32 = 8;
+    const FG_COLOR: [u8; 4] = [255, 255, 255, 240];
+    const BG_COLOR: [u8; 4] = [0, 0, 0, 96];
+
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        window_size: PhysicalSize<u32>,
+    ) -> Result<Self> {
+        let extent = wgpu::Extent3d {
+            width: Self::WIDTH,
+            height: Self::HEIGHT,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("audio-overlay-texture"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("audio-overlay-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("audio-overlay-bind-group"),
+            layout: bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let mut pixels = vec![0u8; (Self::WIDTH * Self::HEIGHT * 4) as usize];
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&Self::BG_COLOR);
+        }
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * Self::WIDTH),
+                rows_per_image: Some(Self::HEIGHT),
+            },
+            extent,
+        );
+
+        let vertex_buffer = Self::create_vertex_buffer(device, window_size);
+
+        Ok(Self {
+            texture,
+            _view: texture_view,
+            _sampler: sampler,
+            bind_group,
+            vertex_buffer,
+            width: Self::WIDTH,
+            height: Self::HEIGHT,
+            pixels,
+            dirty: false,
+            visible: false,
+        })
+    }
+
+    fn create_vertex_buffer(device: &wgpu::Device, window_size: PhysicalSize<u32>) -> wgpu::Buffer {
+        let vertices = Self::compute_vertices(window_size);
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("audio-overlay-vertices"),
+            contents: cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    }
+
+    fn compute_vertices(window_size: PhysicalSize<u32>) -> [QuadVertex; 4] {
+        let win_width = window_size.width.max(1) as f32;
+        let win_height = window_size.height.max(1) as f32;
+        let width_ndc = (Self::WIDTH as f32 / win_width) * 2.0;
+        let height_ndc = (Self::HEIGHT as f32 / win_height) * 2.0;
+        let right = (-1.0 + width_ndc).min(1.0);
+        let bottom = (1.0 - height_ndc).max(-1.0);
+        [
+            QuadVertex {
+                position: [-1.0, 1.0],
+                uv: [0.0, 0.0],
+            },
+            QuadVertex {
+                position: [right, 1.0],
+                uv: [1.0, 0.0],
+            },
+            QuadVertex {
+                position: [-1.0, bottom],
+                uv: [0.0, 1.0],
+            },
+            QuadVertex {
+                position: [right, bottom],
+                uv: [1.0, 1.0],
+            },
+        ]
+    }
+
+    fn update_vertices(&mut self, device: &wgpu::Device, window_size: PhysicalSize<u32>) {
+        self.vertex_buffer = Self::create_vertex_buffer(device, window_size);
+    }
+
+    fn set_lines(&mut self, lines: &[String]) {
+        for chunk in self.pixels.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&Self::BG_COLOR);
+        }
+
+        let max_cols = ((self.width - Self::PADDING_X * 2) / Self::GLYPH_WIDTH) as usize;
+        let max_rows = ((self.height - Self::PADDING_Y * 2) / Self::GLYPH_HEIGHT) as usize;
+
+        for (row_idx, line) in lines.iter().take(max_rows).enumerate() {
+            let glyph_row = Self::PADDING_Y + row_idx as u32 * Self::GLYPH_HEIGHT;
+            for (col_idx, ch) in line.chars().take(max_cols).enumerate() {
+                let glyph = glyph_for_char(ch);
+                let glyph_col = Self::PADDING_X + col_idx as u32 * Self::GLYPH_WIDTH;
+                for (y_offset, bits) in glyph.iter().enumerate() {
+                    let y = glyph_row + y_offset as u32;
+                    if y >= self.height {
+                        continue;
+                    }
+                    for x_bit in 0..Self::GLYPH_WIDTH {
+                        if (bits >> x_bit) & 0x01 == 0 {
+                            continue;
+                        }
+                        let x = glyph_col + x_bit;
+                        if x >= self.width {
+                            continue;
+                        }
+                        let idx = ((y * self.width + x) * 4) as usize;
+                        self.pixels[idx..idx + 4].copy_from_slice(&Self::FG_COLOR);
+                    }
+                }
+            }
+        }
+
+        self.dirty = true;
+        self.visible = !lines.is_empty();
+    }
+
+    fn upload(&mut self, queue: &wgpu::Queue) {
+        if !self.dirty {
+            return;
+        }
+        let extent = wgpu::Extent3d {
+            width: self.width,
+            height: self.height,
+            depth_or_array_layers: 1,
+        };
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.pixels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * self.width),
+                rows_per_image: Some(self.height),
+            },
+            extent,
+        );
+        self.dirty = false;
+    }
+
+    fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    fn vertex_buffer(&self) -> &wgpu::Buffer {
+        &self.vertex_buffer
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+}
+
+fn glyph_for_char(ch: char) -> [u8; 8] {
+    let index = ch as usize;
+    if index < BASIC_LEGACY.len() {
+        BASIC_LEGACY[index]
+    } else {
+        BASIC_LEGACY[b'?' as usize]
+    }
+}
+
 struct ViewerState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -822,6 +1338,7 @@ struct ViewerState {
     _texture: wgpu::Texture,
     _texture_view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
+    audio_overlay: Option<AudioOverlay>,
     background: wgpu::Color,
     scene: Option<Arc<ViewerScene>>,
     selected_entity: Option<usize>,
@@ -838,6 +1355,7 @@ impl ViewerState {
         asset_bytes: Vec<u8>,
         decode_result: Result<PreviewTexture>,
         scene: Option<Arc<ViewerScene>>,
+        enable_audio_overlay: bool,
     ) -> Result<Self> {
         let size = window.inner_size();
 
@@ -995,6 +1513,17 @@ impl ViewerState {
             label: Some("asset-shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
         });
+
+        let audio_overlay = if enable_audio_overlay {
+            Some(AudioOverlay::new(
+                &device,
+                &queue,
+                &bind_group_layout,
+                size,
+            )?)
+        } else {
+            None
+        };
 
         let quad_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<QuadVertex>() as u64,
@@ -1169,6 +1698,7 @@ impl ViewerState {
             _texture: texture,
             _texture_view: texture_view,
             _sampler: sampler,
+            audio_overlay,
             background,
             scene: scene.clone(),
             selected_entity,
@@ -1198,6 +1728,9 @@ impl ViewerState {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            if let Some(overlay) = self.audio_overlay.as_mut() {
+                overlay.update_vertices(&self.device, new_size);
+            }
         }
     }
 
@@ -1269,9 +1802,42 @@ impl ViewerState {
             );
         }
 
+        if let Some(overlay) = self.audio_overlay.as_mut() {
+            overlay.upload(&self.queue);
+            if overlay.is_visible() {
+                let mut overlay_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("audio-overlay-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                overlay_pass.set_pipeline(&self.pipeline);
+                overlay_pass.set_bind_group(0, overlay.bind_group(), &[]);
+                overlay_pass.set_vertex_buffer(0, overlay.vertex_buffer().slice(..));
+                overlay_pass
+                    .set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                overlay_pass.draw_indexed(0..self.quad_index_count, 0, 0..1);
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    fn update_audio_overlay(&mut self, status: &AudioStatus) {
+        if let Some(overlay) = self.audio_overlay.as_mut() {
+            let lines = audio_overlay_lines(status);
+            overlay.set_lines(&lines);
+        }
     }
 
     fn next_entity(&mut self) {

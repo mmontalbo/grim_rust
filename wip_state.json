@@ -5,29 +5,29 @@
       "title": "Current Direction",
       "body": [
         "- Boot simulation now stubs Manny's desk cut-scene so the Lua host logs memo retrieval and computer interactions without the original precompiled scripts.",
-        "- Audio callbacks feed a recording adapter that can emit JSON logs via `--audio-log-json`, enabling future viewers to react to runtime music and SFX cues."
+        "- Viewer now renders the audio overlay direct from `--audio-log-json`; the next milestone focuses on projecting boot timeline metadata alongside the cue stream."
       ]
     },
     {
       "title": "Active Threads",
       "body": [
-        "- Geometry-backed selection informs commentary and cut-scene state, but the head-control fallback still assumes Manny-specific sectors and ignores real hit tests.",
-        "- Viewer integration is still pending; the recorded audio events are available on disk but not yet streamed into a live client."
+        "- Geometry-driven head targeting now records real sector hits; upcoming work focuses on surfacing those cues to downstream tooling.",
+        "- Timeline overlay plumbing is queued so the viewer can surface hook sequencing while geometry instrumentation continues to evolve."
       ]
     },
     {
       "title": "Next Steps",
       "body": [
-        "1. Replace the Manny-focused head-control fallback with geometry-driven targeting plus regression tests.",
-        "2. Plumb the recorded audio events into the viewer prototype so cue changes can drive instrumentation HUDs."
+        "1. Project Manny's office boot timeline overlays into the viewer to close out milestone 1 instrumentation.",
+        "2. Feed the overlay with hook sequencing and selection affordances so geometry and timeline views stay in sync."
       ]
     }
   ],
   "workstreams": [
     {
-      "slug": "head_control_geometry",
-      "description": "Geometry-driven head targeting",
-      "prompt": "Objective: replace the Manny-only head control fallback in grim_engine/src/lua_host.rs with geometry-driven targeting so look direction derives from actual sector hits. Update the logic to prefer visible sector data before falling back to canonical setups, and extend the unit tests to cover door/desk/window scenarios. Run cargo fmt and cargo test -p grim_engine. Constraints: reference only existing code/documentation; stop once the fallback and tests are committed."
+      "slug": "viewer_timeline_overlay",
+      "description": "Timeline overlay instrumentation",
+      "prompt": "Objective: layer Manny's office boot timeline metadata into grim_viewer so hook sequencing and entity focus appear directly in the HUD. Consume the existing --timeline JSON manifest, project stage labels and hook indices alongside the marker grid, and let ←/→ cycling highlight the corresponding overlay entry. Preserve behaviour when --timeline is absent. Document the flag pairing in docs/startup_overview.md, add targeted unit coverage for any timeline parsing helpers, and run cargo fmt && cargo test -p grim_viewer before handing off."
     }
   ]
 }
