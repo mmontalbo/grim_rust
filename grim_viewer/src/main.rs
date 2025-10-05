@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytemuck::{Pod, Zeroable, cast_slice};
 use clap::Parser;
 use font8x8::legacy::BASIC_LEGACY;
-use grim_formats::decode_bm;
+use grim_formats::{BmFile, decode_bm, decode_bm_with_seed};
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use pollster::FutureExt;
 #[cfg(feature = "audio")]
@@ -337,7 +337,23 @@ fn main() -> Result<()> {
         args.manifest.display()
     );
 
-    let decode_result = decode_asset_texture(&asset_name, &asset_bytes);
+    let seed_bitmap = if asset_name.to_ascii_lowercase().ends_with(".zbm") {
+        match load_zbm_seed(&args.manifest, &asset_name) {
+            Ok(Some(seed)) => Some(seed),
+            Ok(None) => None,
+            Err(err) => {
+                eprintln!(
+                    "[grim_viewer] warning: seed lookup failed for {}: {}",
+                    asset_name, err
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let decode_result = decode_asset_texture(&asset_name, &asset_bytes, seed_bitmap.as_ref());
 
     if let Some(output_path) = args.dump_frame.as_ref() {
         let preview = decode_result
@@ -346,13 +362,25 @@ fn main() -> Result<()> {
         let stats = dump_texture_to_png(preview, output_path)
             .with_context(|| format!("writing PNG to {}", output_path.display()))?;
         println!(
-            "Bitmap frame exported to {} ({}x{} codec {} frame count {})",
+            "Bitmap frame exported to {} ({}x{} codec {} format {} frame count {})",
             output_path.display(),
             preview.width,
             preview.height,
             preview.codec,
+            preview.format,
             preview.frame_count
         );
+        if let Some((min, max)) = preview.depth_range {
+            if preview.depth_preview {
+                println!(
+                    "  raw depth range (16-bit) 0x{min:04X} – 0x{max:04X}; export visualises normalized depth"
+                );
+            } else {
+                println!(
+                    "  raw depth range (16-bit) 0x{min:04X} – 0x{max:04X}; color sourced from base bitmap"
+                );
+            }
+        }
         println!(
             "  luminance avg {:.2}, min {}, max {}, opaque pixels {} / {}",
             stats.mean_luma,
@@ -390,6 +418,17 @@ fn main() -> Result<()> {
                 "Rendered quad verification completed ({}x{} offscreen)",
                 preview.width, preview.height
             );
+        }
+        if let Some((min, max)) = preview.depth_range {
+            if preview.depth_preview {
+                println!(
+                    "  source depth range (16-bit) 0x{min:04X} – 0x{max:04X}; render input is normalized depth"
+                );
+            } else {
+                println!(
+                    "  source depth range (16-bit) 0x{min:04X} – 0x{max:04X}; render input uses base bitmap colors"
+                );
+            }
         }
         println!(
             "  render luma avg {:.2}, min {}, max {}, opaque pixels {} / {}",
@@ -1058,6 +1097,34 @@ fn load_asset_bytes(manifest_path: &Path, asset: &str) -> Result<(String, Vec<u8
     Ok((entry.asset_name, bytes, archive_path))
 }
 
+fn load_zbm_seed(manifest_path: &Path, asset: &str) -> Result<Option<BmFile>> {
+    let lower = asset.to_ascii_lowercase();
+    if !lower.ends_with(".zbm") || asset.len() <= 4 {
+        return Ok(None);
+    }
+
+    let base_name = format!("{}{}", &asset[..asset.len() - 4], ".bm");
+    match load_asset_bytes(manifest_path, &base_name) {
+        Ok((base_asset, base_bytes, _)) => {
+            let base_bm = decode_bm(&base_bytes)
+                .with_context(|| format!("decoding base bitmap {} for {}", base_asset, asset))?;
+            ensure!(
+                !base_bm.frames.is_empty(),
+                "base bitmap {} has no frames",
+                base_asset
+            );
+            Ok(Some(base_bm))
+        }
+        Err(err) => {
+            if err.to_string().contains("not listed in manifest") {
+                Ok(None)
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
 fn resolve_archive_path(manifest_path: &Path, archive_path: &Path) -> PathBuf {
     if archive_path.is_absolute() {
         return archive_path.to_path_buf();
@@ -1408,9 +1475,21 @@ impl ViewerState {
         let (preview, background) = match decode_result {
             Ok(texture) => {
                 println!(
-                    "Decoded BM frame: {}x{} ({} frames, codec {})",
-                    texture.width, texture.height, texture.frame_count, texture.codec
+                    "Decoded BM frame: {}x{} ({} frames, codec {}, format {})",
+                    texture.width,
+                    texture.height,
+                    texture.frame_count,
+                    texture.codec,
+                    texture.format
                 );
+                if let Some((min, max)) = texture.depth_range {
+                    println!("  depth range (raw 16-bit): 0x{min:04X} – 0x{max:04X}");
+                    if texture.depth_preview {
+                        println!("  preview mapped to normalized depth values");
+                    } else {
+                        println!("  preview uses paired base bitmap for RGB");
+                    }
+                }
                 (texture, wgpu::Color::BLACK)
             }
             Err(err) => {
@@ -1986,26 +2065,85 @@ struct PreviewTexture {
     height: u32,
     frame_count: u32,
     codec: u32,
+    format: u32,
+    depth_range: Option<(u16, u16)>,
+    depth_preview: bool,
 }
 
-fn decode_asset_texture(asset_name: &str, bytes: &[u8]) -> Result<PreviewTexture> {
+fn decode_asset_texture(
+    asset_name: &str,
+    bytes: &[u8],
+    seed_bitmap: Option<&BmFile>,
+) -> Result<PreviewTexture> {
     let lower = asset_name.to_ascii_lowercase();
     if !(lower.ends_with(".bm") || lower.ends_with(".zbm")) {
         bail!("asset {asset_name} is not a BM surface");
     }
 
-    let bm = decode_bm(bytes)?;
+    let mut seed_slice: Option<&[u8]> = None;
+    if let Some(seed) = seed_bitmap {
+        if let Some(frame) = seed.frames.first() {
+            seed_slice = Some(frame.data.as_slice());
+        }
+    }
+
+    let bm = decode_bm_with_seed(bytes, seed_slice)?;
+    let metadata = bm.metadata();
     let frame = bm
         .frames
         .first()
         .ok_or_else(|| anyhow!("BM surface has no frames"))?;
-    let rgba = frame.as_rgba8888(bm.bits_per_pixel)?;
+
+    let mut depth_range = None;
+    let mut used_color_seed = false;
+    let rgba = if metadata.format == 5 {
+        depth_range = Some(depth_min_max(&frame.data));
+        if let Some(seed) = seed_bitmap {
+            if let Some(base_frame) = seed.frames.first() {
+                let base_metadata = seed.metadata();
+                used_color_seed = true;
+                base_frame.as_rgba8888(&base_metadata)?
+            } else {
+                frame.as_rgba8888(&metadata)?
+            }
+        } else {
+            frame.as_rgba8888(&metadata)?
+        }
+    } else {
+        frame.as_rgba8888(&metadata)?
+    };
+
+    let depth_range = if metadata.format == 5 {
+        depth_range
+    } else {
+        None
+    };
+    let depth_preview = metadata.format == 5 && !used_color_seed;
+
+    if metadata.format == 5 {
+        match (used_color_seed, seed_bitmap.is_some()) {
+            (true, _) => {
+                println!("  paired base bitmap detected; RGB preview sourced from color plate");
+            }
+            (false, true) => {
+                println!("  base bitmap missing frame data; preview shows normalized depth");
+            }
+            (false, false) => {
+                println!(
+                    "  no base bitmap available; preview shows normalized depth buffer values"
+                );
+            }
+        }
+    }
     Ok(PreviewTexture {
         data: rgba,
         width: frame.width,
         height: frame.height,
         frame_count: bm.image_count,
         codec: bm.codec,
+        format: metadata.format,
+        depth_range,
+        depth_preview,
     })
 }
 
@@ -2036,6 +2174,34 @@ fn diff_mismatch_ratio(diff: &TextureDiffSummary) -> f32 {
         0.0
     } else {
         diff.mismatched_pixels as f32 / diff.total_pixels as f32
+    }
+}
+
+fn depth_min_max(data: &[u8]) -> (u16, u16) {
+    if data.is_empty() {
+        return (0, 0);
+    }
+
+    let mut min_value = u16::MAX;
+    let mut max_value = u16::MIN;
+
+    for chunk in data.chunks_exact(2) {
+        let mut value = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if value == 0xF81F {
+            value = 0;
+        }
+        if value < min_value {
+            min_value = value;
+        }
+        if value > max_value {
+            max_value = value;
+        }
+    }
+
+    if min_value == u16::MAX {
+        (0, 0)
+    } else {
+        (min_value, max_value)
     }
 }
 
@@ -2585,6 +2751,9 @@ fn generate_placeholder_texture(bytes: &[u8], asset_name: &str) -> PreviewTextur
         height: HEIGHT,
         frame_count: 0,
         codec: 0,
+        format: 0,
+        depth_range: None,
+        depth_preview: false,
     }
 }
 
