@@ -20,6 +20,20 @@ use mlua::{
     StdLib, Table, Thread, ThreadStatus, Value, Variadic,
 };
 
+/// Minimal adapter for routing audio events to interested observers.
+pub trait AudioCallback {
+    fn music_play(&self, _cue: &str, _params: &[String]) {}
+    fn music_stop(&self, _mode: Option<&str>) {}
+    fn sfx_play(&self, _cue: &str, _params: &[String], _handle: &str) {}
+    fn sfx_stop(&self, _target: Option<&str>) {}
+}
+
+impl std::fmt::Debug for dyn AudioCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AudioCallback")
+    }
+}
+
 #[derive(Debug)]
 struct ScriptRecord {
     label: String,
@@ -707,6 +721,7 @@ struct EngineContext {
     music: MusicState,
     sfx: SfxState,
     lab_collection: Option<Rc<LabCollection>>,
+    audio_callback: Option<Rc<dyn AudioCallback>>,
     set_geometry: BTreeMap<String, ParsedSetGeometry>,
     sector_states: BTreeMap<String, BTreeMap<String, bool>>,
 }
@@ -716,6 +731,7 @@ impl EngineContext {
         resources: Rc<ResourceGraph>,
         verbose: bool,
         lab_collection: Option<Rc<LabCollection>>,
+        audio_callback: Option<Rc<dyn AudioCallback>>,
     ) -> Self {
         let mut available_sets = BTreeMap::new();
         for meta in &resources.sets {
@@ -772,6 +788,7 @@ impl EngineContext {
             music: MusicState::default(),
             sfx: SfxState::default(),
             lab_collection,
+            audio_callback,
             set_geometry: BTreeMap::new(),
             sector_states: BTreeMap::new(),
         }
@@ -902,6 +919,9 @@ impl EngineContext {
         let detail = format_music_detail("play", &track, &params);
         self.music.history.push(detail);
         self.log_event(format!("music.play {}", track));
+        if let Some(callback) = self.audio_callback.as_ref() {
+            callback.music_play(&track, &params);
+        }
     }
 
     fn queue_music(&mut self, track: String, params: Vec<String>) {
@@ -928,6 +948,9 @@ impl EngineContext {
             _ => "music.stop".to_string(),
         };
         self.log_event(event);
+        if let Some(callback) = self.audio_callback.as_ref() {
+            callback.music_stop(mode.as_deref());
+        }
     }
 
     fn pause_music(&mut self) {
@@ -1041,10 +1064,14 @@ impl EngineContext {
         };
         self.sfx.history.push(detail);
         self.log_event(format!("sfx.play {}", cue));
+        if let Some(callback) = self.audio_callback.as_ref() {
+            callback.sfx_play(&cue, &params, &handle);
+        }
         handle
     }
 
     fn stop_sound_effect(&mut self, target: Option<String>) {
+        let requested = target.clone();
         let mut label = String::from("sfx.stop");
         if let Some(spec) = target {
             if self.sfx.active.remove(&spec).is_some() {
@@ -1067,6 +1094,9 @@ impl EngineContext {
         }
         self.sfx.history.push(label.clone());
         self.log_event(label);
+        if let Some(callback) = self.audio_callback.as_ref() {
+            callback.sfx_stop(requested.as_deref());
+        }
     }
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
@@ -2821,6 +2851,7 @@ pub fn run_boot_sequence(
     lab_root: Option<&Path>,
     verbose: bool,
     geometry_json: Option<&Path>,
+    audio_callback: Option<Rc<dyn AudioCallback>>,
 ) -> Result<()> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
@@ -2858,6 +2889,7 @@ pub fn run_boot_sequence(
         resources,
         verbose,
         lab_collection,
+        audio_callback,
     )));
 
     install_package_path(&lua, data_root)?;
@@ -7449,7 +7481,7 @@ fn distance_between(a: Vec3, b: Vec3) -> f32 {
 mod tests {
     use super::{
         candidate_paths, install_game_pauser, install_menu_common, value_slice_to_vec3,
-        EngineContext, ObjectSnapshot, ParsedSetGeometry, Vec3,
+        AudioCallback, EngineContext, ObjectSnapshot, ParsedSetGeometry, Vec3,
     };
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
@@ -7488,6 +7520,10 @@ mod tests {
     }
 
     fn make_context() -> EngineContext {
+        make_context_with_callback(None)
+    }
+
+    fn make_context_with_callback(callback: Option<Rc<dyn AudioCallback>>) -> EngineContext {
         let set_metadata = SetMetadata {
             lua_file: "mo.lua".to_string(),
             variable_name: "mo".to_string(),
@@ -7535,7 +7571,7 @@ mod tests {
         };
         let mut graph = ResourceGraph::default();
         graph.sets.push(set_metadata);
-        EngineContext::new(Rc::new(graph), false, None)
+        EngineContext::new(Rc::new(graph), false, None, callback)
     }
 
     fn install_menu_common_for_tests(lua: &Lua, context: Rc<RefCell<EngineContext>>) {
@@ -7608,6 +7644,46 @@ mod tests {
         ctx.set_actor_position(&id, "Manny", position);
     }
 
+    #[derive(Default)]
+    struct RecordingCallback {
+        events: RefCell<Vec<String>>,
+    }
+
+    impl RecordingCallback {
+        fn events(&self) -> Vec<String> {
+            self.events.borrow().clone()
+        }
+    }
+
+    impl AudioCallback for RecordingCallback {
+        fn music_play(&self, cue: &str, params: &[String]) {
+            let detail = if params.is_empty() {
+                format!("music.play:{cue}")
+            } else {
+                format!("music.play:{cue}[{}]", params.join(","))
+            };
+            self.events.borrow_mut().push(detail);
+        }
+
+        fn music_stop(&self, mode: Option<&str>) {
+            let label = mode.unwrap_or("<none>");
+            self.events.borrow_mut().push(format!("music.stop:{label}"));
+        }
+
+        fn sfx_play(&self, cue: &str, params: &[String], handle: &str) {
+            let mut detail = format!("sfx.play:{cue}->{handle}");
+            if !params.is_empty() {
+                detail.push_str(&format!("[{}]", params.join(",")));
+            }
+            self.events.borrow_mut().push(detail);
+        }
+
+        fn sfx_stop(&self, target: Option<&str>) {
+            let label = target.unwrap_or("<none>");
+            self.events.borrow_mut().push(format!("sfx.stop:{label}"));
+        }
+    }
+
     #[test]
     fn manny_camera_defaults_to_desk_zone() {
         let mut ctx = make_context();
@@ -7638,6 +7714,60 @@ mod tests {
         assert_eq!(camera_hit.name, "mo_mnycu");
         let hot_hit = ctx.manny_office_sector("hot").expect("door hot");
         assert_eq!(hot_hit.name, "mo_comin");
+    }
+
+    #[test]
+    fn audio_callbacks_receive_music_and_sfx_events() {
+        let callback = Rc::new(RecordingCallback::default());
+        let callback_handle: Rc<dyn AudioCallback> = callback.clone();
+        let mut ctx = make_context_with_callback(Some(callback_handle));
+
+        ctx.play_music("intro".to_string(), vec!["loop=true".to_string()]);
+        assert_eq!(
+            ctx.music.current.as_ref().map(|cue| cue.name.as_str()),
+            Some("intro")
+        );
+
+        ctx.stop_music(Some("immediate".to_string()));
+        assert!(ctx.music.current.is_none());
+
+        let handle = ctx.play_sound_effect("doorbell".to_string(), Vec::new());
+        assert!(ctx.sfx.active.contains_key(&handle));
+
+        ctx.stop_sound_effect(Some(handle.clone()));
+        assert!(!ctx.sfx.active.contains_key(&handle));
+
+        let events = callback.events();
+        assert_eq!(
+            events,
+            vec![
+                "music.play:intro[loop=true]".to_string(),
+                "music.stop:immediate".to_string(),
+                format!("sfx.play:doorbell->{handle}"),
+                format!("sfx.stop:{handle}"),
+            ]
+        );
+
+        assert!(ctx
+            .music
+            .history
+            .iter()
+            .any(|entry| entry.starts_with("play intro")));
+        assert!(ctx
+            .music
+            .history
+            .iter()
+            .any(|entry| entry == "stop immediate"));
+        assert!(ctx
+            .sfx
+            .history
+            .iter()
+            .any(|entry| entry.starts_with("sfx.play doorbell")));
+        assert!(ctx
+            .sfx
+            .history
+            .iter()
+            .any(|entry| entry.starts_with("sfx.stop")));
     }
     fn sample_geometry_set() -> SetFileData {
         let raw = "section: setups\n\tnumsetups\t1\n\tsetup\tcam_a\n\tposition\t0.0\t0.0\t0.0\n\tinterest\t0.3\t0.3\t0.0\n\troll\t\t0.0\n\tfov\t\t45.0\n\tnclip\t\t0.1\n\tfclip\t\t100.0\n\nsection: sectors\n\tsector\t\tdesk_walk\n\tID\t\t10\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t0.0\t0.0\t0.0\n\t         \t\t1.0\t0.0\t0.0\n\t         \t\t1.0\t1.0\t0.0\n\t         \t\t0.0\t1.0\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n";

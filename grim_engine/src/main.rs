@@ -132,6 +132,7 @@ fn main() -> Result<()> {
             args.lab_root.as_deref(),
             args.verbose,
             args.lua_geometry_json.as_deref(),
+            None,
         )?;
         return Ok(());
     }
@@ -183,6 +184,7 @@ fn main() -> Result<()> {
             args.lab_root.as_deref(),
             args.verbose,
             Some(snapshot_path.as_path()),
+            None,
         )?;
 
         run_geometry_diff(
@@ -790,6 +792,7 @@ mod tests {
             Some(lab_root.as_path()),
             false,
             Some(snapshot_file.path()),
+            None,
         )?;
 
         let diff_file = NamedTempFile::new()?;
