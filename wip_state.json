@@ -4,58 +4,37 @@
     {
       "title": "Current Direction",
       "body": [
-        "- Pivoted away from patching the original executable; the repository now documents the shipping boot flow and builds a Rust analysis toolchain that can reason about the Lua sources directly.",
-        "- Decomposed legacy Lua quirks so `full_moon` can parse every decompiled file without fallback string hacks."
+        "- Embedded runtime now installs stateful menu tables so overlay visibility and pause behaviour reflect the original game.",
+        "- Inventory/object scaffolding and audio helpers continue to converge so Manny's office boot can reach its first dialogue beat inside the Rust host."
       ]
     },
     {
       "title": "Active Threads",
       "body": [
-        "- `grim_analysis` parses `_system`, `_sets`, and every room script, building an aggregate of set hooks and the actors they spawn.",
-        "- Static simulator groups stateful calls by subsystem (objects, inventory, interest actors, actors, audio, progression) so we can see which engine services the Lua scripts expect.",
-        "- JSON report (`--json-report`) persists hook simulations plus any unclassified method calls, helping us track coverage gaps over time.",
-        "- Registry shim reads/writes JSON snapshots so repeated runs mimic the original engine's registry mutations (e.g., `GrimLastSet`).",
-        "- `grim_formats` now exposes a reusable `LabArchive` reader and `lab_dump` example so we can inspect LAB contents without shell scripts.",
-        "- `grim_engine` consumes the shared analysis layer, materialises the stage-aware boot timeline, and now exports per-subsystem deltas alongside an ordered list of subsystem delta events so runtime services can replay mutations without re-parsing Lua. The replay snapshot now tracks actor transforms (position, rotation, facing) plus basic chore state/history, and the timeline manifest fixtures cover the richer schema so downstream tools can rely on it.",
-        "- Geometry verification test: `cargo test -p grim_engine` exercises `verify_geometry_round_trip_matches_static_timeline` to ensure the runtime snapshot stays aligned with the static geometry timeline.",
-        "- Asset manifests now tag bitmap entries as `classic` vs `unsupported` so the tooling can skip remastered-only surfaces until the codec 3 decompressor exists.",
-        "- `grim_viewer` consumes the manifest, decodes codec 0 BM surfaces with the shared loader, and only falls back to a hashed preview when metadata is missing (older manifests) while we finish reversing the remastered payloads. It can now ingest the boot timeline manifest, surface the actors staged during boot, and lets you cycle through them in the viewer (prepping for placements once geometry decoding lands).",
-        "- Added a lightweight script/movie scheduler in `grim_engine`; the CLI's `--simulate-scheduler` switch replays the boot queues using that iterator so we can reason about execution order without Lua, and `--scheduler-json` persists the exact boot queue order for downstream tooling.",
-        "- Embedded Lua host: `grim_engine --run-lua` now boots an `mlua` VM backed by a shared `EngineContext`, letting the stock `_actors.lua` and `_objects.lua` scripts execute so Manny's Office uses the real object tables. Actor selection, set switches, object state mutations, and inventory changes are logged for comparison against the static analysis. `_colors`, `_controls`, and the music/SFX helpers now install stateful scaffolds that record the current cue, queued transitions, mute state, and active sound handles, while the richer menu helpers remain stubbed so verbose runs still highlight the next bindings we need to land. `start_script`/`single_start_script` now spawn cooperative Lua threads, `break_here` yields through `coroutine.yield`, and the host advances a few frames post-BOOT so long-running trackers stay resident with their yield counts for future bindings."
+        "- Object helpers propagate touchable/visible changes via metatables; the desk tube/computer path still needs an interaction log fixture.",
+        "- Audio scaffolding captures music/SFX history; the callback bridge needs to drive external viewers once wired through the helpers.",
+        "- Geometry-backed selection informs commentary and cut-scene state, but the head-control fallback still assumes Manny-specific sectors."
       ]
     },
     {
       "title": "Next Steps",
       "body": [
-        "1. Wire the `--verify-geometry` flow (now exercised by `cargo test -p grim_engine`) into downstream tooling/CI so sector or visibility drift surfaces automatically outside local runs.",
-        "2. Keep widening the legacy normalisation pass (additional helper keywords, comment forms) so parsing never regresses.",
-        "3. Replace the Manny-specific camera fallback with geometry-driven selection and extend the parser/lookup path to other sets once their data is decoded, using the snapshot diff to keep sector coverage honest.",
-        "4. Push the geometry-backed state into the remaining runtime helpers (menu services and the deeper audio routines) so later scenes can react without relying on placeholder logging."
-      ]
-    },
-    {
-      "title": "Executable Workstreams",
-      "body": [
-        "The prompts below can be launched as parallel Codex sessions. Each command assumes the `codex-exec` binary is run from `~/Developer/codex/codex-rs` with the Grim Fandango repo mounted at `/home/mmontalbo/Developer/grim_mod`. Each workstream now runs inside its own git worktree at `artifacts/worktrees/<slug>` on branch `workstream/<slug>`, keeping edits isolated until you review and merge them. Feel free to append additional flags (e.g. `-c model=\"o3\"`) if you need a different profile, but keep the working directory and prompt body intact so each agent starts with the same context we are tracking here.",
-        "You can launch them individually or run `./wip continue` to spawn matching Codex sessions in parallel (logs land in `artifacts/workstreams/` by default). The helper uses the same configuration as this session (`--model gpt-5-codex`, `--sandbox danger-full-access`, `approval_policy=\"never\"`). After runs complete, invoke `./wip review` for log + diff summaries, or `./wip iterate` to launch and review in a single step."
+        "1. Finish the `_mo.lua` tube/computer interaction loop so touchability toggles and logging match the shipped scripts.",
+        "2. Extend the audio bridge with a callback trait, thread it through runtime helpers, and add focused unit coverage.",
+        "3. Replace the Manny-focused head-control fallback with geometry-driven targeting plus regression tests."
       ]
     }
   ],
   "workstreams": [
     {
-      "slug": "menu_ui",
-      "description": "Menu/UI runtime bindings",
-      "prompt": "Objective: implement the Manny boot menu helpers using real state. Work only in grim_engine/src/lua_host.rs and its unit tests. Replace the remaining install_menu_*_stub functions (start with install_menu_common_stub and install_menu_dialog_stub) with stateful tables that track visibility, autopause, and respond to show, hide, auto_freeze, and game_pauser expectations. Add regression tests near the existing menu coverage to confirm show/hide toggles and auto-freeze behaviour. Run cargo fmt and cargo test -p grim_engine. Constraints: you may consult code/documentation sources (e.g. GitHub) but avoid general search engines, and stop once the helpers and tests succeed; leave TODO comments if more scripting work remains."
+      "slug": "interaction_loop",
+      "description": "Interaction loop polish",
+      "prompt": "Objective: flesh out the remaining object and inventory helpers needed for Manny's office interactions. Focus on the TODOs around object controls in grim_engine/src/lua_host.rs (e.g. install_runtime_tables, make_object_touchable, inventory helpers). Implement the missing helpers so Manny can interact with the desk tube/computer path when running grim_engine --run-lua --verbose. Add an integration test that drives Manny through the boot sequence and asserts the interaction log includes the expected touchable state changes. Run cargo fmt and cargo test -p grim_engine. Constraints: reference only code/documentation sources online; stop once the helpers and tests are committed and note any remaining gaps instead of continuing beyond the scope."
     },
     {
       "slug": "audio_bridge",
       "description": "Audio playback bridge",
       "prompt": "Objective: introduce a minimal audio playback adapter inside grim_engine so menu/runtime events can trigger viewer hooks later. Work within grim_engine/src/lua_host.rs, optionally creating a helper module under grim_engine/src/audio_bridge.rs, but do not add new crates. Expose a lightweight trait (for example AudioCallback) and thread it through EngineContext, updating music and sfx helpers to invoke the callback. Add unit tests verifying callbacks receive play and stop events while existing state tracking remains intact. Run cargo fmt and cargo test -p grim_engine. Constraints: limit external references to code/documentation sources; stop after the callbacks and tests are in place."
-    },
-    {
-      "slug": "interaction_loop",
-      "description": "Interaction loop polish",
-      "prompt": "Objective: flesh out the remaining object and inventory helpers needed for Manny's office interactions. Focus on the TODOs around object controls in grim_engine/src/lua_host.rs (e.g. install_runtime_tables, make_object_touchable, inventory helpers). Implement the missing helpers so Manny can interact with the desk tube/computer path when running grim_engine --run-lua --verbose. Add an integration test that drives Manny through the boot sequence and asserts the interaction log includes the expected touchable state changes. Run cargo fmt and cargo test -p grim_engine. Constraints: reference only code/documentation sources online; stop once the helpers and tests are committed and note any remaining gaps instead of continuing beyond the scope."
     }
   ]
 }

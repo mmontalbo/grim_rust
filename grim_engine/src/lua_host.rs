@@ -4116,7 +4116,12 @@ fn install_parent_object_hook(lua: &Lua, context: Rc<RefCell<EngineContext>>) ->
                         parent_context.borrow_mut().unregister_object(handle);
                     }
                     Value::Table(object_table) => {
-                        ensure_object_metatable(lua_ctx, &object_table)?;
+                        ensure_object_metatable(
+                            lua_ctx,
+                            &object_table,
+                            parent_context.clone(),
+                            handle,
+                        )?;
                         inject_object_controls(
                             lua_ctx,
                             &object_table,
@@ -5224,13 +5229,51 @@ fn value_to_actor_handle(value: &Value) -> Option<u32> {
     }
 }
 
-fn ensure_object_metatable(lua: &Lua, object: &Table) -> LuaResult<()> {
+fn ensure_object_metatable(
+    lua: &Lua,
+    object: &Table,
+    context: Rc<RefCell<EngineContext>>,
+    handle: i64,
+) -> LuaResult<()> {
     if let Ok(parent) = object.get::<_, Table>("parent") {
         let metatable = match object.get_metatable() {
             Some(meta) => meta,
             None => lua.create_table()?,
         };
         metatable.set("__index", parent)?;
+
+        let current_newindex = metatable
+            .get::<_, Value>("__newindex")
+            .unwrap_or(Value::Nil);
+        if matches!(current_newindex, Value::Nil) {
+            let ctx = context.clone();
+            let handler =
+                lua.create_function(move |_, (table, key, value): (Table, Value, Value)| {
+                    let key_name = match &key {
+                        Value::String(text) => Some(text.to_str()?.to_string()),
+                        _ => None,
+                    };
+
+                    table.raw_set(key.clone(), value.clone())?;
+
+                    if let Some(name) = key_name.as_deref() {
+                        match name {
+                            "touchable" => {
+                                let touchable = value_to_bool(&value);
+                                ctx.borrow_mut().set_object_touchable(handle, touchable);
+                            }
+                            "visible" | "is_visible" => {
+                                let visible = value_to_bool(&value);
+                                ctx.borrow_mut().set_object_visibility(handle, visible);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(())
+                })?;
+            metatable.set("__newindex", handler)?;
+        }
+
         object.set_metatable(Some(metatable));
     }
     Ok(())
@@ -5261,10 +5304,8 @@ fn inject_object_controls(
         .get::<_, Value>("make_untouchable")
         .unwrap_or(Value::Nil);
     if matches!(untouchable, Value::Nil) {
-        let ctx = context.clone();
         let func = lua.create_function(move |_, (this,): (Table,)| {
             this.set("touchable", false)?;
-            ctx.borrow_mut().set_object_touchable(handle, false);
             Ok(())
         })?;
         object.set("make_untouchable", func)?;
@@ -5274,10 +5315,8 @@ fn inject_object_controls(
         .get::<_, Value>("make_touchable")
         .unwrap_or(Value::Nil);
     if matches!(touchable, Value::Nil) {
-        let ctx = context.clone();
         let func = lua.create_function(move |_, (this,): (Table,)| {
             this.set("touchable", true)?;
-            ctx.borrow_mut().set_object_touchable(handle, true);
             Ok(())
         })?;
         object.set("make_touchable", func)?;
