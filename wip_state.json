@@ -2,31 +2,48 @@
   "title": "Work in Progress",
   "sections": [
     {
+      "title": "Milestone Priority",
+      "body": [
+        "- Milestone 1: Enable gameplay for the initial Manny office scene (load, navigate, interact).",
+        "- All active work should unblock first-playable experience before tackling broader engine polish."
+      ]
+    },
+    {
       "title": "Current Direction",
       "body": [
-        "- Stabilise codec3 decoding so colour plates and zbuffers render correctly in tooling and automated dumps.",
-        "- Keep the viewer focused on Manny's office assets while exposing depth metadata for regression tracking."
+        "- Stabilise codec3 decoding so Manny's office colour plates and `.zbm` depth stay faithful in engine captures.",
+        "- Stand up a minimal game loop that loads Manny's office scripts, hooks input, and keeps hotspots functional."
       ]
     },
     {
       "title": "Active Threads",
       "body": [
-        "- Model how `.zbm` depth ranges map to engine clip space and decide how normalisation should behave across scenes.",
-        "- Audit other bitmap format codes to see which additional render paths the viewer must support."
+        "- Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
+        "- Confirm Manny's office depth metadata drives correct draw ordering once interactions kick in."
       ]
     },
     {
       "title": "Next Steps",
       "body": [
-        "1. Lock in regression coverage for seeded codec3 paths (colour + depth) so Manny's office stays stable.",
-        "2. Extend the viewer CLI to export paired colour/depth dumps for easier comparisons."
+        "1. Demo entering Manny's office from boot with walk-able Manny and one interactive hotspot.",
+        "2. Lock in regression coverage for codec3 colour + depth paths so the scene stays stable once playable."
       ]
     }
   ],
   "workstreams": [
     {
+      "slug": "scene_bootstrap",
+      "description": "Load Manny's office and basic gameplay loop",
+      "prompt": "Objective: wire up the startup path that enters Manny's office with scripts, walkboxes, and camera state so we can move Manny and trigger baseline interactions. Capture blockers that prevent first-playable and co-ordinate fixes quickly."
+    },
+    {
+      "slug": "interaction_patchset",
+      "description": "Keep office hotspots playable",
+      "prompt": "Objective: ensure Manny can interact with a representative hotspot (e.g. pneumatic tube or desk) including dialogue playback, so the milestone demo feels alive. Trim scope to essentials and defer complex puzzle logic until after the first playable."
+    },
+    {
       "slug": "codec3_regression",
-      "description": "Fix Manny office texture decode",
+      "description": "Harden Manny office texture decode",
       "prompt": "Objective: keep Manny's office rendering faithful by matching codec3 behaviour between colour `.bm` plates and `.zbm` depth maps. Ensure seeded windows mirror the original engine, expose depth ranges for validation, and land regression tests or tooling that prevent the half-black regression from returning."
     }
   ]
