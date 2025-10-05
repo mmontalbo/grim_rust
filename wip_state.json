@@ -4,37 +4,30 @@
     {
       "title": "Current Direction",
       "body": [
-        "- Embedded runtime now installs stateful menu tables so overlay visibility and pause behaviour reflect the original game.",
-        "- Inventory/object scaffolding and audio helpers continue to converge so Manny's office boot can reach its first dialogue beat inside the Rust host."
+        "- Boot simulation now stubs Manny's desk cut-scene so the Lua host logs memo retrieval and computer interactions without the original precompiled scripts.",
+        "- Audio callbacks feed a recording adapter that can emit JSON logs via `--audio-log-json`, enabling future viewers to react to runtime music and SFX cues."
       ]
     },
     {
       "title": "Active Threads",
       "body": [
-        "- Object helpers propagate touchable/visible changes via metatables; the desk tube/computer path still needs an interaction log fixture.",
-        "- Audio scaffolding captures music/SFX history; the callback bridge needs to drive external viewers once wired through the helpers.",
-        "- Geometry-backed selection informs commentary and cut-scene state, but the head-control fallback still assumes Manny-specific sectors."
+        "- Geometry-backed selection informs commentary and cut-scene state, but the head-control fallback still assumes Manny-specific sectors and ignores real hit tests.",
+        "- Viewer integration is still pending; the recorded audio events are available on disk but not yet streamed into a live client."
       ]
     },
     {
       "title": "Next Steps",
       "body": [
-        "1. Finish the `_mo.lua` tube/computer interaction loop so touchability toggles and logging match the shipped scripts.",
-        "2. Extend the audio bridge with a callback trait, thread it through runtime helpers, and add focused unit coverage.",
-        "3. Replace the Manny-focused head-control fallback with geometry-driven targeting plus regression tests."
+        "1. Replace the Manny-focused head-control fallback with geometry-driven targeting plus regression tests.",
+        "2. Plumb the recorded audio events into the viewer prototype so cue changes can drive instrumentation HUDs."
       ]
     }
   ],
   "workstreams": [
     {
-      "slug": "interaction_loop",
-      "description": "Interaction loop polish",
-      "prompt": "Objective: flesh out the remaining object and inventory helpers needed for Manny's office interactions. Focus on the TODOs around object controls in grim_engine/src/lua_host.rs (e.g. install_runtime_tables, make_object_touchable, inventory helpers). Implement the missing helpers so Manny can interact with the desk tube/computer path when running grim_engine --run-lua --verbose. Add an integration test that drives Manny through the boot sequence and asserts the interaction log includes the expected touchable state changes. Run cargo fmt and cargo test -p grim_engine. Constraints: reference only code/documentation sources online; stop once the helpers and tests are committed and note any remaining gaps instead of continuing beyond the scope."
-    },
-    {
-      "slug": "audio_bridge",
-      "description": "Audio playback bridge",
-      "prompt": "Objective: introduce a minimal audio playback adapter inside grim_engine so menu/runtime events can trigger viewer hooks later. Work within grim_engine/src/lua_host.rs, optionally creating a helper module under grim_engine/src/audio_bridge.rs, but do not add new crates. Expose a lightweight trait (for example AudioCallback) and thread it through EngineContext, updating music and sfx helpers to invoke the callback. Add unit tests verifying callbacks receive play and stop events while existing state tracking remains intact. Run cargo fmt and cargo test -p grim_engine. Constraints: limit external references to code/documentation sources; stop after the callbacks and tests are in place."
+      "slug": "head_control_geometry",
+      "description": "Geometry-driven head targeting",
+      "prompt": "Objective: replace the Manny-only head control fallback in grim_engine/src/lua_host.rs with geometry-driven targeting so look direction derives from actual sector hits. Update the logic to prefer visible sector data before falling back to canonical setups, and extend the unit tests to cover door/desk/window scenarios. Run cargo fmt and cargo test -p grim_engine. Constraints: reference only existing code/documentation; stop once the fallback and tests are committed."
     }
   ]
 }
