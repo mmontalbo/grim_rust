@@ -11,6 +11,7 @@ from textwrap import indent
 import subprocess
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -34,6 +35,10 @@ for section in WIP_STATE.get('sections', []):
 SECTION_ORDER = [DOC_TITLE, *SECTION_TITLES]
 RAW_WORKSTREAMS = WIP_STATE.get('workstreams', [])
 WORKSTREAM_TIMEOUT = int(os.environ.get('WIP_WORKSTREAM_TIMEOUT', '600'))
+WORKSTREAM_STATUS_INTERVAL = int(os.environ.get('WIP_WORKSTREAM_INTERVAL', '30'))
+LOG_TAIL_LINES = int(os.environ.get('WIP_WORKSTREAM_TAIL', '20'))
+WORKSTREAM_POLL_INTERVAL = int(os.environ.get('WIP_WORKSTREAM_POLL', '5'))
+SHARED_RESOURCES = ('dev-install', 'extracted')
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,20 @@ def remove_worktree(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def ensure_shared_resources(worktree_path: Path) -> None:
+    for name in SHARED_RESOURCES:
+        source = REPO_ROOT / name
+        if not source.exists():
+            continue
+        target = worktree_path / name
+        if target.exists():
+            continue
+        try:
+            target.symlink_to(source, target_is_directory=source.is_dir())
+        except FileExistsError:
+            pass
+
+
 def prepare_worktree(slug: str, base_rev: str) -> tuple[Path, str]:
     WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
     worktree_path = WORKTREE_ROOT / slug
@@ -113,6 +132,7 @@ def prepare_worktree(slug: str, base_rev: str) -> tuple[Path, str]:
     branch = f'workstream/{slug}'
     reset_branch(branch, base_rev)
     git_run(['worktree', 'add', str(worktree_path), branch])
+    ensure_shared_resources(worktree_path)
     return worktree_path, branch
 
 
@@ -194,8 +214,7 @@ def run_workstreams(slugs: Optional[List[str]], dry_run: bool, workdir: Path, lo
         git_run(['worktree', 'prune'], check=False, capture_output=True)
         base_rev = git_rev_parse('HEAD')
 
-    processes = []
-    log_handles = []
+    process_infos: List[dict] = []
 
     for ws in selected:
         branch = f'workstream/{ws.slug}'
@@ -217,31 +236,65 @@ def run_workstreams(slugs: Optional[List[str]], dry_run: bool, workdir: Path, lo
         }
         status_path.write_text(json.dumps(status_payload))
         log_handle = log_path.open('w', encoding='utf-8')
-        log_handles.append(log_handle)
         print(f"[{ws.slug}] launching, logging to {log_path}")
         proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, cwd=CODEX_ROOT)
-        processes.append((ws, branch, worktree_path, proc, log_path, status_path))
+        process_infos.append({
+            'ws': ws,
+            'branch': branch,
+            'worktree': worktree_path,
+            'proc': proc,
+            'log_path': log_path,
+            'status_path': status_path,
+            'log_handle': log_handle,
+            'start': time.time(),
+            'last_report': 0.0,
+        })
 
     if dry_run:
         return 0
 
     exit_code = 0
-    for ws, branch, worktree_path, proc, log_path, status_path in processes:
-        ret = proc.wait()
-        status = 'success' if ret == 0 else 'failure'
-        print(f"[{ws.slug}] completed with exit code {ret} (log: {log_path})")
-        status_payload = {
-            'status': status,
-            'exit_code': ret,
-            'branch': branch,
-            'worktree': str(worktree_path),
-        }
-        status_path.write_text(json.dumps(status_payload))
-        if ret != 0 and exit_code == 0:
-            exit_code = ret
+    active = process_infos[:]
+    while active:
+        for info in active[:]:
+            proc = info['proc']
+            ret = proc.poll()
+            if ret is None:
+                if WORKSTREAM_STATUS_INTERVAL > 0:
+                    now = time.time()
+                    if now - info['last_report'] >= WORKSTREAM_STATUS_INTERVAL:
+                        info['last_report'] = now
+                        elapsed = int(now - info['start'])
+                        print(f"[{info['ws'].slug}] running ({elapsed}s elapsed)")
+                        snippet = tail_file(info['log_path'], LOG_TAIL_LINES)
+                        if snippet:
+                            print(indent(snippet, '    '))
+                        else:
+                            print('    (no log output yet)')
+                continue
 
-    for handle in log_handles:
-        handle.close()
+            info['log_handle'].close()
+            status = 'success' if ret == 0 else 'failure'
+            reason = None
+            if ret != 0:
+                log_tail = tail_file(info['log_path'], LOG_TAIL_LINES)
+                if 'verify_geometry' in log_tail and 'dev-install' in log_tail:
+                    reason = 'cargo test -p grim_engine failed (verify_geometry requires dev-install assets)'
+            print(f"[{info['ws'].slug}] completed with exit code {ret} (log: {info['log_path']})")
+            status_payload = {
+                'status': status,
+                'exit_code': ret,
+                'branch': info['branch'],
+                'worktree': str(info['worktree']),
+            }
+            if reason:
+                status_payload['reason'] = reason
+            info['status_path'].write_text(json.dumps(status_payload))
+            if ret != 0 and exit_code == 0:
+                exit_code = ret
+            active.remove(info)
+        if active:
+            time.sleep(max(WORKSTREAM_POLL_INTERVAL, 1))
 
     return exit_code
 
@@ -299,6 +352,9 @@ def review_workstreams(slugs: Optional[List[str]], logs_dir: Path, tail: int, sh
         exit_code = status_payload.get('exit_code')
         print(f"[{ws.slug}] {status.upper()} (exit {exit_code if exit_code is not None else 'unknown'})")
         print(f"    log: {log_path if log_path.exists() else 'missing'}")
+        reason = status_payload.get('reason')
+        if reason:
+            print(f"    reason: {reason}")
         branch = status_payload.get('branch')
         worktree = status_payload.get('worktree')
         if branch:
