@@ -237,7 +237,7 @@ If you pass `--timeline <boot_manifest.json>` the viewer will also ingest the
 boot snapshot, enumerate the actors and objects staged during Manny's Office
 boot, and let you cycle through them with the ←/→ keys. A lightweight overlay
 maps each entity's X/Z position into normalized device coordinates and draws
-coloured markers (green/blue for supporting casts, red for the current
+colored markers (green/blue for supporting casts, red for the current
 selection), giving a quick sanity check that the static simulator and manifest
 data line up with our spatial expectations while we work toward full room
 geometry and rendering.
