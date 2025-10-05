@@ -12,6 +12,7 @@ pub struct BmFile {
     pub image_count: u32,
     pub width: u32,
     pub height: u32,
+    pub format: u32,
     pub frames: Vec<BmFrame>,
 }
 
@@ -23,6 +24,7 @@ impl BmFile {
             image_count: self.image_count,
             width: self.width,
             height: self.height,
+            format: self.format,
         }
     }
 }
@@ -35,11 +37,18 @@ pub struct BmFrame {
 }
 
 impl BmFrame {
-    pub fn as_rgba8888(&self, bits_per_pixel: u32) -> Result<Vec<u8>> {
-        match bits_per_pixel {
-            16 => convert_rgb565_to_rgba8888(&self.data),
-            32 => convert_rgba8888_le(&self.data),
-            other => bail!("unsupported bits-per-pixel value {other} for BM preview"),
+    pub fn as_rgba8888(&self, metadata: &BmMetadata) -> Result<Vec<u8>> {
+        match metadata.format {
+            1 => match metadata.bits_per_pixel {
+                16 => convert_rgb565_to_rgba8888(&self.data),
+                32 => convert_rgba8888_le(&self.data),
+                other => bail!("unsupported bits-per-pixel value {other} for BM preview"),
+            },
+            5 => match metadata.bits_per_pixel {
+                16 => convert_zbuffer16_to_rgba8888(&self.data),
+                other => bail!("unsupported bits-per-pixel value {other} for BM zbuffer preview"),
+            },
+            other => bail!("unsupported BM format {other} for preview"),
         }
     }
 }
@@ -51,6 +60,7 @@ pub struct BmMetadata {
     pub image_count: u32,
     pub width: u32,
     pub height: u32,
+    pub format: u32,
 }
 
 fn parse_bm_header(bytes: &[u8]) -> Result<(BmMetadata, usize)> {
@@ -73,7 +83,7 @@ fn parse_bm_header(bytes: &[u8]) -> Result<(BmMetadata, usize)> {
     let _x = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
     let _y = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
     let _transparent_color = u32::from_le_bytes(bytes[28..32].try_into().unwrap());
-    let _format = u32::from_le_bytes(bytes[32..36].try_into().unwrap());
+    let format = u32::from_le_bytes(bytes[32..36].try_into().unwrap());
     let bits_per_pixel = u32::from_le_bytes(bytes[36..40].try_into().unwrap());
 
     ensure!(image_count >= 1, "BM image reports zero frames");
@@ -99,6 +109,7 @@ fn parse_bm_header(bytes: &[u8]) -> Result<(BmMetadata, usize)> {
         image_count,
         width,
         height,
+        format,
     };
     let bytes_per_pixel = (bits_per_pixel / 8) as usize;
 
@@ -111,6 +122,10 @@ pub fn peek_bm_metadata(bytes: &[u8]) -> Result<BmMetadata> {
 }
 
 pub fn decode_bm(bytes: &[u8]) -> Result<BmFile> {
+    decode_bm_with_seed(bytes, None)
+}
+
+pub fn decode_bm_with_seed(bytes: &[u8], initial_seed: Option<&[u8]>) -> Result<BmFile> {
     let (metadata, bytes_per_pixel) = parse_bm_header(bytes)?;
     let mut frames: Vec<BmFrame> = Vec::with_capacity(metadata.image_count as usize);
     let mut offset = HEADER_SIZE;
@@ -161,10 +176,10 @@ pub fn decode_bm(bytes: &[u8]) -> Result<BmFile> {
                 let compressed = &bytes[offset..offset + compressed_len];
                 offset += compressed_len;
                 let mut buffer = vec![0u8; raw_size];
-                let seed = if frame_index > 0 {
-                    Some(&frames[(frame_index - 1) as usize].data[..])
+                let seed = if frame_index == 0 {
+                    initial_seed
                 } else {
-                    None
+                    Some(&frames[(frame_index - 1) as usize].data[..])
                 };
                 decompress_codec3(compressed, &mut buffer, seed)
                     .with_context(|| format!("decompressing frame {frame_index}"))?;
@@ -186,6 +201,7 @@ pub fn decode_bm(bytes: &[u8]) -> Result<BmFile> {
         image_count: metadata.image_count,
         width: metadata.width,
         height: metadata.height,
+        format: metadata.format,
         frames,
     })
 }
@@ -210,88 +226,90 @@ fn read_u8_from(stream: &mut &[u8]) -> Result<u8> {
     Ok(value)
 }
 
-fn decompress_codec3(mut compressed: &[u8], result: &mut [u8], seed: Option<&[u8]>) -> Result<()> {
+fn decompress_codec3(compressed: &[u8], result: &mut [u8], seed: Option<&[u8]>) -> Result<()> {
     ensure!(
         compressed.len() >= 2,
         "BM codec3 payload too small for bitstream initialiser"
     );
 
-    let mut bitstr_value = read_u16_from(&mut compressed)? as u32;
-    let mut bitstr_len = 16u32;
-    let mut byte_index: usize = 0;
-
     const WINDOW_SIZE: usize = 0x1000;
     let mut window = vec![0u8; WINDOW_SIZE + result.len()];
     if let Some(seed) = seed {
+        ensure!(
+            seed.len() == result.len(),
+            "codec3 seed length {} does not match target length {}",
+            seed.len(),
+            result.len()
+        );
+        window[WINDOW_SIZE..WINDOW_SIZE + result.len()].copy_from_slice(seed);
         let seed_tail = seed.len().min(WINDOW_SIZE);
         let start = WINDOW_SIZE - seed_tail;
         window[start..WINDOW_SIZE].copy_from_slice(&seed[seed.len() - seed_tail..]);
     }
+
+    let mut stream = compressed;
+    let mut bitstr_value = read_u16_from(&mut stream)? as u32;
+    let mut bitstr_len = 16u32;
+
+    let mut get_bit = |data: &mut &[u8]| -> Result<u32> {
+        let bit = bitstr_value & 1;
+        bitstr_len -= 1;
+        bitstr_value >>= 1;
+        if bitstr_len == 0 {
+            bitstr_value = read_u16_from(data)? as u32;
+            bitstr_len = 16;
+        }
+        Ok(bit)
+    };
+
     let mut write_pos = WINDOW_SIZE;
 
-    let read_bit =
-        |stream: &mut &[u8], bitstr_value: &mut u32, bitstr_len: &mut u32| -> Result<u32> {
-            if *bitstr_len == 0 {
-                *bitstr_value = read_u16_from(stream)? as u32;
-                *bitstr_len = 16;
-            }
-            let bit = *bitstr_value & 1;
-            *bitstr_value >>= 1;
-            *bitstr_len -= 1;
-            Ok(bit)
-        };
-
-    while byte_index < result.len() {
-        let bit = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)?;
+    while write_pos - WINDOW_SIZE < result.len() {
+        let bit = get_bit(&mut stream)?;
         if bit == 1 {
-            if byte_index >= result.len() {
-                break;
-            }
-            let value = read_u8_from(&mut compressed)?;
+            ensure!(
+                !stream.is_empty(),
+                "codec3 stream exhausted while reading literal"
+            );
+            let value = read_u8_from(&mut stream)?;
             window[write_pos] = value;
             write_pos += 1;
-            byte_index += 1;
             continue;
         }
 
-        let bit = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)?;
-        let (mut copy_len, copy_offset) = if bit == 0 {
-            let first = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)? as usize;
+        let bit = get_bit(&mut stream)?;
+        let (mut copy_len, copy_offset): (usize, isize) = if bit == 0 {
+            let first = get_bit(&mut stream)? as usize;
             let mut copy_len = first * 2;
-            let second = read_bit(&mut compressed, &mut bitstr_value, &mut bitstr_len)? as usize;
+            let second = get_bit(&mut stream)? as usize;
             copy_len += second + 3;
-            let offset_byte = read_u8_from(&mut compressed)? as i32;
-            (copy_len, offset_byte - 0x100)
+            let offset_byte = read_u8_from(&mut stream)? as i32;
+            (copy_len, offset_byte as isize - 0x100)
         } else {
-            let lower = read_u8_from(&mut compressed)? as i32;
-            let upper = read_u8_from(&mut compressed)? as i32;
+            let lower = read_u8_from(&mut stream)? as i32;
+            let upper = read_u8_from(&mut stream)? as i32;
             let copy_offset = (lower | ((upper & 0xF0) << 4)) - 0x1000;
             let mut copy_len = (upper & 0x0F) + 3;
             if copy_len == 3 {
-                copy_len = read_u8_from(&mut compressed)? as i32 + 1;
-                if copy_len == 1 {
-                    return Ok(());
+                let extended = read_u8_from(&mut stream)? as i32 + 1;
+                if extended == 1 {
+                    break;
                 }
+                copy_len = extended;
             }
-            (copy_len as usize, copy_offset)
+            (copy_len as usize, copy_offset as isize)
         };
 
-        while copy_len > 0 && byte_index < result.len() {
-            let src_index = write_pos as isize + copy_offset as isize;
+        while copy_len > 0 && write_pos - WINDOW_SIZE < result.len() {
+            let src_index = write_pos as isize + copy_offset;
             ensure!(
                 (0..write_pos as isize).contains(&src_index),
                 "codec3 copy source out of bounds: {src_index} (write_pos={write_pos}, copy_offset={copy_offset})"
             );
-
             let value = window[src_index as usize];
             window[write_pos] = value;
             write_pos += 1;
-            byte_index += 1;
             copy_len -= 1;
-        }
-
-        if byte_index >= result.len() {
-            break;
         }
     }
 
@@ -335,9 +353,52 @@ fn convert_rgba8888_le(data: &[u8]) -> Result<Vec<u8>> {
     Ok(rgba)
 }
 
+fn convert_zbuffer16_to_rgba8888(data: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        data.len() % 2 == 0,
+        "Z-buffer payload must be a multiple of 2 bytes"
+    );
+
+    let mut min_value = u16::MAX;
+    let mut max_value = u16::MIN;
+
+    for chunk in data.chunks_exact(2) {
+        let mut value = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if value == 0xF81F {
+            value = 0;
+        }
+        min_value = min_value.min(value);
+        max_value = max_value.max(value);
+    }
+
+    if min_value == u16::MAX && max_value == u16::MIN {
+        return Ok(vec![0u8; data.len() / 2 * 4]);
+    }
+
+    let range = max_value.saturating_sub(min_value);
+    let mut rgba = Vec::with_capacity(data.len() * 2);
+
+    for chunk in data.chunks_exact(2) {
+        let mut value = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if value == 0xF81F {
+            value = 0;
+        }
+        let normalized = if range == 0 {
+            0.0
+        } else {
+            (value.saturating_sub(min_value)) as f32 / range as f32
+        };
+        let gray = (normalized * 255.0).round().clamp(0.0, 255.0) as u8;
+        rgba.extend_from_slice(&[gray, gray, gray, 0xFF]);
+    }
+
+    Ok(rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::Path};
 
     #[test]
     fn decodes_minimal_raw_bitmap() {
@@ -346,6 +407,7 @@ mod tests {
         data[0..4].copy_from_slice(MAGIC_PRIMARY);
         data[4..8].copy_from_slice(MAGIC_SECONDARY);
         data[8..12].copy_from_slice(&0u32.to_le_bytes()); // codec 0
+        data[32..36].copy_from_slice(&1u32.to_le_bytes()); // format (color)
         data[16..20].copy_from_slice(&1u32.to_le_bytes()); // image count
         data[36..40].copy_from_slice(&16u32.to_le_bytes()); // bpp
         data[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&1u32.to_le_bytes()); // width
@@ -366,7 +428,85 @@ mod tests {
         assert_eq!(bm.bits_per_pixel, 16);
         assert_eq!(bm.image_count, 1);
         assert_eq!(bm.frames.len(), 1);
-        let rgba = bm.frames[0].as_rgba8888(bm.bits_per_pixel).unwrap();
+        let rgba = bm.frames[0].as_rgba8888(&bm.metadata()).unwrap();
         assert_eq!(rgba, vec![0xFF, 0x00, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn decodes_zbm_with_external_seed() {
+        let base_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_6_mnycu.bm");
+        let delta_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_6_mnycu.zbm");
+
+        let base_bytes = fs::read(&base_path).expect("read base bm");
+        let delta_bytes = fs::read(&delta_path).expect("read delta zbm");
+
+        let base_bm = decode_bm(&base_bytes).expect("decode base bm");
+        assert_eq!(base_bm.frames.len(), 1, "expected single frame base");
+        let base_frame = &base_bm.frames[0];
+
+        let delta_bm = decode_bm_with_seed(&delta_bytes, Some(&base_frame.data))
+            .expect("decode delta with seed");
+        assert_eq!(delta_bm.frames.len(), 1, "expected single frame delta");
+        let delta_frame = &delta_bm.frames[0];
+
+        assert_eq!(delta_bm.codec, 3, "expected codec3 delta");
+        assert_eq!(delta_bm.format, 5, "expected zbuffer format for delta");
+        assert_eq!(delta_bm.bits_per_pixel, base_bm.bits_per_pixel);
+        assert_eq!(delta_bm.width, base_bm.width);
+        assert_eq!(delta_bm.height, base_bm.height);
+        assert_eq!(delta_frame.data.len(), base_frame.data.len());
+
+        let checksum = seeded_frame_checksum(&delta_frame.data);
+        assert_eq!(checksum, 11_233_156_562_487_960_357);
+    }
+
+    #[test]
+    fn decodes_desk_delta_without_corruption() {
+        let base_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_0_ddtws.bm");
+        let delta_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_0_ddtws.zbm");
+
+        let base_bytes = fs::read(&base_path).expect("read base bm");
+        let delta_bytes = fs::read(&delta_path).expect("read delta zbm");
+
+        let base_bm = decode_bm(&base_bytes).expect("decode base bm");
+        let base_frame = base_bm.frames.first().expect("base frame present");
+
+        let candidates = [("none", None), ("base", Some(base_frame.data.as_slice()))];
+
+        for (label, seed) in candidates {
+            let delta_bm = decode_bm_with_seed(&delta_bytes, seed)
+                .unwrap_or_else(|err| panic!("decode delta with seed {label}: {err}"));
+            let delta_frame = delta_bm.frames.first().expect("delta frame present");
+
+            assert_eq!(delta_frame.data.len(), base_frame.data.len());
+            assert_eq!(delta_bm.format, 5, "expected Z-buffer format");
+            let checksum = seeded_frame_checksum(&delta_frame.data);
+            let diff_bytes = delta_frame
+                .data
+                .iter()
+                .zip(&base_frame.data)
+                .filter(|(lhs, rhs)| lhs != rhs)
+                .count();
+            println!(
+                "seed={label:>4} checksum={checksum} diff_bytes={diff_bytes}",
+                label = label,
+                checksum = checksum,
+                diff_bytes = diff_bytes
+            );
+            assert_eq!(checksum, 233_610_493_010_832_586_3u64);
+        }
+    }
+
+    fn seeded_frame_checksum(data: &[u8]) -> u64 {
+        let mut acc = 0xcbf29ce484222325u64; // FNV-1a offset basis
+        for byte in data {
+            acc ^= *byte as u64;
+            acc = acc.wrapping_mul(0x100000001b3);
+        }
+        acc
     }
 }
