@@ -7637,6 +7637,69 @@ mod tests {
         assert!(events.iter().any(|e| e == "menu_common.auto_freeze on"));
     }
 
+    fn install_menu_common_for_tests(lua: &Lua, context: Rc<RefCell<EngineContext>>) {
+        install_game_pauser(lua, context.clone()).expect("game pauser installed");
+        install_menu_common(lua, context).expect("menu_common installed");
+    }
+
+    #[test]
+    fn menu_common_show_and_hide_track_visibility() {
+        let lua = Lua::new();
+        let context = Rc::new(RefCell::new(make_context()));
+        install_menu_common_for_tests(&lua, context.clone());
+
+        let globals = lua.globals();
+        let menu: Table = globals.get("menu_common").expect("menu table");
+        assert!(!menu.get::<_, bool>("is_visible").unwrap_or(true));
+
+        let show: Function = menu.get("show").expect("show function");
+        show.call::<_, ()>((menu.clone(),)).expect("show executes");
+
+        {
+            let guard = context.borrow();
+            let state = guard.menus.get("menu_common").expect("state").borrow();
+            assert!(state.visible, "menu state should mark visible");
+        }
+        assert!(menu.get::<_, bool>("is_visible").unwrap_or(false));
+
+        let hide: Function = menu.get("hide").expect("hide function");
+        hide.call::<_, ()>((menu.clone(),)).expect("hide executes");
+
+        {
+            let guard = context.borrow();
+            {
+                let state = guard.menus.get("menu_common").expect("state").borrow();
+                assert!(!state.visible, "menu state should mark hidden");
+            }
+            assert!(guard.events.iter().any(|event| event == "menu_common.show"));
+            assert!(guard.events.iter().any(|event| event == "menu_common.hide"));
+        }
+        assert!(!menu.get::<_, bool>("is_visible").unwrap_or(true));
+    }
+
+    #[test]
+    fn menu_common_auto_freeze_toggles_game_pause() {
+        let lua = Lua::new();
+        let context = Rc::new(RefCell::new(make_context()));
+        install_menu_common_for_tests(&lua, context.clone());
+
+        let globals = lua.globals();
+        let menu: Table = globals.get("menu_common").expect("menu table");
+        let auto: Function = menu.get("auto_freeze").expect("auto_freeze");
+        auto.call::<_, ()>((menu.clone(), true)).expect("auto on");
+
+        let show: Function = menu.get("show").expect("show function");
+        show.call::<_, ()>((menu.clone(),)).expect("show executes");
+
+        let hide: Function = menu.get("hide").expect("hide function");
+        hide.call::<_, ()>((menu.clone(),)).expect("hide executes");
+
+        let events = &context.borrow().events;
+        assert!(events.iter().any(|e| e == "game_pauser.pause on"));
+        assert!(events.iter().any(|e| e == "game_pauser.pause off"));
+        assert!(events.iter().any(|e| e == "menu_common.auto_freeze on"));
+    }
+
     fn prepare_manny(ctx: &mut EngineContext, position: Vec3) {
         let (id, _handle) = ctx.register_actor_with_handle("Manny", Some(1001));
         ctx.put_actor_in_set(&id, "Manny", "mo.set");
