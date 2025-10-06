@@ -20,6 +20,9 @@ timeline markers, and track audio cues during development.
   iteration tight on the first-playable goal.
 - Highlights hotspots and dialogue triggers from the timeline JSON so scene
   setup drift is obvious.
+- Overlays Manny's path, hotspot events, and entity anchors directly on the plate using
+  color-coded discs (teal current frame, gold highlighted hotspot, green/blue props, red selection) so
+  you can correlate the minimap with the perspective view at a glance.
 - Watches live audio logs (when provided) to ensure cues fire when Manny uses
   the pneumatic tube, desk, or other milestone interactions.
 

@@ -5306,6 +5306,8 @@ const MARKER_SHADER_SOURCE: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
+    @location(1) local_pos: vec2<f32>,
+    @location(2) highlight: f32,
 };
 
 struct VertexIn {
@@ -5323,12 +5325,25 @@ fn vs_main(input: VertexIn) -> VertexOutput {
     var out: VertexOutput;
     out.position = vec4<f32>(position, 0.0, 1.0);
     out.color = input.color;
+    out.local_pos = input.base_pos;
+    out.highlight = input.highlight;
     return out;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(input.color, 0.9);
+    let radius = length(input.local_pos) * 1.41421356;
+    let inner = 1.0 - smoothstep(0.68, 1.0, radius);
+    let border_band = smoothstep(0.62, 0.94, radius) * (1.0 - smoothstep(0.94, 1.08, radius));
+    let glow = input.highlight;
+    let base_color = mix(input.color, vec3<f32>(1.0, 1.0, 1.0), glow * 0.35);
+    let rim_color = mix(vec3<f32>(0.18, 0.2, 0.23), vec3<f32>(1.0, 1.0, 0.85), glow);
+    let color = base_color * inner + rim_color * border_band;
+    let alpha = max(inner, border_band * 0.9);
+    if alpha < 0.03 {
+        discard;
+    }
+    return vec4<f32>(color, alpha);
 }
 "#;
 
