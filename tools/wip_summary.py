@@ -24,6 +24,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Codec3 decode harness now asserts seeded window behaviour and records Manny office depth ranges so tooling can flag regressions before captures drift.",
                 "Runtime regression harness now emits Manny office codec3 depth stats alongside movement/audio logs so downstream baselines stay aligned while timeline traces roll in.",
                 "Runtime regression harness now captures Manny's walk path and desk interaction into shared baselines under tools/tests; next focus shifts to threading timeline metadata through the same artefact.",
+                "Runtime regression harness now threads the boot timeline manifest into the hotspot baselines so overlay metadata travels with the movement/audio captures.",
             ],
         },
         {
@@ -38,10 +39,10 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Next Steps",
             "body": [
-                "Thread the timeline overlay data into the runtime regression baselines so stage changes, hotspot hits, and audio logs travel together for the hotspot run.",
                 "Surface overlay selection data during hotspot playback so Manny's first interaction run can assert both geometry and hook sequencing.",
                 "With the movement harness in place, demo entering Manny's office from boot with one interactive hotspot and capture the flow alongside the movement log in a reusable regression script.",
                 "Document the --depth-stats-json workflow and thread the artefact through regression docs so future snapshot comparisons add the new channel without guesswork.",
+                "Bundle the runtime event log into a structured artefact so hotspot playback timelines, stage transitions, and audio cues can be replayed together inside the viewer overlay.",
             ],
         },
         {

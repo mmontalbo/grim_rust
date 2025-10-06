@@ -14,6 +14,14 @@ the computer hotspot end-to-end.
 
 ## Running the demo
 
+First capture the boot timeline manifest so the overlay baseline stays current:
+
+```bash
+cargo run -p grim_engine -- --timeline-json tools/tests/manny_office_timeline.json
+```
+
+Then run the Lua runtime demo to record the hotspot artefacts:
+
 ```bash
 cargo run -p grim_engine -- --run-lua --hotspot-demo computer \
   --movement-demo --movement-log-json tools/tests/movement_log.json \
@@ -22,6 +30,8 @@ cargo run -p grim_engine -- --run-lua --hotspot-demo computer \
 
 Key flags:
 
+- `--timeline-json` writes the boot-stage manifest that powers the viewer's
+  timeline overlay and regression comparisons.
 - `--run-lua` switches the engine into runtime mode.
 - `--hotspot-demo computer` walks Manny to his desk and executes the scripted
   interaction.
@@ -43,6 +53,10 @@ want to share them with the regression harness.
   `SfxPlay`, `SfxStop`, `MusicPlay`, and `MusicStop` call that the runtime
   issued during the demo. The harness checks the captured sequence matches the
   recorded baseline exactly so unexpected audio diffs fail fast.
+- **Timeline manifest (`manny_office_timeline.json`)** – the boot-stage and
+  hook summary produced by `--timeline-json`; the regression harness keeps it
+  in lockstep with the hotspot artefacts so the viewer overlay reflects the
+  same snapshot.
 - **Stdout transcript** – includes `dialog.begin manny /moma112/` style markers
   and any geometry/debug events the Lua host recorded. Redirect it to a file if
   you need to diff runs across branches.

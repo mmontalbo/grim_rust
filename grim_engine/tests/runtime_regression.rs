@@ -61,6 +61,7 @@ fn manny_office_runtime_regression() -> Result<()> {
     let movement_path = temp_dir.path().join("movement_log.json");
     let audio_path = temp_dir.path().join("hotspot_audio.json");
     let depth_path = temp_dir.path().join("manny_office_depth_stats.json");
+    let timeline_path = temp_dir.path().join("manny_office_timeline.json");
 
     let movement_path_str = movement_path
         .to_str()
@@ -71,6 +72,27 @@ fn manny_office_runtime_regression() -> Result<()> {
     let depth_path_str = depth_path
         .to_str()
         .context("depth stats path is not valid UTF-8")?;
+    let timeline_path_str = timeline_path
+        .to_str()
+        .context("timeline path is not valid UTF-8")?;
+
+    let timeline_output = Command::new(env!("CARGO_BIN_EXE_grim_engine"))
+        .current_dir(&workspace_root)
+        .args(["--timeline-json", timeline_path_str])
+        .output()
+        .context("capturing Manny timeline manifest via grim_engine analysis run")?;
+    if !timeline_output.status.success() {
+        let mut transcript = String::from_utf8_lossy(&timeline_output.stdout).to_string();
+        transcript.push_str(&String::from_utf8_lossy(&timeline_output.stderr));
+        panic!(
+            "grim_engine timeline capture exited with {:?}: {}",
+            timeline_output.status, transcript
+        );
+    }
+    assert!(
+        timeline_path.is_file(),
+        "grim_engine did not produce a timeline manifest"
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_grim_engine"))
         .current_dir(&workspace_root)
@@ -200,6 +222,15 @@ fn manny_office_runtime_regression() -> Result<()> {
         "depth stats diverged from baseline"
     );
 
+    let expected_timeline =
+        read_timeline_manifest(workspace_root.join("tools/tests/manny_office_timeline.json"))?;
+    let actual_timeline = read_timeline_manifest(&timeline_path)?;
+
+    assert_eq!(
+        actual_timeline, expected_timeline,
+        "timeline manifest diverged from baseline"
+    );
+
     Ok(())
 }
 
@@ -227,6 +258,15 @@ fn read_depth_stats(path: impl AsRef<Path>) -> Result<Value> {
         .with_context(|| format!("reading depth stats from {}", path_ref.display()))?;
     let value: Value = serde_json::from_str(&data)
         .with_context(|| format!("parsing depth stats from {}", path_ref.display()))?;
+    Ok(value)
+}
+
+fn read_timeline_manifest(path: impl AsRef<Path>) -> Result<Value> {
+    let path_ref = path.as_ref();
+    let data = fs::read_to_string(path_ref)
+        .with_context(|| format!("reading timeline manifest from {}", path_ref.display()))?;
+    let value: Value = serde_json::from_str(&data)
+        .with_context(|| format!("parsing timeline manifest from {}", path_ref.display()))?;
     Ok(value)
 }
 
