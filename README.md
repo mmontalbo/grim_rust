@@ -7,8 +7,8 @@ behaviour in Rust step by step.
 
 ## Repository Layout
 - `docs/startup_overview.md` – notes on the retail boot/new-game flow.
-- `extracted/` – decompiled Lua scripts and supporting metadata pulled from
-  `DATA000.LAB` / `IMAGES.LAB` for inspection.
+- `extracted/` – generated Lua/script dumps copied from a local install (see
+  *Preparing Assets* below).
 - `dev-install/` – optional reference copy of the shipping game; useful for
   comparing behaviour but no longer managed by scripts in this repo.
 - `grim_analysis/` – Rust crate that parses the decompiled Lua, normalises
@@ -25,6 +25,26 @@ Python, ripgrep, etc.):
 ```bash
 nix-shell
 ```
+
+## Preparing Assets
+The repository no longer checks in retail game data. Point the environment
+variable `GRIM_INSTALL_PATH` at your Grim Fandango Remastered install and run:
+
+```bash
+tools/sync_assets.sh
+```
+
+The helper locates `DATA000.LAB`, `IMAGES.LAB`, and other archives, then uses
+`grim_formats::lab_extract` to populate `extracted/`. Pass a custom destination
+as the first argument or forward additional `lab_extract` flags after `--`, for
+example to restrict extraction to a manifest of filenames:
+
+```bash
+tools/sync_assets.sh extracted -- --manifest path/to/asset_manifest.txt
+```
+
+Once populated, the rest of the tooling (analysis, host runtime, viewer) reads
+from `extracted/DATA000` by default.
 
 If you still keep a local install of the retail game around for comparison, set
 `GRIM_INSTALL_PATH` before launching `nix-shell`; the shell will echo the path

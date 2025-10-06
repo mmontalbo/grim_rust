@@ -1,4 +1,5 @@
 dev-install/
+extracted/
 Saves/
 *.log
 .DS_Store
