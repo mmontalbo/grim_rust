@@ -43,6 +43,13 @@ WIP_DATA: Dict[str, Any] = {
                 "Lock in regression coverage for codec3 colour + depth paths and the Manny hotspot/movement smoke tests so the scene stays stable once playable.",
             ],
         },
+        {
+            "title": "Commit Conventions",
+            "body": [
+                "Format commits as: <area>: <short change summary> on the first line, then blank line, followed by 'Why:' and 'What:' bullet blocks summarising intent and implementation.",
+                "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
+            ],
+        },
     ],
     "workstreams": [
         {
