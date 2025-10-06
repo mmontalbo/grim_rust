@@ -438,6 +438,17 @@ impl HotspotOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EngineRunSummary {
+    events: Vec<String>,
+}
+
+impl EngineRunSummary {
+    pub fn events(&self) -> &[String] {
+        &self.events
+    }
+}
+
 #[derive(Serialize)]
 struct MovementSample {
     frame: u32,
@@ -3284,7 +3295,7 @@ pub fn run_boot_sequence(
     audio_callback: Option<Rc<dyn AudioCallback>>,
     movement: Option<MovementOptions>,
     hotspot: Option<HotspotOptions>,
-) -> Result<()> {
+) -> Result<EngineRunSummary> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
             .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
@@ -3341,6 +3352,7 @@ pub fn run_boot_sequence(
 
     let snapshot = context.borrow();
     dump_runtime_summary(&snapshot);
+    let events = snapshot.events.clone();
     if let Some(path) = geometry_json {
         let snapshot_data = snapshot.geometry_snapshot();
         let json = serde_json::to_string_pretty(&snapshot_data)
@@ -3349,7 +3361,7 @@ pub fn run_boot_sequence(
             .with_context(|| format!("writing Lua geometry snapshot to {}", path.display()))?;
         println!("Saved Lua geometry snapshot to {}", path.display());
     }
-    Ok(())
+    Ok(EngineRunSummary { events })
 }
 
 fn simulate_movement(

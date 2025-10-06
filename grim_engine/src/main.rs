@@ -49,6 +49,19 @@ struct SchedulerManifest<'a> {
     movies: &'a [MovieEvent],
 }
 
+#[derive(Serialize)]
+struct HotspotEventLogEntry {
+    sequence: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame: Option<u32>,
+    label: String,
+}
+
+#[derive(Serialize)]
+struct HotspotEventLog {
+    events: Vec<HotspotEventLogEntry>,
+}
+
 /// Minimal host prototype that leans on the shared analysis layer.
 #[derive(Parser, Debug)]
 #[command(
@@ -116,6 +129,10 @@ struct Args {
     #[arg(long)]
     audio_log_json: Option<PathBuf>,
 
+    /// Path to write the hotspot event log emitted by the Lua runtime (requires --run-lua)
+    #[arg(long)]
+    event_log_json: Option<PathBuf>,
+
     /// Run the built-in Manny movement demo after boot (requires --run-lua)
     #[arg(long)]
     movement_demo: bool,
@@ -139,6 +156,15 @@ fn main() -> Result<()> {
         bail!("--hotspot-demo requires --run-lua");
     }
 
+    if !args.run_lua {
+        if let Some(path) = args.event_log_json.as_ref() {
+            eprintln!(
+                "[grim_engine] warning: --event-log-json={} ignored without --run-lua",
+                path.display()
+            );
+        }
+    }
+
     if args.run_lua {
         if args.verify_geometry {
             bail!("--verify-geometry cannot be combined with --run-lua");
@@ -158,6 +184,12 @@ fn main() -> Result<()> {
         if let Some(path) = args.audio_log_json.as_ref() {
             eprintln!(
                 "[grim_engine] info: capturing audio events to {}",
+                path.display()
+            );
+        }
+        if let Some(path) = args.event_log_json.as_ref() {
+            eprintln!(
+                "[grim_engine] info: capturing hotspot events to {}",
                 path.display()
             );
         }
@@ -191,7 +223,7 @@ fn main() -> Result<()> {
             .lab_root
             .clone()
             .unwrap_or_else(|| PathBuf::from("dev-install"));
-        run_boot_sequence(
+        let run_summary = run_boot_sequence(
             &args.data_root,
             args.lab_root.as_deref(),
             args.verbose,
@@ -200,6 +232,15 @@ fn main() -> Result<()> {
             movement,
             hotspot,
         )?;
+
+        if let Some(path) = args.event_log_json.as_ref() {
+            let log = build_hotspot_event_log(run_summary.events());
+            let json = serde_json::to_string_pretty(&log)
+                .context("serializing hotspot event log to JSON")?;
+            fs::write(path, &json)
+                .with_context(|| format!("writing hotspot event log to {}", path.display()))?;
+            println!("Saved hotspot event log to {}", path.display());
+        }
 
         if let (Some(path), Some(recorder)) = (args.audio_log_json.as_ref(), audio_recorder) {
             let events = recorder.events();
@@ -271,7 +312,7 @@ fn main() -> Result<()> {
             None => (temp_snapshot_path(), true),
         };
 
-        run_boot_sequence(
+        let _ = run_boot_sequence(
             &args.data_root,
             args.lab_root.as_deref(),
             args.verbose,
@@ -881,7 +922,7 @@ mod tests {
         let engine_state = &fixture.1;
 
         let snapshot_file = NamedTempFile::new()?;
-        super::lua_host::run_boot_sequence(
+        let _ = super::lua_host::run_boot_sequence(
             &data_root,
             Some(lab_root.as_path()),
             false,
@@ -1156,4 +1197,75 @@ fn temp_snapshot_path() -> PathBuf {
         std::process::id()
     ));
     path
+}
+
+fn build_hotspot_event_log(events: &[String]) -> HotspotEventLog {
+    const RELEVANT_ACTOR_PREFIXES: &[&str] = &[
+        "head_target",
+        "head_rate",
+        "ignore_boxes",
+        "at_interest",
+        "enter",
+        "chore",
+        "walk_chore",
+        "push_costume",
+        "pop_costume",
+        "base_costume",
+        "costume",
+    ];
+
+    let mut filtered: Vec<HotspotEventLogEntry> = Vec::new();
+    let mut last_frame: Option<u32> = None;
+    let mut last_emitted: Option<String> = None;
+
+    for (index, entry) in events.iter().enumerate() {
+        let line = entry.trim();
+        if let Some(frame) = parse_movement_frame(line) {
+            last_frame = Some(frame);
+            continue;
+        }
+
+        if !is_relevant_event(line, RELEVANT_ACTOR_PREFIXES) {
+            continue;
+        }
+
+        if last_emitted.as_deref() == Some(line) {
+            continue;
+        }
+
+        filtered.push(HotspotEventLogEntry {
+            sequence: index as u32,
+            frame: last_frame,
+            label: line.to_string(),
+        });
+        last_emitted = Some(line.to_string());
+    }
+
+    HotspotEventLog { events: filtered }
+}
+
+fn parse_movement_frame(line: &str) -> Option<u32> {
+    let remainder = line.strip_prefix("movement.frame ")?;
+    let mut parts = remainder.split_whitespace();
+    let frame_str = parts.next()?;
+    frame_str.parse().ok()
+}
+
+fn is_relevant_event(line: &str, actor_prefixes: &[&str]) -> bool {
+    if line.starts_with("hotspot.") {
+        return true;
+    }
+
+    if line.starts_with("actor.manny.") {
+        let suffix = &line["actor.manny.".len()..];
+        return actor_prefixes
+            .iter()
+            .any(|prefix| suffix.starts_with(prefix));
+    }
+
+    if line.starts_with("dialog.") {
+        return true;
+    }
+
+    false
 }
