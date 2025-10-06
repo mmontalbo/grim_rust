@@ -34,17 +34,15 @@ state we need to validate the first playable milestone.
   engine changes.
 
 ## Regression Harnesses
-- `cargo test -p grim_engine -- movement_demo_matches_fixture` boots the Lua
-  host, records a fresh movement log, and verifies it matches
-  `tests/fixtures/movement_demo_log.json`. Refresh the fixture with
-  `cargo run -p grim_engine -- --run-lua --movement-demo --movement-log-json \
-  grim_engine/tests/fixtures/movement_demo_log.json` whenever the intended walk
-  path changes (document the reasoning in the commit that updates it).
-- `cargo test -p grim_engine -- hotspot_demo_emits_keyboard_audio` exercises the
-  computer hotspot demo and asserts that the expected typing cues are emitted.
-  You can invoke it manually with `cargo run -p grim_engine -- --run-lua
-  --hotspot-demo computer --audio-log-json hotspot_audio.json` to review the
-  captured audio trace.
+- `cargo test -p grim_engine -- runtime_regression` boots the Lua host, records
+  the Manny movement demo, and runs the computer hotspot interaction. The test
+  compares the freshly captured artefacts against the committed baselines in
+  `tools/tests/`. Refresh them via
+  `cargo run -p grim_engine -- --run-lua --movement-demo \
+  --movement-log-json tools/tests/movement_log.json \
+  --hotspot-demo computer --audio-log-json tools/tests/hotspot_audio.json`
+  whenever the intended walk path or audio sequence changes (identify the
+  rationale in the commit message when updating the snapshots).
 
 ## Extending the Crate
 - When adding Lua bindings, mirror ScummVM's semantics and document any gaps so

@@ -37,25 +37,27 @@ want to share them with the regression harness.
 ## Inspecting artefacts
 
 - **Movement log (`movement_log.json`)** – an array of `{frame, position,
-  yaw, sector}` samples that the movement regression test ingests.
+  yaw, sector}` samples that the runtime regression harness compares against
+  the committed baseline.
 - **Audio log (`hotspot_audio.json`)** – a list of objects describing each
   `SfxPlay`, `SfxStop`, `MusicPlay`, and `MusicStop` call that the runtime
-  issued during the demo.
+  issued during the demo. The harness checks the captured sequence matches the
+  recorded baseline exactly so unexpected audio diffs fail fast.
 - **Stdout transcript** – includes `dialog.begin manny /moma112/` style markers
   and any geometry/debug events the Lua host recorded. Redirect it to a file if
   you need to diff runs across branches.
 
 ## Hooking into the regression harness
 
-`grim_engine/tests/hotspot_demo.rs` exercises the same CLI path. Updating the
+`grim_engine/tests/runtime_regression.rs` exercises the same CLI path while
+asserting that fresh captures match the checked-in artefacts. Updating the
 files above gives you a quick manual smoke test; running
 
 ```bash
-cargo test -p grim_engine -- hotspot_demo
+cargo test -p grim_engine -- runtime_regression
 ```
 
-verifies that the automated check still sees the typed dialogue and keyboard
-SFX cues. When you extend the demo (for example, to cover another hotspot),
-re-run the command and update the test expectations together so future
-contributors can rely on the regression.
-
+verifies that the automated check still sees the typed dialogue, keyboard SFX
+sequence, and Manny's walk path. When you extend the demo (for example, to
+cover another hotspot), re-run the command and update the baselines together so
+future contributors can rely on the regression.

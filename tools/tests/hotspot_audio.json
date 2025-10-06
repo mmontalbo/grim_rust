@@ -1,0 +1,66 @@
+[
+  {
+    "kind": "sfx_play",
+    "cue": "keyboard.imu",
+    "params": [
+      "group=1"
+    ],
+    "handle": "sfx_0000"
+  },
+  {
+    "kind": "sfx_stop",
+    "target": "keyboard.imu"
+  },
+  {
+    "kind": "sfx_play",
+    "cue": "txtScrl3.WAV",
+    "params": [
+      "group=1"
+    ],
+    "handle": "sfx_0001"
+  },
+  {
+    "kind": "sfx_play",
+    "cue": "txtScrl2.WAV",
+    "params": [
+      "group=1"
+    ],
+    "handle": "sfx_0002"
+  },
+  {
+    "kind": "sfx_play",
+    "cue": "compbeep.wav",
+    "params": [
+      "group=1"
+    ],
+    "handle": "sfx_0003"
+  },
+  {
+    "kind": "sfx_play",
+    "cue": "keyboard.imu",
+    "params": [
+      "group=1"
+    ],
+    "handle": "sfx_0004"
+  },
+  {
+    "kind": "sfx_play",
+    "cue": "txtScrl3.WAV",
+    "params": [
+      "group=1"
+    ],
+    "handle": "sfx_0005"
+  },
+  {
+    "kind": "sfx_play",
+    "cue": "txtScrl2.WAV",
+    "params": [
+      "group=1"
+    ],
+    "handle": "sfx_0006"
+  },
+  {
+    "kind": "sfx_stop",
+    "target": "keyboard.imu"
+  }
+]

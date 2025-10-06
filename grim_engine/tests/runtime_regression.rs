@@ -14,8 +14,28 @@ struct MovementSample {
     sector: Option<String>,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AudioEvent {
+    MusicPlay {
+        cue: String,
+        params: Vec<String>,
+    },
+    MusicStop {
+        mode: Option<String>,
+    },
+    SfxPlay {
+        cue: String,
+        params: Vec<String>,
+        handle: String,
+    },
+    SfxStop {
+        target: Option<String>,
+    },
+}
+
 #[test]
-fn movement_demo_matches_fixture() -> Result<()> {
+fn manny_office_runtime_regression() -> Result<()> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
@@ -36,41 +56,75 @@ fn movement_demo_matches_fixture() -> Result<()> {
         lab_root.display()
     );
 
-    let temp_dir = tempdir().context("creating temporary directory for movement log")?;
-    let log_path = temp_dir.path().join("movement_log.json");
-    let log_path_str = log_path
+    let temp_dir = tempdir().context("creating temporary directory for regression artefacts")?;
+    let movement_path = temp_dir.path().join("movement_log.json");
+    let audio_path = temp_dir.path().join("hotspot_audio.json");
+
+    let movement_path_str = movement_path
         .to_str()
         .context("movement log path is not valid UTF-8")?;
+    let audio_path_str = audio_path
+        .to_str()
+        .context("audio log path is not valid UTF-8")?;
 
-    let status = Command::new(env!("CARGO_BIN_EXE_grim_engine"))
+    let output = Command::new(env!("CARGO_BIN_EXE_grim_engine"))
         .current_dir(&workspace_root)
         .args([
             "--run-lua",
             "--movement-demo",
             "--movement-log-json",
-            log_path_str,
+            movement_path_str,
+            "--hotspot-demo",
+            "computer",
+            "--audio-log-json",
+            audio_path_str,
         ])
-        .status()
-        .context("executing grim_engine movement demo")?;
+        .output()
+        .context("executing grim_engine runtime regression harness")?;
 
-    assert!(status.success(), "grim_engine exited with {status:?}");
     assert!(
-        log_path.is_file(),
+        output.status.success(),
+        "grim_engine exited with {:?}",
+        output.status
+    );
+    assert!(
+        movement_path.is_file(),
         "grim_engine did not produce a movement log"
     );
-
-    let expected = read_samples(manifest_dir.join("tests/fixtures/movement_demo_log.json"))?;
-    let actual = read_samples(&log_path)?;
-
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "movement sample count changed (expected {}, got {})",
-        expected.len(),
-        actual.len()
+    assert!(
+        audio_path.is_file(),
+        "grim_engine did not produce an audio log"
     );
 
-    for (idx, (exp, act)) in expected.iter().zip(actual.iter()).enumerate() {
+    let mut transcript = String::from_utf8_lossy(&output.stdout).to_string();
+    transcript.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        transcript.contains("hotspot.demo.start computer"),
+        "hotspot start marker missing from output: {transcript}"
+    );
+    assert!(
+        transcript.contains("hotspot.demo.end computer"),
+        "hotspot end marker missing from output: {transcript}"
+    );
+    assert!(
+        transcript.contains("dialog.begin manny /moma112/"),
+        "computer dialogue missing from output: {transcript}"
+    );
+
+    let expected_movement =
+        read_movement(workspace_root.join("tools/tests/movement_log.json"))?;
+    let actual_movement = read_movement(&movement_path)?;
+
+    assert_eq!(
+        actual_movement.len(),
+        expected_movement.len(),
+        "movement sample count changed (expected {}, got {})",
+        expected_movement.len(),
+        actual_movement.len()
+    );
+
+    for (idx, (exp, act)) in expected_movement.iter().zip(actual_movement.iter()).enumerate() {
         assert_eq!(
             act.frame, exp.frame,
             "frame mismatch at index {idx} (expected {}, got {})",
@@ -115,16 +169,33 @@ fn movement_demo_matches_fixture() -> Result<()> {
         }
     }
 
+    let expected_audio = read_audio(workspace_root.join("tools/tests/hotspot_audio.json"))?;
+    let actual_audio = read_audio(&audio_path)?;
+
+    assert_eq!(
+        actual_audio, expected_audio,
+        "audio events diverged from baseline"
+    );
+
     Ok(())
 }
 
-fn read_samples(path: impl AsRef<Path>) -> Result<Vec<MovementSample>> {
+fn read_movement(path: impl AsRef<Path>) -> Result<Vec<MovementSample>> {
     let path_ref = path.as_ref();
     let data = fs::read_to_string(path_ref)
         .with_context(|| format!("reading movement log from {}", path_ref.display()))?;
     let samples: Vec<MovementSample> = serde_json::from_str(&data)
         .with_context(|| format!("parsing movement log from {}", path_ref.display()))?;
     Ok(samples)
+}
+
+fn read_audio(path: impl AsRef<Path>) -> Result<Vec<AudioEvent>> {
+    let path_ref = path.as_ref();
+    let data = fs::read_to_string(path_ref)
+        .with_context(|| format!("reading audio log from {}", path_ref.display()))?;
+    let events: Vec<AudioEvent> = serde_json::from_str(&data)
+        .with_context(|| format!("parsing audio log from {}", path_ref.display()))?;
+    Ok(events)
 }
 
 fn approx(expected: f32, actual: f32, tolerance: f32) -> bool {
