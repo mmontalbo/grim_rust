@@ -35,6 +35,18 @@ enum AudioEvent {
     },
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct HotspotEventLog {
+    events: Vec<HotspotEventLogEntry>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct HotspotEventLogEntry {
+    sequence: u32,
+    frame: Option<u32>,
+    label: String,
+}
+
 #[test]
 fn manny_office_runtime_regression() -> Result<()> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -62,6 +74,7 @@ fn manny_office_runtime_regression() -> Result<()> {
     let audio_path = temp_dir.path().join("hotspot_audio.json");
     let depth_path = temp_dir.path().join("manny_office_depth_stats.json");
     let timeline_path = temp_dir.path().join("manny_office_timeline.json");
+    let event_log_path = temp_dir.path().join("hotspot_events.json");
 
     let movement_path_str = movement_path
         .to_str()
@@ -75,6 +88,9 @@ fn manny_office_runtime_regression() -> Result<()> {
     let timeline_path_str = timeline_path
         .to_str()
         .context("timeline path is not valid UTF-8")?;
+    let event_log_path_str = event_log_path
+        .to_str()
+        .context("event log path is not valid UTF-8")?;
 
     let timeline_output = Command::new(env!("CARGO_BIN_EXE_grim_engine"))
         .current_dir(&workspace_root)
@@ -107,6 +123,8 @@ fn manny_office_runtime_regression() -> Result<()> {
             audio_path_str,
             "--depth-stats-json",
             depth_path_str,
+            "--event-log-json",
+            event_log_path_str,
         ])
         .output()
         .context("executing grim_engine runtime regression harness")?;
@@ -127,6 +145,10 @@ fn manny_office_runtime_regression() -> Result<()> {
     assert!(
         depth_path.is_file(),
         "grim_engine did not produce a depth stats artefact"
+    );
+    assert!(
+        event_log_path.is_file(),
+        "grim_engine did not produce an event log artefact"
     );
 
     let mut transcript = String::from_utf8_lossy(&output.stdout).to_string();
@@ -231,6 +253,14 @@ fn manny_office_runtime_regression() -> Result<()> {
         "timeline manifest diverged from baseline"
     );
 
+    let expected_event_log = read_event_log(workspace_root.join("tools/tests/hotspot_events.json"))?;
+    let actual_event_log = read_event_log(&event_log_path)?;
+
+    assert_eq!(
+        actual_event_log, expected_event_log,
+        "event log diverged from baseline"
+    );
+
     Ok(())
 }
 
@@ -268,6 +298,15 @@ fn read_timeline_manifest(path: impl AsRef<Path>) -> Result<Value> {
     let value: Value = serde_json::from_str(&data)
         .with_context(|| format!("parsing timeline manifest from {}", path_ref.display()))?;
     Ok(value)
+}
+
+fn read_event_log(path: impl AsRef<Path>) -> Result<HotspotEventLog> {
+    let path_ref = path.as_ref();
+    let data = fs::read_to_string(path_ref)
+        .with_context(|| format!("reading event log from {}", path_ref.display()))?;
+    let log: HotspotEventLog = serde_json::from_str(&data)
+        .with_context(|| format!("parsing event log from {}", path_ref.display()))?;
+    Ok(log)
 }
 
 fn approx(expected: f32, actual: f32, tolerance: f32) -> bool {
