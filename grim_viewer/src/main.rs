@@ -59,6 +59,10 @@ struct Args {
     #[arg(long)]
     audio_log: Option<PathBuf>,
 
+    /// When set, overlay Manny's movement trace captured via --movement-log-json
+    #[arg(long)]
+    movement_log: Option<PathBuf>,
+
     /// When set, write the decoded bitmap to disk (PNG) before launching the viewer
     #[arg(long)]
     dump_frame: Option<PathBuf>,
@@ -178,6 +182,153 @@ impl AudioLogWatcher {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct MovementSample {
+    frame: u32,
+    position: [f32; 3],
+    #[serde(default)]
+    yaw: Option<f32>,
+    #[serde(default)]
+    sector: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MovementTrace {
+    samples: Vec<MovementSample>,
+    first_frame: u32,
+    last_frame: u32,
+    total_distance: f32,
+    yaw_min: Option<f32>,
+    yaw_max: Option<f32>,
+    sector_counts: BTreeMap<String, u32>,
+    bounds: SceneBounds,
+}
+
+impl MovementTrace {
+    fn from_samples(mut samples: Vec<MovementSample>) -> Result<Self> {
+        ensure!(!samples.is_empty(), "movement trace is empty");
+        samples.sort_by(|a, b| a.frame.cmp(&b.frame));
+
+        let first_frame = samples.first().map(|sample| sample.frame).unwrap_or(0);
+        let last_frame = samples
+            .last()
+            .map(|sample| sample.frame)
+            .unwrap_or(first_frame);
+
+        let mut bounds = SceneBounds {
+            min: samples[0].position,
+            max: samples[0].position,
+        };
+        let mut total_distance = 0.0_f32;
+        let mut previous = samples.first().map(|sample| sample.position);
+        let mut yaw_min = None;
+        let mut yaw_max = None;
+        let mut sector_counts: BTreeMap<String, u32> = BTreeMap::new();
+
+        for sample in &samples {
+            bounds.update(sample.position);
+            if let Some(prev) = previous {
+                total_distance += distance(prev, sample.position);
+            }
+            previous = Some(sample.position);
+
+            if let Some(yaw) = sample.yaw {
+                yaw_min = Some(yaw_min.map_or(yaw, |current: f32| current.min(yaw)));
+                yaw_max = Some(yaw_max.map_or(yaw, |current: f32| current.max(yaw)));
+            }
+
+            if let Some(sector) = sample.sector.as_ref() {
+                *sector_counts.entry(sector.clone()).or_default() += 1;
+            }
+        }
+
+        Ok(Self {
+            samples,
+            first_frame,
+            last_frame,
+            total_distance,
+            yaw_min,
+            yaw_max,
+            sector_counts,
+            bounds,
+        })
+    }
+
+    fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    fn yaw_range(&self) -> Option<(f32, f32)> {
+        match (self.yaw_min, self.yaw_max) {
+            (Some(min), Some(max)) => Some((min, max)),
+            _ => None,
+        }
+    }
+
+    fn dominant_sectors(&self, limit: usize) -> Vec<(&str, u32)> {
+        let mut sectors: Vec<(&str, u32)> = self
+            .sector_counts
+            .iter()
+            .map(|(name, count)| (name.as_str(), *count))
+            .collect();
+        sectors.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        sectors.truncate(limit);
+        sectors
+    }
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+
+    #[test]
+    fn movement_trace_summarises_samples() {
+        let samples = vec![
+            MovementSample {
+                frame: 3,
+                position: [1.0, 0.0, 0.0],
+                yaw: Some(0.3),
+                sector: Some("b".to_string()),
+            },
+            MovementSample {
+                frame: 2,
+                position: [0.0, 0.0, 0.0],
+                yaw: Some(0.1),
+                sector: Some("a".to_string()),
+            },
+            MovementSample {
+                frame: 4,
+                position: [1.0, 1.0, 0.0],
+                yaw: None,
+                sector: Some("a".to_string()),
+            },
+        ];
+
+        let trace = MovementTrace::from_samples(samples).expect("trace");
+
+        assert_eq!(trace.sample_count(), 3);
+        assert_eq!(trace.first_frame, 2);
+        assert_eq!(trace.last_frame, 4);
+        assert!((trace.total_distance - 2.0).abs() < 1e-6);
+        assert_eq!(trace.yaw_range(), Some((0.1, 0.3)));
+
+        let sectors = trace.dominant_sectors(3);
+        assert_eq!(sectors.len(), 2);
+        assert_eq!(sectors[0], ("a", 2));
+        assert_eq!(sectors[1], ("b", 1));
+
+        assert!((trace.bounds.min[0] - 0.0).abs() < 1e-6);
+        assert!((trace.bounds.max[1] - 1.0).abs() < 1e-6);
+    }
+}
+
 fn audio_overlay_lines(status: &AudioStatus) -> Vec<String> {
     if !status.seen_events {
         return Vec::new();
@@ -240,7 +391,7 @@ fn timeline_overlay_lines(
     };
 
     let selected_entity = selected_index.and_then(|idx| scene.entities.get(idx));
-    if selected_entity.is_none() && summary.hooks.is_empty() {
+    if selected_entity.is_none() && summary.hooks.is_empty() && scene.movement_trace().is_none() {
         return Vec::new();
     }
 
@@ -261,6 +412,51 @@ fn timeline_overlay_lines(
         } else if let Some(label) = entity.timeline_stage_label.as_deref() {
             lines.push(truncate_line(&format!("  Stage -- {label}"), MAX_LINE));
         }
+
+        let mut detail_lines: Vec<String> = Vec::new();
+        if let Some(position) = entity.position {
+            detail_lines.push(format!(
+                "  pos: ({:.3}, {:.3}, {:.3})",
+                position[0], position[1], position[2]
+            ));
+        }
+        if let Some(rotation) = entity.rotation {
+            detail_lines.push(format!(
+                "  rot: ({:.3}, {:.3}, {:.3})",
+                rotation[0], rotation[1], rotation[2]
+            ));
+        }
+        if let Some(target) = entity.facing_target.as_deref() {
+            if !target.is_empty() {
+                detail_lines.push(format!("  facing: {target}"));
+            }
+        }
+        if let Some(control) = entity.head_control.as_deref() {
+            if !control.is_empty() {
+                detail_lines.push(format!("  head control: {control}"));
+            }
+        }
+        if let Some(rate) = entity.head_look_rate {
+            detail_lines.push(format!("  head rate: {:.3}", rate));
+        }
+
+        if entity.last_played.is_some()
+            || entity.last_looping.is_some()
+            || entity.last_completed.is_some()
+        {
+            let played = entity.last_played.as_deref().unwrap_or("-");
+            let looping = entity.last_looping.as_deref().unwrap_or("-");
+            let completed = entity.last_completed.as_deref().unwrap_or("-");
+            detail_lines.push(format!(
+                "  chore: played={} looping={} completed={}",
+                played, looping, completed
+            ));
+        }
+
+        for line in detail_lines {
+            lines.push(truncate_line(&line, MAX_LINE));
+        }
+
         if let Some(created) = entity.created_by.as_ref() {
             lines.push(truncate_line(&format!("  Hook {created}"), MAX_LINE));
         }
@@ -366,6 +562,64 @@ fn timeline_overlay_lines(
             };
             let stage_line = format!("{marker} {:02} {}", stage.index, stage.label);
             lines.push(truncate_line(&stage_line, MAX_LINE));
+        }
+    }
+
+    if let Some(trace) = scene.movement_trace() {
+        lines.push(String::new());
+        lines.push("Movement Trace".to_string());
+
+        lines.push(truncate_line(
+            &format!(
+                "  samples: {} (frames {}–{})",
+                trace.sample_count(),
+                trace.first_frame,
+                trace.last_frame
+            ),
+            MAX_LINE,
+        ));
+        lines.push(truncate_line(
+            &format!("  distance: {:.3}", trace.total_distance),
+            MAX_LINE,
+        ));
+        if let Some((min_yaw, max_yaw)) = trace.yaw_range() {
+            lines.push(truncate_line(
+                &format!("  yaw: {:.3} → {:.3}", min_yaw, max_yaw),
+                MAX_LINE,
+            ));
+        }
+        if let Some(first) = trace.samples.first() {
+            let sector = first.sector.as_deref().unwrap_or("-");
+            lines.push(truncate_line(
+                &format!(
+                    "  start: ({:.3}, {:.3}, {:.3}) {}",
+                    first.position[0], first.position[1], first.position[2], sector
+                ),
+                MAX_LINE,
+            ));
+        }
+        if let Some(last) = trace.samples.last() {
+            let sector = last.sector.as_deref().unwrap_or("-");
+            let yaw_label = last
+                .yaw
+                .map(|value| format!(" yaw {:.3}", value))
+                .unwrap_or_default();
+            lines.push(truncate_line(
+                &format!(
+                    "  end: ({:.3}, {:.3}, {:.3}) {}{}",
+                    last.position[0], last.position[1], last.position[2], sector, yaw_label
+                ),
+                MAX_LINE,
+            ));
+        }
+        let sectors = trace.dominant_sectors(3);
+        if !sectors.is_empty() {
+            let summary = sectors
+                .iter()
+                .map(|(name, count)| format!("{}×{}", count, name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(truncate_line(&format!("  sectors: {summary}"), MAX_LINE));
         }
     }
 
@@ -626,10 +880,21 @@ fn main() -> Result<()> {
         validate_render_diff(diff, args.render_diff_threshold)?;
     }
 
+    let mut movement_trace = match args.movement_log.as_ref() {
+        Some(path) => Some(
+            load_movement_trace(path)
+                .with_context(|| format!("loading movement log {}", path.display()))?,
+        ),
+        None => None,
+    };
+
     let scene_data = match args.timeline.as_ref() {
         Some(path) => {
-            let scene = load_scene_from_timeline(path)
+            let mut scene = load_scene_from_timeline(path)
                 .with_context(|| format!("loading timeline manifest {}", path.display()))?;
+            if let Some(trace) = movement_trace.take() {
+                scene.attach_movement_trace(trace);
+            }
             Some(scene)
         }
         None => None,
@@ -655,7 +920,37 @@ fn main() -> Result<()> {
                 "Markers overlay: green/blue squares mark entities; red highlights the current selection."
             );
         }
+        if let Some(trace) = scene.movement_trace() {
+            println!(
+                "Movement trace: {} samples (frames {}–{}), distance {:.3}",
+                trace.sample_count(),
+                trace.first_frame,
+                trace.last_frame,
+                trace.total_distance
+            );
+            let sectors = trace.dominant_sectors(3);
+            if !sectors.is_empty() {
+                let preview: Vec<String> = sectors
+                    .iter()
+                    .map(|(name, count)| format!("{}×{}", count, name))
+                    .collect();
+                println!("  sectors: {}", preview.join(", "));
+            }
+            if let Some((min_yaw, max_yaw)) = trace.yaw_range() {
+                println!("  yaw range: {:.3} – {:.3}", min_yaw, max_yaw);
+            }
+            println!("  Overlay markers: teal = spawn, violet = path, orange = hotspot finish.");
+        }
         println!();
+    }
+
+    if let Some(trace) = movement_trace.take() {
+        println!(
+            "Movement trace loaded without timeline overlay: {} samples (frames {}–{})",
+            trace.sample_count(),
+            trace.first_frame,
+            trace.last_frame
+        );
     }
 
     let audio_log_path = args.audio_log.clone();
@@ -806,6 +1101,22 @@ struct ViewerScene {
     entities: Vec<SceneEntity>,
     position_bounds: Option<SceneBounds>,
     timeline: Option<TimelineSummary>,
+    movement: Option<MovementTrace>,
+}
+
+impl ViewerScene {
+    fn attach_movement_trace(&mut self, trace: MovementTrace) {
+        if let Some(bounds) = self.position_bounds.as_mut() {
+            bounds.include_bounds(&trace.bounds);
+        } else {
+            self.position_bounds = Some(trace.bounds.clone());
+        }
+        self.movement = Some(trace);
+    }
+
+    fn movement_trace(&self) -> Option<&MovementTrace> {
+        self.movement.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -849,6 +1160,8 @@ struct SceneEntityBuilder {
     position: Option<[f32; 3]>,
     rotation: Option<[f32; 3]>,
     facing_target: Option<String>,
+    head_control: Option<String>,
+    head_look_rate: Option<f32>,
     last_played: Option<String>,
     last_looping: Option<String>,
     last_completed: Option<String>,
@@ -867,6 +1180,8 @@ impl SceneEntityBuilder {
             position: None,
             rotation: None,
             facing_target: None,
+            head_control: None,
+            head_look_rate: None,
             last_played: None,
             last_looping: None,
             last_completed: None,
@@ -905,6 +1220,20 @@ impl SceneEntityBuilder {
                 .map(str::to_string)
             {
                 self.facing_target = Some(facing);
+            }
+            if let Some(control) = transform
+                .get("head_control")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            {
+                self.head_control = Some(control);
+            }
+            if let Some(rate) = transform
+                .get("head_look_rate")
+                .and_then(|v| v.as_f64())
+                .map(|value| value as f32)
+            {
+                self.head_look_rate = Some(rate);
             }
         }
 
@@ -969,6 +1298,44 @@ impl SceneEntityBuilder {
                     }
                 }
             }
+            "head_look_at" | "head_look_at_named" => {
+                if let Some(target) = args.first() {
+                    let trimmed = target.trim();
+                    if !trimmed.is_empty() {
+                        self.head_control = Some(format!("look_at {trimmed}"));
+                    }
+                }
+            }
+            "head_look_at_point" => {
+                if args.len() >= 3 {
+                    self.head_control = Some(format!(
+                        "look_at_point ({}, {}, {})",
+                        args[0], args[1], args[2]
+                    ));
+                }
+            }
+            "set_head" => {
+                if args.is_empty() {
+                    self.head_control = Some("set_head".to_string());
+                } else {
+                    self.head_control = Some(format!("set_head {}", args.join(", ")));
+                }
+            }
+            "set_look_rate" => {
+                if let Some(value) = args.first().and_then(|arg| arg.parse::<f32>().ok()) {
+                    self.head_look_rate = Some(value);
+                }
+            }
+            "enable_head_control" => {
+                let state_label = args
+                    .first()
+                    .map(|value| format!("enable {value}"))
+                    .unwrap_or_else(|| "enable".to_string());
+                self.head_control = Some(state_label);
+            }
+            "disable_head_control" => {
+                self.head_control = Some("disable".to_string());
+            }
             "play_chore" => {
                 if let Some(name) = args.first() {
                     self.last_played = Some(name.clone());
@@ -1002,6 +1369,8 @@ impl SceneEntityBuilder {
             position: self.position,
             rotation: self.rotation,
             facing_target: self.facing_target,
+            head_control: self.head_control,
+            head_look_rate: self.head_look_rate,
             last_played: self.last_played,
             last_looping: self.last_looping,
             last_completed: self.last_completed,
@@ -1037,6 +1406,8 @@ struct SceneEntity {
     position: Option<[f32; 3]>,
     rotation: Option<[f32; 3]>,
     facing_target: Option<String>,
+    head_control: Option<String>,
+    head_look_rate: Option<f32>,
     last_played: Option<String>,
     last_looping: Option<String>,
     last_completed: Option<String>,
@@ -1065,7 +1436,7 @@ impl SceneEntity {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SceneBounds {
     min: [f32; 3],
     max: [f32; 3],
@@ -1077,6 +1448,11 @@ impl SceneBounds {
             self.min[axis] = self.min[axis].min(position[axis]);
             self.max[axis] = self.max[axis].max(position[axis]);
         }
+    }
+
+    fn include_bounds(&mut self, other: &SceneBounds) {
+        self.update(other.min);
+        self.update(other.max);
     }
 }
 
@@ -1211,7 +1587,17 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
         entities,
         position_bounds: bounds,
         timeline: timeline_summary,
+        movement: None,
     })
+}
+
+fn load_movement_trace(path: &Path) -> Result<MovementTrace> {
+    let data =
+        fs::read(path).with_context(|| format!("reading movement log {}", path.display()))?;
+    let samples: Vec<MovementSample> = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing movement log {}", path.display()))?;
+    MovementTrace::from_samples(samples)
+        .with_context(|| format!("summarising movement trace from {}", path.display()))
 }
 
 fn format_hook_reference(reference: &HookReference) -> String {
@@ -2312,6 +2698,12 @@ impl ViewerState {
                 if let Some(target) = &entity.facing_target {
                     println!("    facing target: {target}");
                 }
+                if let Some(control) = &entity.head_control {
+                    println!("    head control: {control}");
+                }
+                if let Some(rate) = entity.head_look_rate {
+                    println!("    head look rate: {rate:.3}");
+                }
                 if entity.last_played.is_some()
                     || entity.last_looping.is_some()
                     || entity.last_completed.is_some()
@@ -2323,6 +2715,19 @@ impl ViewerState {
                         "    chore state: played={}, looping={}, completed={}",
                         played, looping, completed
                     );
+                }
+                if entity.name.eq_ignore_ascii_case("manny") {
+                    if let Some(scene) = self.scene.as_ref() {
+                        if let Some(trace) = scene.movement_trace() {
+                            println!(
+                                "    movement: {} samples (frames {}-{}) distance {:.3}",
+                                trace.sample_count(),
+                                trace.first_frame,
+                                trace.last_frame,
+                                trace.total_distance
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2344,6 +2749,54 @@ impl ViewerState {
         let width = (bounds.max[0] - bounds.min[0]).max(0.001);
         let depth = (bounds.max[2] - bounds.min[2]).max(0.001);
         let selected = self.selected_entity;
+
+        if let Some(trace) = scene.movement_trace() {
+            if !trace.samples.is_empty() {
+                let limit = 96_usize;
+                let step = (trace.samples.len().max(limit) / limit).max(1);
+                let path_color = [0.78, 0.58, 0.95];
+                let start_color = [0.32, 0.74, 0.86];
+                let end_color = [0.95, 0.55, 0.42];
+                let path_size = 0.032;
+                let start_size = 0.044;
+                let end_size = 0.045;
+
+                let mut push_marker = |position: [f32; 3], size: f32, color: [f32; 3]| {
+                    let norm_x = (position[0] - bounds.min[0]) / width;
+                    let norm_z = (position[2] - bounds.min[2]) / depth;
+                    if !norm_x.is_finite() || !norm_z.is_finite() {
+                        return;
+                    }
+                    let ndc_x = norm_x.clamp(0.0, 1.0) * 2.0 - 1.0;
+                    let ndc_y = 1.0 - norm_z.clamp(0.0, 1.0) * 2.0;
+                    instances.push(MarkerInstance {
+                        translate: [ndc_x, ndc_y],
+                        size,
+                        highlight: 0.0,
+                        color,
+                        _padding: 0.0,
+                    });
+                };
+
+                if let Some(first) = trace.samples.first() {
+                    push_marker(first.position, start_size, start_color);
+                }
+
+                let len = trace.samples.len();
+                for (idx, sample) in trace.samples.iter().enumerate().step_by(step) {
+                    if idx == 0 || idx + 1 == len {
+                        continue;
+                    }
+                    push_marker(sample.position, path_size, path_color);
+                }
+
+                if trace.samples.len() > 1 {
+                    if let Some(last) = trace.samples.last() {
+                        push_marker(last.position, end_size, end_color);
+                    }
+                }
+            }
+        }
 
         for (idx, entity) in scene.entities.iter().enumerate() {
             let position = match entity.position {

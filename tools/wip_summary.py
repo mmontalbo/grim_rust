@@ -28,7 +28,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Current Focus",
             "body": [
                 "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth) current so cargo test -p grim_engine -- runtime_regression remains green.",
-                "Feed hotspot/movement traces into the viewer overlay work so geometry and head-targeting issues stay debuggable from a single run.",
+                "Layer hotspot event logs onto the new movement overlay so geometry and head-targeting issues stay debuggable from a single run.",
                 "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
             ],
         },
@@ -61,7 +61,7 @@ WIP_DATA: Dict[str, Any] = {
             "slug": "hotspot_overlay",
             "title": "Hotspot overlay integration",
             "description": "Surface hotspot traces in viewer",
-            "prompt": "Objective: feed the Manny computer hotspot movement and timeline traces into grim_viewer overlays so geometry/head-targeting debugging stays aligned with the runtime captures.",
+            "prompt": "Objective: build on the movement overlay by wiring hotspot/timeline selections into grim_viewer so geometry/head-targeting debugging stays aligned with the runtime captures.",
         },
         {
             "slug": "codec3_regression",
