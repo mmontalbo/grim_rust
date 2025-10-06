@@ -1252,6 +1252,17 @@ fn parse_movement_frame(line: &str) -> Option<u32> {
 }
 
 fn is_relevant_event(line: &str, actor_prefixes: &[&str]) -> bool {
+    if line.starts_with("set.setup.make")
+        || line.starts_with("set.setup.get")
+        || line.starts_with("set.switch")
+    {
+        return true;
+    }
+
+    if line.starts_with("actor.select") {
+        return true;
+    }
+
     if line.starts_with("hotspot.") {
         return true;
     }
