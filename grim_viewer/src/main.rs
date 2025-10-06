@@ -1851,6 +1851,18 @@ impl SceneEntityKind {
     }
 }
 
+fn entity_palette(kind: SceneEntityKind, is_selected: bool) -> MarkerPalette {
+    if is_selected {
+        ENTITY_SELECTED_PALETTE
+    } else {
+        match kind {
+            SceneEntityKind::Actor => ENTITY_ACTOR_PALETTE,
+            SceneEntityKind::Object => ENTITY_OBJECT_PALETTE,
+            SceneEntityKind::InterestActor => ENTITY_INTEREST_PALETTE,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SceneEntityKey {
     kind: SceneEntityKind,
@@ -2171,19 +2183,31 @@ fn is_manny_office(set_variable_name: Option<&str>, set_display_name: Option<&st
             .unwrap_or(false)
 }
 
+fn manny_office_entity_names(set_prefix: &str) -> Vec<String> {
+    let prefix = if set_prefix.is_empty() {
+        "mo"
+    } else {
+        set_prefix
+    };
+    let mut names = vec!["manny".to_string()];
+    for suffix in [
+        "cards",
+        "cards.interest_actor",
+        "computer",
+        "tube",
+        "tube.interest_actor",
+    ] {
+        names.push(format!("{prefix}.{suffix}"));
+    }
+    names
+}
+
 fn prune_manny_office_entities(
     entities: Vec<SceneEntity>,
     set_variable_name: Option<&str>,
 ) -> Vec<SceneEntity> {
     let set_prefix = set_variable_name.unwrap_or("mo");
-    let allowed = vec![
-        "manny".to_string(),
-        format!("{set_prefix}.cards"),
-        format!("{set_prefix}.cards.interest_actor"),
-        format!("{set_prefix}.computer"),
-        format!("{set_prefix}.tube"),
-        format!("{set_prefix}.tube.interest_actor"),
-    ];
+    let allowed = manny_office_entity_names(set_prefix);
 
     entities
         .into_iter()
@@ -2198,9 +2222,34 @@ fn prune_manny_office_entities(
 #[cfg(test)]
 mod entity_filter_tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn make_entity(kind: SceneEntityKind, name: &str) -> SceneEntity {
         SceneEntityBuilder::new(kind, name.to_string()).build()
+    }
+
+    #[test]
+    fn manny_office_allowlist_matches_trimmed_entities() {
+        let expected = vec![
+            "manny".to_string(),
+            "mo.cards".to_string(),
+            "mo.cards.interest_actor".to_string(),
+            "mo.computer".to_string(),
+            "mo.tube".to_string(),
+            "mo.tube.interest_actor".to_string(),
+        ];
+        assert_eq!(manny_office_entity_names("mo"), expected);
+        assert_eq!(manny_office_entity_names(""), expected);
+
+        let mut with_custom_prefix = expected.clone();
+        for name in with_custom_prefix.iter_mut().skip(1) {
+            *name = name.replace("mo", "custom");
+        }
+        assert_eq!(
+            manny_office_entity_names("custom"),
+            with_custom_prefix,
+            "allowlist should respect provided prefix"
+        );
     }
 
     #[test]
@@ -2235,6 +2284,11 @@ mod entity_filter_tests {
                 "mo.tube.interest_actor",
             ]
         );
+
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
+        let expected: BTreeSet<String> = manny_office_entity_names("mo").into_iter().collect();
+        let expected_refs: BTreeSet<&str> = expected.iter().map(|s| s.as_str()).collect();
+        assert_eq!(unique, expected_refs);
     }
 
     #[test]
@@ -2407,6 +2461,41 @@ struct MarkerInstance {
     color: [f32; 3],
     _padding: f32,
 }
+
+#[derive(Clone, Copy)]
+struct MarkerPalette {
+    color: [f32; 3],
+    highlight: f32,
+}
+
+const MANNY_ANCHOR_PALETTE: MarkerPalette = MarkerPalette {
+    color: [0.2, 0.95, 0.85],
+    highlight: 1.0,
+};
+const DESK_ANCHOR_PALETTE: MarkerPalette = MarkerPalette {
+    color: [0.28, 0.82, 0.52],
+    highlight: 0.45,
+};
+const TUBE_ANCHOR_PALETTE: MarkerPalette = MarkerPalette {
+    color: [0.98, 0.74, 0.28],
+    highlight: 0.65,
+};
+const ENTITY_SELECTED_PALETTE: MarkerPalette = MarkerPalette {
+    color: [0.95, 0.35, 0.25],
+    highlight: 1.0,
+};
+const ENTITY_ACTOR_PALETTE: MarkerPalette = MarkerPalette {
+    color: [0.2, 0.85, 0.6],
+    highlight: 0.0,
+};
+const ENTITY_OBJECT_PALETTE: MarkerPalette = MarkerPalette {
+    color: [0.25, 0.6, 0.95],
+    highlight: 0.0,
+};
+const ENTITY_INTEREST_PALETTE: MarkerPalette = MarkerPalette {
+    color: [0.85, 0.7, 0.25],
+    highlight: 0.0,
+};
 
 const MARKER_VERTICES: [MarkerVertex; 6] = [
     MarkerVertex {
@@ -2623,6 +2712,44 @@ mod minimap_tests {
             top_panel < bottom_panel,
             "minimap panel should preserve top-down vertical orientation"
         );
+    }
+}
+
+#[cfg(test)]
+mod marker_palette_tests {
+    use super::*;
+
+    #[test]
+    fn entity_palettes_match_expected_colours() {
+        let actor = entity_palette(SceneEntityKind::Actor, false);
+        assert_eq!(actor.color, ENTITY_ACTOR_PALETTE.color);
+        assert_eq!(actor.highlight, 0.0);
+
+        let object = entity_palette(SceneEntityKind::Object, false);
+        assert_eq!(object.color, ENTITY_OBJECT_PALETTE.color);
+        assert_eq!(object.highlight, 0.0);
+
+        let interest = entity_palette(SceneEntityKind::InterestActor, false);
+        assert_eq!(interest.color, ENTITY_INTEREST_PALETTE.color);
+        assert_eq!(interest.highlight, 0.0);
+    }
+
+    #[test]
+    fn selected_palette_overrides_colour_and_highlight() {
+        let selected = entity_palette(SceneEntityKind::Actor, true);
+        assert_eq!(selected.color, ENTITY_SELECTED_PALETTE.color);
+        assert_eq!(selected.highlight, ENTITY_SELECTED_PALETTE.highlight);
+    }
+
+    #[test]
+    fn anchor_palettes_remain_in_sync() {
+        assert_eq!(DESK_ANCHOR_PALETTE.highlight, 0.45);
+        assert_eq!(TUBE_ANCHOR_PALETTE.highlight, 0.65);
+        assert_eq!(MANNY_ANCHOR_PALETTE.highlight, 1.0);
+
+        assert_eq!(DESK_ANCHOR_PALETTE.color, [0.28, 0.82, 0.52]);
+        assert_eq!(TUBE_ANCHOR_PALETTE.color, [0.98, 0.74, 0.28]);
+        assert_eq!(MANNY_ANCHOR_PALETTE.color, [0.2, 0.95, 0.85]);
     }
 }
 
@@ -4338,7 +4465,8 @@ impl ViewerState {
         let manny_anchor = scrub_position.or(desk_position);
 
         if let Some(position) = desk_position {
-            push_marker(position, 0.075, [0.28, 0.82, 0.52], 0.45);
+            let palette = DESK_ANCHOR_PALETTE;
+            push_marker(position, 0.075, palette.color, palette.highlight);
         }
 
         let tube_anchor = scene
@@ -4347,11 +4475,13 @@ impl ViewerState {
             .or(tube_hint_position);
 
         if let Some(position) = tube_anchor {
-            push_marker(position, 0.085, [0.98, 0.74, 0.28], 0.65);
+            let palette = TUBE_ANCHOR_PALETTE;
+            push_marker(position, 0.085, palette.color, palette.highlight);
         }
 
         if let Some(position) = manny_anchor {
-            push_marker(position, 0.1, [0.2, 0.95, 0.85], 1.0);
+            let palette = MANNY_ANCHOR_PALETTE;
+            push_marker(position, 0.1, palette.color, palette.highlight);
         }
 
         for (idx, entity) in scene.entities.iter().enumerate() {
@@ -4371,16 +4501,9 @@ impl ViewerState {
             } else {
                 base_size
             };
-            let color = if is_selected {
-                [0.95, 0.35, 0.25]
-            } else {
-                match entity.kind {
-                    SceneEntityKind::Actor => [0.2, 0.85, 0.6],
-                    SceneEntityKind::Object => [0.25, 0.6, 0.95],
-                    SceneEntityKind::InterestActor => [0.85, 0.7, 0.25],
-                }
-            };
-            let highlight = if is_selected { 1.0 } else { 0.0 };
+            let palette = entity_palette(entity.kind, is_selected);
+            let color = palette.color;
+            let highlight = palette.highlight;
             push_marker(position, size, color, highlight);
         }
 
@@ -4492,7 +4615,13 @@ impl ViewerState {
         let manny_anchor = scrub_position.or(desk_position);
 
         if let Some(position) = desk_position {
-            push_marker(position, scale_size(0.058), [0.32, 0.82, 0.52], 0.4);
+            let palette = DESK_ANCHOR_PALETTE;
+            push_marker(
+                position,
+                scale_size(0.058),
+                palette.color,
+                palette.highlight,
+            );
         }
 
         let tube_anchor = scene
@@ -4501,11 +4630,18 @@ impl ViewerState {
             .or(tube_hint_position);
 
         if let Some(position) = tube_anchor {
-            push_marker(position, scale_size(0.064), [0.98, 0.74, 0.28], 0.6);
+            let palette = TUBE_ANCHOR_PALETTE;
+            push_marker(
+                position,
+                scale_size(0.064),
+                palette.color,
+                palette.highlight,
+            );
         }
 
         if let Some(position) = manny_anchor {
-            push_marker(position, scale_size(0.07), [0.2, 0.95, 0.85], 1.0);
+            let palette = MANNY_ANCHOR_PALETTE;
+            push_marker(position, scale_size(0.07), palette.color, palette.highlight);
         }
 
         let selected = self.selected_entity;
@@ -4526,16 +4662,9 @@ impl ViewerState {
             } else {
                 scale_size(base_size)
             };
-            let color = if is_selected {
-                [0.95, 0.35, 0.25]
-            } else {
-                match entity.kind {
-                    SceneEntityKind::Actor => [0.25, 0.85, 0.62],
-                    SceneEntityKind::Object => [0.3, 0.65, 0.98],
-                    SceneEntityKind::InterestActor => [0.88, 0.74, 0.32],
-                }
-            };
-            let highlight = if is_selected { 1.0 } else { 0.0 };
+            let palette = entity_palette(entity.kind, is_selected);
+            let color = palette.color;
+            let highlight = palette.highlight;
             push_marker(position, size, color, highlight);
         }
 
