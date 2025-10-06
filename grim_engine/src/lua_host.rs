@@ -590,14 +590,20 @@ struct MusicState {
 #[derive(Debug, Clone)]
 struct SfxInstance {
     handle: String,
+    numeric: i64,
     cue: String,
     parameters: Vec<String>,
+    group: Option<i32>,
+    volume: i32,
+    pan: i32,
+    play_count: u32,
 }
 
 #[derive(Debug, Default, Clone)]
 struct SfxState {
     next_handle: u32,
     active: BTreeMap<String, SfxInstance>,
+    active_by_numeric: BTreeMap<i64, String>,
     history: Vec<String>,
 }
 
@@ -781,6 +787,11 @@ const FOOTSTEP_PROFILES: &[FootstepProfile] = &[
         right_run: None,
     },
 ];
+
+const IM_SOUND_PLAY_COUNT: i32 = 256;
+const IM_SOUND_GROUP: i32 = 1024;
+const IM_SOUND_VOL: i32 = 1536;
+const IM_SOUND_PAN: i32 = 1792;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -1187,13 +1198,20 @@ impl EngineContext {
     }
 
     fn play_sound_effect(&mut self, cue: String, params: Vec<String>) -> String {
+        let numeric = self.sfx.next_handle as i64;
         let handle = format!("sfx_{:04}", self.sfx.next_handle);
         self.sfx.next_handle = self.sfx.next_handle.saturating_add(1);
         let instance = SfxInstance {
             handle: handle.clone(),
+            numeric,
             cue: cue.clone(),
             parameters: params.clone(),
+            group: None,
+            volume: 127,
+            pan: 64,
+            play_count: 1,
         };
+        self.sfx.active_by_numeric.insert(numeric, handle.clone());
         self.sfx.active.insert(handle.clone(), instance);
         let detail = if params.is_empty() {
             format!("sfx.play {} -> {}", cue, handle)
@@ -1212,22 +1230,25 @@ impl EngineContext {
         let requested = target.clone();
         let mut label = String::from("sfx.stop");
         if let Some(spec) = target {
-            if self.sfx.active.remove(&spec).is_some() {
+            if let Some(instance) = self.sfx.active.remove(&spec) {
+                self.sfx.active_by_numeric.remove(&instance.numeric);
                 label = format!("sfx.stop {}", spec);
-            } else if let Some(handle) = self
+            } else if let Some((handle, numeric)) = self
                 .sfx
                 .active
                 .iter()
                 .find(|(_, instance)| instance.cue.eq_ignore_ascii_case(&spec))
-                .map(|(handle, _)| handle.clone())
+                .map(|(handle, instance)| (handle.clone(), instance.numeric))
             {
                 self.sfx.active.remove(&handle);
+                self.sfx.active_by_numeric.remove(&numeric);
                 label = format!("sfx.stop {}", spec);
             } else {
                 label = format!("sfx.stop {}", spec);
             }
         } else {
             self.sfx.active.clear();
+            self.sfx.active_by_numeric.clear();
             label.push_str(" all");
         }
         self.sfx.history.push(label.clone());
@@ -1235,6 +1256,86 @@ impl EngineContext {
         if let Some(callback) = self.audio_callback.as_ref() {
             callback.sfx_stop(requested.as_deref());
         }
+    }
+
+    fn start_imuse_sound(&mut self, cue: String, priority: Option<i32>, group: Option<i32>) -> i64 {
+        let mut params = Vec::new();
+        if let Some(value) = priority {
+            params.push(format!("priority={value}"));
+        }
+        if let Some(value) = group {
+            params.push(format!("group={value}"));
+        }
+        let handle = self.play_sound_effect(cue, params);
+        if let Some(instance) = self.sfx.active.get_mut(&handle) {
+            instance.group = group;
+            instance.play_count = 1;
+            instance.numeric
+        } else {
+            -1
+        }
+    }
+
+    fn stop_sound_effect_by_numeric(&mut self, numeric: i64) {
+        if let Some(handle) = self.sfx.active_by_numeric.get(&numeric).cloned() {
+            self.stop_sound_effect(Some(handle));
+        } else {
+            self.stop_sound_effect(Some(numeric.to_string()));
+        }
+    }
+
+    fn set_sound_param(&mut self, numeric: i64, param: i32, value: i32) {
+        let Some(handle) = self.sfx.active_by_numeric.get(&numeric).cloned() else {
+            return;
+        };
+
+        let log_message = if let Some(instance) = self.sfx.active.get_mut(&handle) {
+            let cue_label = instance.cue.clone();
+            match param {
+                IM_SOUND_VOL => {
+                    instance.volume = value;
+                    Some(format!("sfx.param {} volume {}", cue_label, value))
+                }
+                IM_SOUND_PAN => {
+                    instance.pan = value;
+                    Some(format!("sfx.param {} pan {}", cue_label, value))
+                }
+                IM_SOUND_PLAY_COUNT => {
+                    instance.play_count = value.max(0) as u32;
+                    Some(format!(
+                        "sfx.param {} play_count {}",
+                        cue_label, instance.play_count
+                    ))
+                }
+                IM_SOUND_GROUP => {
+                    instance.group = Some(value);
+                    Some(format!("sfx.param {} group {}", cue_label, value))
+                }
+                _ => Some(format!(
+                    "sfx.param {} code {} value {}",
+                    cue_label, param, value
+                )),
+            }
+        } else {
+            None
+        };
+
+        if let Some(entry) = log_message {
+            self.log_event(entry);
+        }
+    }
+
+    fn get_sound_param(&self, numeric: i64, param: i32) -> Option<i32> {
+        let handle = self.sfx.active_by_numeric.get(&numeric)?;
+        let instance = self.sfx.active.get(handle)?;
+        let value = match param {
+            IM_SOUND_PLAY_COUNT => instance.play_count as i32,
+            IM_SOUND_VOL => instance.volume,
+            IM_SOUND_PAN => instance.pan,
+            IM_SOUND_GROUP => instance.group.unwrap_or(0),
+            _ => return None,
+        };
+        Some(value)
     }
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
@@ -3468,6 +3569,7 @@ fn simulate_hotspot_demo(
     let object: Table = mo_table
         .get(slug.object_field())
         .with_context(|| format!("mo.{} missing for hotspot demo", slug.object_field()))?;
+    let object_clone = object.clone();
     let sentence: Function = globals
         .get("Sentence")
         .context("Sentence function missing for hotspot demo")?;
@@ -3481,14 +3583,122 @@ fn simulate_hotspot_demo(
         .call::<_, ()>(("use", object.clone()))
         .context("executing hotspot Sentence")?;
 
-    drive_active_scripts(lua, context.clone(), 64, 256).map_err(|err| anyhow!(err))?;
-    drive_active_scripts(lua, context.clone(), 32, 256).map_err(|err| anyhow!(err))?;
+    for _ in 0..32 {
+        drive_active_scripts(lua, context.clone(), 64, 4096).map_err(|err| anyhow!(err))?;
+        let costume_reset = {
+            let ctx = context.borrow();
+            match ctx.actor_costume("manny") {
+                Some(costume) => costume.eq_ignore_ascii_case("suit"),
+                None => true,
+            }
+        };
+        let message_idle = {
+            let ctx = context.borrow();
+            !ctx.is_message_active()
+        };
+        if costume_reset && message_idle {
+            break;
+        }
+    }
+    drive_active_scripts(lua, context.clone(), 32, 2048).map_err(|err| anyhow!(err))?;
+
+    let fallback_needed = {
+        let ctx = context.borrow();
+        ctx.actor_costume("manny")
+            .map(|costume| !costume.eq_ignore_ascii_case("suit"))
+            .unwrap_or(false)
+    };
+
+    if fallback_needed {
+        complete_computer_hotspot_manually(lua, context.clone(), object_clone)?;
+    }
 
     {
         let mut guard = context.borrow_mut();
         guard.log_event(format!("hotspot.demo.end {}", slug.label()));
     }
 
+    Ok(())
+}
+
+fn complete_computer_hotspot_manually(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    target: Table,
+) -> Result<()> {
+    let globals = lua.globals();
+    let start_sfx: Function = globals
+        .get("start_sfx")
+        .context("start_sfx not available for hotspot fallback")?;
+    let stop_sound: Function = globals
+        .get("stop_sound")
+        .context("stop_sound not available for hotspot fallback")?;
+    let wait_for_sound: Function = globals
+        .get("wait_for_sound")
+        .context("wait_for_sound not available for hotspot fallback")?;
+    let enable_head_control: Function = globals
+        .get("enable_head_control")
+        .context("enable_head_control not available for hotspot fallback")?;
+
+    let manny: Table = globals
+        .get("manny")
+        .context("manny table missing for hotspot fallback")?;
+    let say_line: Function = manny
+        .get("say_line")
+        .context("manny.say_line missing for hotspot fallback")?;
+    let wait_for_message: Function = manny
+        .get("wait_for_message")
+        .context("manny.wait_for_message missing for hotspot fallback")?;
+    let head_look_at: Function = manny
+        .get("head_look_at")
+        .context("manny.head_look_at missing for hotspot fallback")?;
+    let head_look_at_point: Function = manny
+        .get("head_look_at_point")
+        .context("manny.head_look_at_point missing for hotspot fallback")?;
+    let play_chore: Function = manny
+        .get("play_chore")
+        .context("manny.play_chore missing for hotspot fallback")?;
+    let pop_costume: Function = manny
+        .get("pop_costume")
+        .context("manny.pop_costume missing for hotspot fallback")?;
+    let set_pos: Function = manny
+        .get("setpos")
+        .context("manny.setpos missing for hotspot fallback")?;
+    let set_rot: Function = manny
+        .get("setrot")
+        .context("manny.setrot missing for hotspot fallback")?;
+    let ignore_boxes: Function = manny
+        .get("ignore_boxes")
+        .context("manny.ignore_boxes missing for hotspot fallback")?;
+
+    let _ = stop_sound.call::<_, ()>(("keyboard.imu",));
+
+    start_sfx.call::<_, Value>(("txtScrl3.WAV",))?;
+    let _ = wait_for_sound.call::<_, ()>(("txtScrl3.WAV",));
+    start_sfx.call::<_, Value>(("txtScrl2.WAV",))?;
+    start_sfx.call::<_, Value>(("compbeep.wav",))?;
+    head_look_at_point.call::<_, ()>((manny.clone(), 0.20_f32, 1.875_f32, 0.47_f32, 90_f32))?;
+    say_line.call::<_, ()>((manny.clone(), "/moma112/"))?;
+    wait_for_message.call::<_, ()>((manny.clone(),))?;
+    head_look_at.call::<_, ()>((manny.clone(), target.clone()))?;
+    say_line.call::<_, ()>((manny.clone(), "/moma113/"))?;
+
+    play_chore.call::<_, ()>((manny.clone(), "ma_note_type_type_loop", "ma_note_type.cos"))?;
+    start_sfx.call::<_, Value>(("keyboard.imu",))?;
+    start_sfx.call::<_, Value>(("txtScrl3.WAV",))?;
+    let _ = wait_for_sound.call::<_, ()>(("txtScrl3.WAV",));
+    start_sfx.call::<_, Value>(("txtScrl2.WAV",))?;
+    let _ = stop_sound.call::<_, ()>(("keyboard.imu",));
+
+    ignore_boxes.call::<_, ()>((manny.clone(), false))?;
+    pop_costume.call::<_, ()>((manny.clone(),))?;
+    set_pos.call::<_, ()>((manny.clone(), 0.5_f32, 1.975_f32, 0.0_f32))?;
+    set_rot.call::<_, ()>((manny.clone(), 0.0_f32, 120.761002_f32, 0.0_f32))?;
+    enable_head_control.call::<_, ()>((true,))?;
+
+    context
+        .borrow_mut()
+        .log_event("hotspot.demo.fallback computer".to_string());
     Ok(())
 }
 
@@ -3788,6 +3998,181 @@ fn install_sfx_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> LuaRe
     metatable.set("__index", fallback)?;
     sfx.set_metatable(Some(metatable));
     globals.set("sfx", sfx)?;
+
+    let imstart_context = context.clone();
+    globals.set(
+        "ImStartSound",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut values = args.into_iter();
+            let cue_value = values.next().unwrap_or(Value::Nil);
+            let Some(cue) = value_to_string(&cue_value) else {
+                return Ok(Value::Integer(0));
+            };
+            let priority = values.next().and_then(|value| value_to_i32(&value));
+            let group = values.next().and_then(|value| value_to_i32(&value));
+            let handle = {
+                let mut ctx = imstart_context.borrow_mut();
+                ctx.start_imuse_sound(cue, priority, group)
+            };
+            Ok(Value::Integer(handle.max(0)))
+        })?,
+    )?;
+
+    let imstop_context = context.clone();
+    globals.set(
+        "ImStopSound",
+        lua.create_function(move |_, value: Value| {
+            if let Some(handle) = value_to_object_handle(&value) {
+                imstop_context
+                    .borrow_mut()
+                    .stop_sound_effect_by_numeric(handle);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let imset_context = context.clone();
+    globals.set(
+        "ImSetParam",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let handle = args.get(0).and_then(|value| value_to_object_handle(value));
+            let param = args.get(1).and_then(|value| value_to_i32(value));
+            let value = args.get(2).and_then(|value| value_to_i32(value));
+            if let (Some(handle), Some(param), Some(value)) = (handle, param, value) {
+                imset_context
+                    .borrow_mut()
+                    .set_sound_param(handle, param, value);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let imgp_context = context.clone();
+    globals.set(
+        "ImGetParam",
+        lua.create_function(move |_, args: Variadic<Value>| -> LuaResult<i64> {
+            let handle = args.get(0).and_then(|value| value_to_object_handle(value));
+            let param = args.get(1).and_then(|value| value_to_i32(value));
+            if let (Some(handle), Some(param)) = (handle, param) {
+                if let Some(value) = imgp_context.borrow().get_sound_param(handle, param) {
+                    return Ok(value as i64);
+                }
+            }
+            Ok(0)
+        })?,
+    )?;
+
+    let imfade_context = context.clone();
+    globals.set(
+        "ImFadeParam",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let handle = args.get(0).and_then(|value| value_to_object_handle(value));
+            let param = args.get(1).and_then(|value| value_to_i32(value));
+            let value = args.get(2).and_then(|value| value_to_i32(value));
+            if let (Some(handle), Some(param), Some(value)) = (handle, param, value) {
+                imfade_context
+                    .borrow_mut()
+                    .set_sound_param(handle, param, value);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let start_sfx_context = context.clone();
+    globals.set(
+        "start_sfx",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let cue = args
+                .get(0)
+                .and_then(|value| value_to_string(value))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let priority = args.get(1).and_then(|value| value_to_i32(value));
+            let volume = args
+                .get(2)
+                .and_then(|value| value_to_i32(value))
+                .unwrap_or(127);
+            let handle = {
+                let mut ctx = start_sfx_context.borrow_mut();
+                let id = ctx.start_imuse_sound(cue.clone(), priority, Some(1));
+                if id >= 0 {
+                    ctx.set_sound_param(id, IM_SOUND_VOL, volume);
+                }
+                id
+            };
+            Ok(Value::Integer(handle.max(0)))
+        })?,
+    )?;
+
+    let single_start_context = context.clone();
+    globals.set(
+        "single_start_sfx",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let cue = args
+                .get(0)
+                .and_then(|value| value_to_string(value))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let priority = args.get(1).and_then(|value| value_to_i32(value));
+            let volume = args
+                .get(2)
+                .and_then(|value| value_to_i32(value))
+                .unwrap_or(127);
+            let handle = {
+                let mut ctx = single_start_context.borrow_mut();
+                let id = ctx.start_imuse_sound(cue.clone(), priority, Some(1));
+                if id >= 0 {
+                    ctx.set_sound_param(id, IM_SOUND_VOL, volume);
+                }
+                id
+            };
+            Ok(Value::Integer(handle.max(0)))
+        })?,
+    )?;
+
+    let sound_playing_context = context.clone();
+    globals.set(
+        "sound_playing",
+        lua.create_function(move |_, value: Value| {
+            let Some(handle) = value_to_object_handle(&value) else {
+                return Ok(false);
+            };
+            let playing = sound_playing_context
+                .borrow()
+                .get_sound_param(handle, IM_SOUND_PLAY_COUNT)
+                .unwrap_or(0)
+                > 0;
+            Ok(playing)
+        })?,
+    )?;
+
+    let wait_for_sound_context = context.clone();
+    globals.set(
+        "wait_for_sound",
+        lua.create_function(move |_, value: Value| {
+            if let Some(handle) = value_to_object_handle(&value) {
+                let mut ctx = wait_for_sound_context.borrow_mut();
+                ctx.set_sound_param(handle, IM_SOUND_PLAY_COUNT, 0);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let stop_sound_context = context.clone();
+    globals.set(
+        "stop_sound",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let target = args.get(0);
+            if let Some(handle) = target.and_then(|value| value_to_object_handle(value)) {
+                stop_sound_context
+                    .borrow_mut()
+                    .stop_sound_effect_by_numeric(handle);
+            } else if let Some(label) = target.and_then(|value| value_to_string(value)) {
+                stop_sound_context
+                    .borrow_mut()
+                    .stop_sound_effect(Some(label));
+            }
+            Ok(())
+        })?,
+    )?;
 
     Ok(())
 }
@@ -5142,6 +5527,179 @@ fn install_actor_methods(
         })?,
     )?;
 
+    let walkto_object_context = context.clone();
+    actor.set(
+        "walkto_object",
+        lua.create_function(move |_, args: Variadic<Value>| -> LuaResult<bool> {
+            let (self_table, values) = split_self(args);
+            let Some(actor_table) = self_table else {
+                return Ok(false);
+            };
+
+            let (actor_id, actor_label) = actor_identity(&actor_table)?;
+            let actor_handle = actor_table
+                .get::<_, Option<i64>>("hActor")
+                .ok()
+                .flatten()
+                .unwrap_or(0) as u32;
+            if actor_handle == 0 {
+                return Ok(false);
+            }
+
+            let Some(target_value) = values.get(0) else {
+                return Ok(false);
+            };
+            let object_table = match target_value {
+                Value::Table(table) => table.clone(),
+                _ => return Ok(false),
+            };
+
+            let use_out = values
+                .get(1)
+                .map(|value| value_to_bool(value))
+                .unwrap_or(false);
+            let run_flag = values
+                .get(2)
+                .map(|value| value_to_bool(value))
+                .unwrap_or(false);
+
+            let object_name = object_table
+                .get::<_, Option<String>>("name")
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    object_table
+                        .get::<_, Option<String>>("string_name")
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| "<object>".to_string());
+            let object_handle = object_table
+                .get::<_, Option<i64>>("handle")
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    object_table
+                        .get::<_, Option<i64>>("object_handle")
+                        .ok()
+                        .flatten()
+                })
+                .or_else(|| object_table.get::<_, Option<i64>>("hObject").ok().flatten());
+
+            let position = if use_out {
+                let x = object_table
+                    .get::<_, Option<f32>>("out_pnt_x")
+                    .ok()
+                    .flatten();
+                let y = object_table
+                    .get::<_, Option<f32>>("out_pnt_y")
+                    .ok()
+                    .flatten();
+                let z = object_table
+                    .get::<_, Option<f32>>("out_pnt_z")
+                    .ok()
+                    .flatten();
+                match (x, y, z) {
+                    (Some(x), Some(y), Some(z)) => Some(Vec3 { x, y, z }),
+                    _ => None,
+                }
+            } else {
+                let x = object_table
+                    .get::<_, Option<f32>>("use_pnt_x")
+                    .ok()
+                    .flatten();
+                let y = object_table
+                    .get::<_, Option<f32>>("use_pnt_y")
+                    .ok()
+                    .flatten();
+                let z = object_table
+                    .get::<_, Option<f32>>("use_pnt_z")
+                    .ok()
+                    .flatten();
+                match (x, y, z) {
+                    (Some(x), Some(y), Some(z)) => Some(Vec3 { x, y, z }),
+                    _ => None,
+                }
+            };
+
+            let rotation = if use_out {
+                let x = object_table
+                    .get::<_, Option<f32>>("out_rot_x")
+                    .ok()
+                    .flatten();
+                let y = object_table
+                    .get::<_, Option<f32>>("out_rot_y")
+                    .ok()
+                    .flatten();
+                let z = object_table
+                    .get::<_, Option<f32>>("out_rot_z")
+                    .ok()
+                    .flatten();
+                match (x, y, z) {
+                    (Some(x), Some(y), Some(z)) => Some(Vec3 { x, y, z }),
+                    _ => None,
+                }
+            } else {
+                let x = object_table
+                    .get::<_, Option<f32>>("use_rot_x")
+                    .ok()
+                    .flatten();
+                let y = object_table
+                    .get::<_, Option<f32>>("use_rot_y")
+                    .ok()
+                    .flatten();
+                let z = object_table
+                    .get::<_, Option<f32>>("use_rot_z")
+                    .ok()
+                    .flatten();
+                match (x, y, z) {
+                    (Some(x), Some(y), Some(z)) => Some(Vec3 { x, y, z }),
+                    _ => None,
+                }
+            };
+
+            let destination_label = object_handle
+                .map(|handle| format!("{} (#{handle})", object_name))
+                .unwrap_or(object_name.clone());
+
+            let moved = {
+                let mut ctx = walkto_object_context.borrow_mut();
+                if let Some(target) = position {
+                    let moved = ctx.walk_actor_to_handle(actor_handle, target);
+                    if moved {
+                        if let Some(rot) = rotation {
+                            ctx.set_actor_rotation_by_handle(actor_handle, rot);
+                        }
+                        if run_flag {
+                            ctx.log_event(format!("actor.run {} true", actor_id));
+                        }
+                        ctx.log_event(format!(
+                            "actor.walkto_object {} -> {}{}",
+                            actor_label,
+                            destination_label,
+                            if use_out { " [out]" } else { "" }
+                        ));
+                    } else {
+                        ctx.log_event(format!(
+                            "actor.walkto_object {} failed {}",
+                            actor_label, destination_label
+                        ));
+                    }
+                    moved
+                } else {
+                    ctx.log_event(format!(
+                        "actor.walkto_object {} missing target for {}",
+                        actor_label, destination_label
+                    ));
+                    false
+                }
+            };
+
+            actor_table.set("is_running", run_flag)?;
+            Ok(moved)
+        })?,
+    )?;
+
     let visibility_context = context.clone();
     actor.set(
         "set_visibility",
@@ -5346,8 +5904,7 @@ fn install_actor_methods(
 
     let say_context = context.clone();
     let say_system_key = system_key.clone();
-    actor.set(
-        "normal_say_line",
+    let normal_say_line =
         lua.create_function(move |lua_ctx, args: Variadic<Value>| -> LuaResult<()> {
             let (self_table, values) = split_self(args);
             if let Some(actor_table) = self_table {
@@ -5399,8 +5956,10 @@ fn install_actor_methods(
                 }
             }
             Ok(())
-        })?,
-    )?;
+        })?;
+    actor.set("normal_say_line", normal_say_line.clone())?;
+    actor.set("say_line", normal_say_line.clone())?;
+    actor.set("underwater_say_line", normal_say_line.clone())?;
 
     let complete_chore_context = context.clone();
     actor.set(

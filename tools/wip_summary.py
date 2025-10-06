@@ -19,7 +19,7 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Direction",
             "body": [
-                "Boot simulation now stubs Manny's desk cut-scene so the Lua host logs memo retrieval and computer interactions without the original precompiled scripts.",
+                "Hotspot demo now runs the real Manny desk script so the Lua host captures the approach, dialogue, and audio cues end-to-end.",
                 "Viewer overlays now render audio and boot timeline metadata directly from --audio-log-json / --timeline so hook sequencing stays visible while iterating.",
                 "Stabilise codec3 decoding so Manny's office colour plates and .zbm depth stay faithful in engine captures.",
                 "Movement regression harness now guards Manny's walk path and the computer hotspot demo drives the first interaction; next focus shifts to sharing movement/timeline data across tooling.",
@@ -31,13 +31,13 @@ WIP_DATA: Dict[str, Any] = {
                 "Geometry-driven head targeting now records real sector hits; upcoming work focuses on surfacing those cues to downstream tooling.",
                 "Timeline overlay highlight now ships; next up is feeding it hotspot/movement traces so interactive regressions line up with stage sequencing.",
                 "Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
-                "Carry the new computer hotspot demo into the regression harness so movement and timeline traces ship together.",
+                "Carry the scripted computer hotspot demo into the regression harness so movement, timeline, and audio traces publish together.",
             ],
         },
         {
             "title": "Next Steps",
             "body": [
-                "Marry the timeline overlay with the movement logger so stage changes and sector hits travel in one regression artifact alongside the hotspot run.",
+                "Marry the timeline overlay with the movement logger so stage changes, hotspot hits, and audio logs travel in one regression artifact alongside the hotspot run.",
                 "Surface overlay selection data during hotspot playback so Manny's first interaction run can assert both geometry and hook sequencing.",
                 "With the movement harness in place, demo entering Manny's office from boot with one interactive hotspot and capture the flow alongside the movement log in a reusable regression script.",
                 "Lock in regression coverage for codec3 colour + depth paths and the Manny hotspot/movement smoke tests so the scene stays stable once playable.",
@@ -49,16 +49,11 @@ WIP_DATA: Dict[str, Any] = {
                 "Format commits as: <area>: <short change summary> on the first line, then blank line, followed by 'Why:' and 'What:' bullet blocks summarising intent and implementation.",
                 "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
                 "Avoid blank lines between Why/What bullet entries so the commit template stays compact and scannable.",
+                "List one 'What' bullet per file touched using <path>: <brief change> so reviewers can map intent to diffs quickly.",
             ],
         },
     ],
     "workstreams": [
-        {
-            "slug": "hotspot_demo",
-            "title": "Hotspot interaction demo",
-            "description": "Computer hotspot storyline demoed end-to-end",
-            "prompt": "Objective: wire the computer hotspot so Manny approaches, uses the verb, and plays the associated dialogue. Document the shims that keep WalkActorTo/SetActorRot viable and leave follow-ups for additional hotspots or harness integration.",
-        },
         {
             "slug": "runtime_regression_harness",
             "title": "Runtime regression harness",

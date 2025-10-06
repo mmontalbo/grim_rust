@@ -1,8 +1,30 @@
-use std::path::PathBuf;
-use std::process::Command;
+use std::{fs, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use tempfile::tempdir;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AudioEvent {
+    SfxPlay {
+        cue: String,
+    },
+    SfxStop {
+        #[allow(dead_code)]
+        target: Option<String>,
+    },
+    MusicPlay {
+        #[allow(dead_code)]
+        cue: String,
+        #[allow(dead_code)]
+        params: Vec<String>,
+    },
+    MusicStop {
+        #[allow(dead_code)]
+        mode: Option<String>,
+    },
+}
 
 #[test]
 fn hotspot_demo_logs_hotspot_markers() -> Result<()> {
@@ -65,6 +87,33 @@ fn hotspot_demo_logs_hotspot_markers() -> Result<()> {
         transcript.contains("hotspot.demo.end computer"),
         "hotspot end marker missing from output: {transcript}"
     );
+
+    assert!(
+        transcript.contains("dialog.begin manny /moma112/"),
+        "computer dialogue missing from output: {transcript}"
+    );
+
+    let audio_log = fs::read_to_string(&audio_log_path)
+        .with_context(|| format!("reading audio log from {}", audio_log_path.display()))?;
+    let events: Vec<AudioEvent> =
+        serde_json::from_str(&audio_log).context("parsing hotspot demo audio log")?;
+    assert!(!events.is_empty(), "audio log did not record any events");
+
+    let cues: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AudioEvent::SfxPlay { cue } => Some(cue.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for expected in ["keyboard.imu", "txtScrl3.WAV", "compbeep.wav"] {
+        assert!(
+            cues.iter().any(|cue| cue.eq_ignore_ascii_case(expected)),
+            "expected SFX cue {expected} missing from audio log: {:?}",
+            cues
+        );
+    }
 
     Ok(())
 }
