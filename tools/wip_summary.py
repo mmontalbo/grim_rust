@@ -44,6 +44,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Format commits as: <area>: <short change summary> on the first line, then blank line, followed by 'Why:' and 'What:' bullet blocks summarising intent and implementation.",
                 "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
                 "Avoid blank lines between Why/What bullet entries so the commit template stays compact and scannable.",
+                "Use top-level directories for the <area> prefix (grim_engine, grim_viewer, grim_formats, grim_analysis, tools, docs, etc.) instead of generic labels like runtime; split work across commits when multiple components need separate context.",
                 "List one 'What' bullet per file touched using <path>: <brief change> so reviewers can map intent to diffs quickly.",
             ],
         },
