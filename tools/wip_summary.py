@@ -29,7 +29,7 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Keep the Manny layout preset in sync with overlay changes (docs + presets) so Taffy keeps panel placement declarative without bespoke math.",
+                "Smoke-test the Manny layout preset in windowed and headless runs after the scrubber legend width bump so Taffy stays stable before we chase minimap automation.",
                 "Wire the minimap panel into headless verification so Manny's path and hotspot markers fail fast when they drift while scrubbing.",
                 "Prototype an egui-powered overlay inspector so the Taffy layout can be tweaked interactively without wgpu math spelunking.",
                 "Rev the Manny baseline overlays once the minimap orientation is locked so the perspective and top-down views use the same regression artefacts.",

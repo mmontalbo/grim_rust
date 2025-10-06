@@ -44,6 +44,9 @@ timeline markers, and track audio cues during development.
   `grim_viewer/presets/manny_office_layout.json`. The helper script
   `python tools/grim_viewer.py run` automatically forwards it, so day-to-day
   launches always share the same declarative layout.
+- The preset keeps the timeline and scrubber panes 640px wide so the 78-column
+  overlays (timeline summary + movement scrubber legend) render without clipping;
+  bump these widths if future overlay text grows.
 - Tweak the preset (or point `--layout-preset` at a copy) when you need extra
   room for new overlays. Minimap sizing uses `min_side`, `preferred_fraction`,
   and `max_fraction` to describe its responsive bounds.
