@@ -17,33 +17,27 @@ WIP_DATA: Dict[str, Any] = {
             ],
         },
         {
-            "title": "Current Direction",
+            "title": "Getting Started",
             "body": [
-                "Hotspot demo now runs the real Manny desk script so the Lua host captures the approach, dialogue, and audio cues end-to-end.",
-                "Viewer overlays now render audio and boot timeline metadata directly from --audio-log-json / --timeline so hook sequencing stays visible while iterating.",
-                "Codec3 decode harness now asserts seeded window behaviour and records Manny office depth ranges so tooling can flag regressions before captures drift.",
-                "Runtime regression harness now emits Manny office codec3 depth stats alongside movement/audio logs so downstream baselines stay aligned while timeline traces roll in.",
-                "Movement regression harness now guards Manny's walk path fixture while the hotspot baseline captures the full computer interaction under tools/tests.",
-                "Runtime regression harness now threads the boot timeline manifest into the hotspot baselines so overlay metadata travels with the movement/audio captures.",
+                "Familiarise yourself with README.md and the sections below, then pick up the next item in this summary and work it through to a committable state (tests/docs updated, WIP refreshed, commit created).",
+                "List all available workstreams with: python tools/wip_summary.py --json (or refer to the ## Workstreams section).",
+                "For a specific thread, run: python tools/wip_summary.py --workstream <slug> (for example --workstream codec3_regression).",
             ],
         },
         {
-            "title": "Active Threads",
+            "title": "Current Focus",
             "body": [
-                "Geometry-driven head targeting now records real sector hits; upcoming work focuses on surfacing those cues to downstream tooling.",
-                "Timeline overlay highlight now ships; next up is feeding it hotspot/movement traces so interactive regressions line up with stage sequencing.",
-                "Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
-                "Wire the new codec3 depth stats artefact into viewer/runtime tooling so overlays and comparisons can consume it automatically.",
-                "Extend the movement regression harness to surface hotspot playback traces and timeline hooks directly inside the viewer overlay.",
+                "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth) current so cargo test -p grim_engine -- runtime_regression remains green.",
+                "Feed hotspot/movement traces into the viewer overlay work so geometry and head-targeting issues stay debuggable from a single run.",
+                "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
             ],
         },
         {
-            "title": "Next Steps",
+            "title": "Upcoming Targets",
             "body": [
-                "Surface overlay selection data during hotspot playback so Manny's first interaction run can assert both geometry and hook sequencing.",
-                "With the movement harness in place, demo entering Manny's office from boot with one interactive hotspot and capture the flow alongside the movement log in a reusable regression script.",
-                "Document the --depth-stats-json workflow and thread the artefact through regression docs so future snapshot comparisons add the new channel without guesswork.",
-                "Bundle the runtime event log into a structured artefact so hotspot playback timelines, stage transitions, and audio cues can be replayed together inside the viewer overlay.",
+                "Surface overlay selection data during hotspot playback to assert geometry + hook sequencing in one pass.",
+                "Capture a reproducible boot→hotspot script that bundles movement, audio, timeline, and depth artefacts for sharing.",
+                "Document the --depth-stats-json workflow and capture the runtime event log as a structured artefact for future overlays.",
             ],
         },
         {
@@ -57,6 +51,18 @@ WIP_DATA: Dict[str, Any] = {
         },
     ],
     "workstreams": [
+        {
+            "slug": "runtime_regression",
+            "title": "Runtime regression harness",
+            "description": "Lock Manny hotspot + movement baselines",
+            "prompt": "Objective: keep the CLI hotspot demo capturing movement/audio/timeline/depth artefacts that mirror Manny's office. Regenerate artefacts when intent changes, update docs/tests, and ensure cargo test -p grim_engine -- runtime_regression remains green.",
+        },
+        {
+            "slug": "hotspot_overlay",
+            "title": "Hotspot overlay integration",
+            "description": "Surface hotspot traces in viewer",
+            "prompt": "Objective: feed the Manny computer hotspot movement and timeline traces into grim_viewer overlays so geometry/head-targeting debugging stays aligned with the runtime captures.",
+        },
         {
             "slug": "codec3_regression",
             "title": "Codec3 regression",
