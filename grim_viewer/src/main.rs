@@ -2151,6 +2151,107 @@ impl SceneEntity {
     }
 }
 
+fn prune_entities_for_set(
+    entities: Vec<SceneEntity>,
+    set_variable_name: Option<&str>,
+    set_display_name: Option<&str>,
+) -> Vec<SceneEntity> {
+    if is_manny_office(set_variable_name, set_display_name) {
+        return prune_manny_office_entities(entities, set_variable_name);
+    }
+    entities
+}
+
+fn is_manny_office(set_variable_name: Option<&str>, set_display_name: Option<&str>) -> bool {
+    set_variable_name
+        .map(|value| value.eq_ignore_ascii_case("mo"))
+        .unwrap_or(false)
+        || set_display_name
+            .map(|value| value.eq_ignore_ascii_case("Manny's Office"))
+            .unwrap_or(false)
+}
+
+fn prune_manny_office_entities(
+    entities: Vec<SceneEntity>,
+    set_variable_name: Option<&str>,
+) -> Vec<SceneEntity> {
+    let set_prefix = set_variable_name.unwrap_or("mo");
+    let allowed = vec![
+        "manny".to_string(),
+        format!("{set_prefix}.cards"),
+        format!("{set_prefix}.cards.interest_actor"),
+        format!("{set_prefix}.computer"),
+        format!("{set_prefix}.tube"),
+        format!("{set_prefix}.tube.interest_actor"),
+    ];
+
+    entities
+        .into_iter()
+        .filter(|entity| {
+            allowed
+                .iter()
+                .any(|allowed| entity.name.eq_ignore_ascii_case(allowed))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod entity_filter_tests {
+    use super::*;
+
+    fn make_entity(kind: SceneEntityKind, name: &str) -> SceneEntity {
+        SceneEntityBuilder::new(kind, name.to_string()).build()
+    }
+
+    #[test]
+    fn prune_entities_for_manny_office_keeps_core_entities() {
+        let entities = vec![
+            make_entity(SceneEntityKind::Actor, "Actor"),
+            make_entity(SceneEntityKind::Actor, "meche"),
+            make_entity(SceneEntityKind::Actor, "mo"),
+            make_entity(SceneEntityKind::Object, "loading_menu"),
+            make_entity(SceneEntityKind::Object, "manny"),
+            make_entity(SceneEntityKind::Object, "mo.cards"),
+            make_entity(SceneEntityKind::InterestActor, "mo.cards"),
+            make_entity(SceneEntityKind::InterestActor, "mo.cards.interest_actor"),
+            make_entity(SceneEntityKind::Object, "mo.computer"),
+            make_entity(SceneEntityKind::Object, "mo.tube"),
+            make_entity(SceneEntityKind::InterestActor, "mo.tube.interest_actor"),
+            make_entity(SceneEntityKind::Object, "canister_actor"),
+        ];
+
+        let pruned = prune_entities_for_set(entities, Some("mo"), Some("Manny's Office"));
+        let names: Vec<&str> = pruned.iter().map(|entity| entity.name.as_str()).collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "manny",
+                "mo.cards",
+                "mo.cards",
+                "mo.cards.interest_actor",
+                "mo.computer",
+                "mo.tube",
+                "mo.tube.interest_actor",
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_entities_leaves_other_sets_untouched() {
+        let entities = vec![
+            make_entity(SceneEntityKind::Actor, "Actor"),
+            make_entity(SceneEntityKind::Object, "gl.cards"),
+            make_entity(SceneEntityKind::InterestActor, "gl.cards"),
+        ];
+
+        let pruned = prune_entities_for_set(entities, Some("gl"), Some("Glottis' Garage"));
+        let names: Vec<&str> = pruned.iter().map(|entity| entity.name.as_str()).collect();
+
+        assert_eq!(names, vec!["Actor", "gl.cards", "gl.cards"]);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SceneBounds {
     min: [f32; 3],
@@ -2535,10 +2636,20 @@ fn load_scene_from_timeline(
     let manifest: Value = serde_json::from_slice(&data)
         .with_context(|| format!("parsing timeline manifest {}", path.display()))?;
 
-    let set_file_name = manifest
+    let set_info = manifest
         .get("engine_state")
-        .and_then(|state| state.get("set"))
+        .and_then(|state| state.get("set"));
+
+    let set_file_name = set_info
         .and_then(|set| set.get("set_file"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let set_variable_name = set_info
+        .and_then(|set| set.get("variable_name"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let set_display_name = set_info
+        .and_then(|set| set.get("display_name"))
         .and_then(|value| value.as_str())
         .map(|value| value.to_string());
 
@@ -2624,6 +2735,12 @@ fn load_scene_from_timeline(
         .map(|(_, builder)| builder.build())
         .collect();
     entities.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+
+    entities = prune_entities_for_set(
+        entities,
+        set_variable_name.as_deref(),
+        set_display_name.as_deref(),
+    );
 
     let mut bounds = None;
     for entity in &entities {
