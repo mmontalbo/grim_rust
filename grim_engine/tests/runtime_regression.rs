@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::Value;
 use tempfile::tempdir;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -59,6 +60,7 @@ fn manny_office_runtime_regression() -> Result<()> {
     let temp_dir = tempdir().context("creating temporary directory for regression artefacts")?;
     let movement_path = temp_dir.path().join("movement_log.json");
     let audio_path = temp_dir.path().join("hotspot_audio.json");
+    let depth_path = temp_dir.path().join("manny_office_depth_stats.json");
 
     let movement_path_str = movement_path
         .to_str()
@@ -66,6 +68,9 @@ fn manny_office_runtime_regression() -> Result<()> {
     let audio_path_str = audio_path
         .to_str()
         .context("audio log path is not valid UTF-8")?;
+    let depth_path_str = depth_path
+        .to_str()
+        .context("depth stats path is not valid UTF-8")?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_grim_engine"))
         .current_dir(&workspace_root)
@@ -78,6 +83,8 @@ fn manny_office_runtime_regression() -> Result<()> {
             "computer",
             "--audio-log-json",
             audio_path_str,
+            "--depth-stats-json",
+            depth_path_str,
         ])
         .output()
         .context("executing grim_engine runtime regression harness")?;
@@ -94,6 +101,10 @@ fn manny_office_runtime_regression() -> Result<()> {
     assert!(
         audio_path.is_file(),
         "grim_engine did not produce an audio log"
+    );
+    assert!(
+        depth_path.is_file(),
+        "grim_engine did not produce a depth stats artefact"
     );
 
     let mut transcript = String::from_utf8_lossy(&output.stdout).to_string();
@@ -112,8 +123,7 @@ fn manny_office_runtime_regression() -> Result<()> {
         "computer dialogue missing from output: {transcript}"
     );
 
-    let expected_movement =
-        read_movement(workspace_root.join("tools/tests/movement_log.json"))?;
+    let expected_movement = read_movement(workspace_root.join("tools/tests/movement_log.json"))?;
     let actual_movement = read_movement(&movement_path)?;
 
     assert_eq!(
@@ -124,7 +134,11 @@ fn manny_office_runtime_regression() -> Result<()> {
         actual_movement.len()
     );
 
-    for (idx, (exp, act)) in expected_movement.iter().zip(actual_movement.iter()).enumerate() {
+    for (idx, (exp, act)) in expected_movement
+        .iter()
+        .zip(actual_movement.iter())
+        .enumerate()
+    {
         assert_eq!(
             act.frame, exp.frame,
             "frame mismatch at index {idx} (expected {}, got {})",
@@ -177,6 +191,15 @@ fn manny_office_runtime_regression() -> Result<()> {
         "audio events diverged from baseline"
     );
 
+    let expected_depth =
+        read_depth_stats(workspace_root.join("tools/tests/manny_office_depth_stats.json"))?;
+    let actual_depth = read_depth_stats(&depth_path)?;
+
+    assert_eq!(
+        actual_depth, expected_depth,
+        "depth stats diverged from baseline"
+    );
+
     Ok(())
 }
 
@@ -196,6 +219,15 @@ fn read_audio(path: impl AsRef<Path>) -> Result<Vec<AudioEvent>> {
     let events: Vec<AudioEvent> = serde_json::from_str(&data)
         .with_context(|| format!("parsing audio log from {}", path_ref.display()))?;
     Ok(events)
+}
+
+fn read_depth_stats(path: impl AsRef<Path>) -> Result<Value> {
+    let path_ref = path.as_ref();
+    let data = fs::read_to_string(path_ref)
+        .with_context(|| format!("reading depth stats from {}", path_ref.display()))?;
+    let value: Value = serde_json::from_str(&data)
+        .with_context(|| format!("parsing depth stats from {}", path_ref.display()))?;
+    Ok(value)
 }
 
 fn approx(expected: f32, actual: f32, tolerance: f32) -> bool {

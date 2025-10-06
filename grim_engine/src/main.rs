@@ -18,6 +18,7 @@ use serde::Serialize;
 
 mod assets;
 mod audio_bridge;
+mod codec3_depth;
 mod geometry_diff;
 mod geometry_snapshot;
 mod lab_collection;
@@ -26,6 +27,7 @@ mod scheduler;
 mod state;
 use assets::MANNY_OFFICE_ASSETS;
 use audio_bridge::RecordingAudioCallback;
+use codec3_depth::write_manny_office_depth_stats;
 use geometry_diff::run_geometry_diff;
 use lab_collection::{collect_assets, AssetMetadata, AssetReport, LabCollection};
 use lua_host::{run_boot_sequence, HotspotOptions, MovementOptions};
@@ -122,6 +124,10 @@ struct Args {
     #[arg(long)]
     movement_log_json: Option<PathBuf>,
 
+    /// Path to write codec3 depth stats JSON (requires --run-lua)
+    #[arg(long)]
+    depth_stats_json: Option<PathBuf>,
+
     /// Run a Manny hotspot demo after boot (requires --run-lua)
     #[arg(long, value_name = "SLUG")]
     hotspot_demo: Option<String>,
@@ -182,6 +188,11 @@ fn main() -> Result<()> {
             None => None,
         };
 
+        let lab_root_path = args
+            .lab_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("dev-install"));
+
         run_boot_sequence(
             &args.data_root,
             args.lab_root.as_deref(),
@@ -200,11 +211,22 @@ fn main() -> Result<()> {
                 .with_context(|| format!("writing audio event log to {}", path.display()))?;
         }
 
+        if let Some(path) = args.depth_stats_json.as_ref() {
+            write_manny_office_depth_stats(&lab_root_path, path)?;
+        }
+
         return Ok(());
     }
 
     if args.verify_geometry && args.geometry_diff.is_some() {
         bail!("--geometry-diff cannot be used with --verify-geometry; the snapshot is captured automatically");
+    }
+
+    if let Some(path) = args.depth_stats_json.as_ref() {
+        eprintln!(
+            "[grim_engine] warning: --depth-stats-json={} ignored without --run-lua",
+            path.display()
+        );
     }
 
     if !args.verify_geometry {
