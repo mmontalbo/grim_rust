@@ -1,0 +1,146 @@
+{
+  "events": [
+    {
+      "sequence": 263,
+      "label": "actor.manny.base_costume suit"
+    },
+    {
+      "sequence": 264,
+      "label": "actor.manny.costume suit"
+    },
+    {
+      "sequence": 266,
+      "label": "actor.manny.base_costume suit"
+    },
+    {
+      "sequence": 267,
+      "label": "actor.manny.costume suit"
+    },
+    {
+      "sequence": 269,
+      "label": "actor.manny.enter mo.set"
+    },
+    {
+      "sequence": 270,
+      "label": "actor.manny.at_interest"
+    },
+    {
+      "sequence": 277,
+      "label": "actor.manny.walk_chore <nil> suit"
+    },
+    {
+      "sequence": 302,
+      "label": "actor.manny.head_target /motx083/tube"
+    },
+    {
+      "sequence": 1039,
+      "frame": 114,
+      "label": "hotspot.demo.approach computer"
+    },
+    {
+      "sequence": 1136,
+      "frame": 24,
+      "label": "hotspot.demo.start computer"
+    },
+    {
+      "sequence": 1140,
+      "frame": 24,
+      "label": "actor.manny.head_target <Nil>"
+    },
+    {
+      "sequence": 1155,
+      "frame": 24,
+      "label": "actor.manny.ignore_boxes true"
+    },
+    {
+      "sequence": 1161,
+      "frame": 24,
+      "label": "actor.manny.push_costume ma_note_type.cos depth 2"
+    },
+    {
+      "sequence": 1162,
+      "frame": 24,
+      "label": "actor.manny.chore 0 ma_note_type.cos"
+    },
+    {
+      "sequence": 1163,
+      "frame": 24,
+      "label": "actor.manny.head_target /motx107/computer"
+    },
+    {
+      "sequence": 1165,
+      "frame": 24,
+      "label": "actor.manny.chore 1 ma_note_type.cos"
+    },
+    {
+      "sequence": 11417,
+      "frame": 24,
+      "label": "dialog.say manny /moma112/"
+    },
+    {
+      "sequence": 11418,
+      "frame": 24,
+      "label": "dialog.log manny /moma112/"
+    },
+    {
+      "sequence": 11419,
+      "frame": 24,
+      "label": "dialog.begin manny /moma112/"
+    },
+    {
+      "sequence": 11420,
+      "frame": 24,
+      "label": "dialog.end manny /moma112/"
+    },
+    {
+      "sequence": 11421,
+      "frame": 24,
+      "label": "dialog.wait Manny /moma112/"
+    },
+    {
+      "sequence": 11422,
+      "frame": 24,
+      "label": "actor.manny.head_target /motx107/computer"
+    },
+    {
+      "sequence": 11424,
+      "frame": 24,
+      "label": "dialog.say manny /moma113/"
+    },
+    {
+      "sequence": 11425,
+      "frame": 24,
+      "label": "dialog.log manny /moma113/"
+    },
+    {
+      "sequence": 11426,
+      "frame": 24,
+      "label": "dialog.begin manny /moma113/"
+    },
+    {
+      "sequence": 11427,
+      "frame": 24,
+      "label": "actor.manny.chore ma_note_type_type_loop ma_note_type.cos"
+    },
+    {
+      "sequence": 11435,
+      "frame": 24,
+      "label": "actor.manny.ignore_boxes false"
+    },
+    {
+      "sequence": 11436,
+      "frame": 24,
+      "label": "actor.manny.pop_costume ma_note_type.cos"
+    },
+    {
+      "sequence": 11439,
+      "frame": 24,
+      "label": "hotspot.demo.fallback computer"
+    },
+    {
+      "sequence": 11440,
+      "frame": 24,
+      "label": "hotspot.demo.end computer"
+    }
+  ]
+}

@@ -25,7 +25,9 @@ Then run the Lua runtime demo to record the hotspot artefacts:
 ```bash
 cargo run -p grim_engine -- --run-lua --hotspot-demo computer \
   --movement-demo --movement-log-json tools/tests/movement_log.json \
-  --audio-log-json tools/tests/hotspot_audio.json
+  --audio-log-json tools/tests/hotspot_audio.json \
+  --depth-stats-json tools/tests/manny_office_depth_stats.json \
+  --event-log-json tools/tests/hotspot_events.json
 ```
 
 Key flags:
@@ -38,7 +40,7 @@ Key flags:
 - `--movement-demo` records Manny's trajectory; `--movement-log-json` stores
   the per-frame samples (position, yaw, walk-sector hits).
 - `--audio-log-json` captures the SFX/music events emitted by the run.
-
+- `--depth-stats-json` snapshots the codec3 depth summary so the viewer can\n  cross-check depth ranges without re-decoding assets.\n- `--event-log-json` records the hotspot/head-target trace used by the viewer's\n  movement overlay.\n
 The command prints a transcript to stdout that includes `hotspot.demo.start`/
 `hotspot.demo.end` markers alongside dialogue/cutscene logs. The JSON artefacts
 are written to the paths you supplied—place them under `tools/tests/` when you
@@ -57,6 +59,10 @@ want to share them with the regression harness.
   hook summary produced by `--timeline-json`; the regression harness keeps it
   in lockstep with the hotspot artefacts so the viewer overlay reflects the
   same snapshot.
+- **Hotspot event log (`hotspot_events.json`)** – selected runtime events
+  (hotspot markers, Manny head-target updates, ignore-box toggles, dialogue
+  prompts) annotated with the last seen movement frame. `grim_viewer` overlays
+  these markers on the movement trace to highlight geometry interactions.
 - **Stdout transcript** – includes `dialog.begin manny /moma112/` style markers
   and any geometry/debug events the Lua host recorded. Redirect it to a file if
   you need to diff runs across branches.

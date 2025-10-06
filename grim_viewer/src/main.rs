@@ -63,6 +63,10 @@ struct Args {
     #[arg(long)]
     movement_log: Option<PathBuf>,
 
+    /// When set, overlay hotspot event log captured via --event-log-json
+    #[arg(long)]
+    event_log: Option<PathBuf>,
+
     /// When set, write the decoded bitmap to disk (PNG) before launching the viewer
     #[arg(long)]
     dump_frame: Option<PathBuf>,
@@ -192,6 +196,59 @@ struct MovementSample {
     sector: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct HotspotEventLog {
+    events: Vec<HotspotEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HotspotEvent {
+    #[allow(dead_code)]
+    sequence: u32,
+    #[serde(default)]
+    frame: Option<u32>,
+    label: String,
+}
+
+impl HotspotEvent {
+    fn kind(&self) -> HotspotEventKind {
+        if self.label.starts_with("hotspot.") {
+            HotspotEventKind::Hotspot
+        } else if self.label.starts_with("actor.manny.head_target") {
+            HotspotEventKind::HeadTarget
+        } else if self.label.starts_with("actor.manny.ignore_boxes") {
+            HotspotEventKind::IgnoreBoxes
+        } else if self.label.starts_with("actor.manny.chore") {
+            HotspotEventKind::Chore
+        } else if self.label.starts_with("dialog.") {
+            HotspotEventKind::Dialog
+        } else {
+            HotspotEventKind::Other
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotspotEventKind {
+    Hotspot,
+    HeadTarget,
+    IgnoreBoxes,
+    Chore,
+    Dialog,
+    Other,
+}
+
+fn event_marker_style(kind: HotspotEventKind) -> (f32, [f32; 3], f32) {
+    match kind {
+        HotspotEventKind::Hotspot => (0.05, [0.95, 0.85, 0.35], 0.4),
+        HotspotEventKind::HeadTarget => (0.045, [0.35, 0.9, 0.95], 0.35),
+        HotspotEventKind::IgnoreBoxes => (0.045, [0.95, 0.45, 0.35], 0.35),
+        HotspotEventKind::Chore => (0.042, [0.6, 0.4, 0.95], 0.25),
+        HotspotEventKind::Dialog => (0.042, [0.95, 0.65, 0.75], 0.3),
+        HotspotEventKind::Other => (0.04, [0.78, 0.78, 0.78], 0.2),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MovementTrace {
     samples: Vec<MovementSample>,
@@ -274,6 +331,26 @@ impl MovementTrace {
         sectors.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         sectors.truncate(limit);
         sectors
+    }
+
+    fn nearest_position(&self, frame: u32) -> Option<[f32; 3]> {
+        let mut best: Option<[f32; 3]> = None;
+        let mut best_delta = u32::MAX;
+        for sample in &self.samples {
+            let delta = if sample.frame >= frame {
+                sample.frame - frame
+            } else {
+                frame - sample.frame
+            };
+            if delta < best_delta {
+                best_delta = delta;
+                best = Some(sample.position);
+                if delta == 0 {
+                    break;
+                }
+            }
+        }
+        best
     }
 }
 
@@ -623,6 +700,25 @@ fn timeline_overlay_lines(
         }
     }
 
+    let events = scene.hotspot_events();
+    if !events.is_empty() {
+        lines.push(String::new());
+        lines.push("Hotspot Events".to_string());
+        const MAX_EVENTS: usize = 6;
+        for event in events.iter().take(MAX_EVENTS) {
+            let frame = event
+                .frame
+                .map(|value| format!("{value:03}"))
+                .unwrap_or_else(|| String::from("--"));
+            let line = format!("  [{frame}] {}", event.label);
+            lines.push(truncate_line(&line, MAX_LINE));
+        }
+        if events.len() > MAX_EVENTS {
+            let remaining = events.len() - MAX_EVENTS;
+            lines.push(truncate_line(&format!("  ... +{remaining} more"), MAX_LINE));
+        }
+    }
+
     lines
 }
 
@@ -888,6 +984,14 @@ fn main() -> Result<()> {
         None => None,
     };
 
+    let mut hotspot_events = match args.event_log.as_ref() {
+        Some(path) => Some(
+            load_hotspot_event_log(path)
+                .with_context(|| format!("loading hotspot event log {}", path.display()))?,
+        ),
+        None => None,
+    };
+
     let scene_data = match args.timeline.as_ref() {
         Some(path) => {
             let mut scene = load_scene_from_timeline(path)
@@ -895,10 +999,19 @@ fn main() -> Result<()> {
             if let Some(trace) = movement_trace.take() {
                 scene.attach_movement_trace(trace);
             }
+            if let Some(events) = hotspot_events.take() {
+                scene.attach_hotspot_events(events);
+            }
             Some(scene)
         }
         None => None,
     };
+
+    if hotspot_events.is_some() {
+        println!(
+            "Hotspot event log loaded without timeline overlay; run with --timeline to visualise markers."
+        );
+    }
 
     if let Some(scene) = scene_data.as_ref() {
         println!();
@@ -940,6 +1053,20 @@ fn main() -> Result<()> {
                 println!("  yaw range: {:.3} – {:.3}", min_yaw, max_yaw);
             }
             println!("  Overlay markers: teal = spawn, violet = path, orange = hotspot finish.");
+        }
+        let event_preview = scene.hotspot_events();
+        if !event_preview.is_empty() {
+            println!("Hotspot event log: {} entries", event_preview.len());
+            for event in event_preview.iter().take(6) {
+                let frame_label = event
+                    .frame
+                    .map(|frame| format!("{frame}"))
+                    .unwrap_or_else(|| String::from("--"));
+                println!("  [{frame_label}] {}", event.label);
+            }
+            if event_preview.len() > 6 {
+                println!("  ... +{} more", event_preview.len() - 6);
+            }
         }
         println!();
     }
@@ -1102,6 +1229,7 @@ struct ViewerScene {
     position_bounds: Option<SceneBounds>,
     timeline: Option<TimelineSummary>,
     movement: Option<MovementTrace>,
+    hotspot_events: Vec<HotspotEvent>,
 }
 
 impl ViewerScene {
@@ -1116,6 +1244,14 @@ impl ViewerScene {
 
     fn movement_trace(&self) -> Option<&MovementTrace> {
         self.movement.as_ref()
+    }
+
+    fn attach_hotspot_events(&mut self, events: Vec<HotspotEvent>) {
+        self.hotspot_events = events;
+    }
+
+    fn hotspot_events(&self) -> &[HotspotEvent] {
+        &self.hotspot_events
     }
 }
 
@@ -1588,6 +1724,7 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
         position_bounds: bounds,
         timeline: timeline_summary,
         movement: None,
+        hotspot_events: Vec::new(),
     })
 }
 
@@ -1598,6 +1735,14 @@ fn load_movement_trace(path: &Path) -> Result<MovementTrace> {
         .with_context(|| format!("parsing movement log {}", path.display()))?;
     MovementTrace::from_samples(samples)
         .with_context(|| format!("summarising movement trace from {}", path.display()))
+}
+
+fn load_hotspot_event_log(path: &Path) -> Result<Vec<HotspotEvent>> {
+    let data =
+        fs::read(path).with_context(|| format!("reading hotspot event log {}", path.display()))?;
+    let log: HotspotEventLog = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing hotspot event log {}", path.display()))?;
+    Ok(log.events)
 }
 
 fn format_hook_reference(reference: &HookReference) -> String {
@@ -2761,25 +2906,26 @@ impl ViewerState {
                 let start_size = 0.044;
                 let end_size = 0.045;
 
-                let mut push_marker = |position: [f32; 3], size: f32, color: [f32; 3]| {
-                    let norm_x = (position[0] - bounds.min[0]) / width;
-                    let norm_z = (position[2] - bounds.min[2]) / depth;
-                    if !norm_x.is_finite() || !norm_z.is_finite() {
-                        return;
-                    }
-                    let ndc_x = norm_x.clamp(0.0, 1.0) * 2.0 - 1.0;
-                    let ndc_y = 1.0 - norm_z.clamp(0.0, 1.0) * 2.0;
-                    instances.push(MarkerInstance {
-                        translate: [ndc_x, ndc_y],
-                        size,
-                        highlight: 0.0,
-                        color,
-                        _padding: 0.0,
-                    });
-                };
+                let mut push_marker =
+                    |position: [f32; 3], size: f32, color: [f32; 3], highlight: f32| {
+                        let norm_x = (position[0] - bounds.min[0]) / width;
+                        let norm_z = (position[2] - bounds.min[2]) / depth;
+                        if !norm_x.is_finite() || !norm_z.is_finite() {
+                            return;
+                        }
+                        let ndc_x = norm_x.clamp(0.0, 1.0) * 2.0 - 1.0;
+                        let ndc_y = 1.0 - norm_z.clamp(0.0, 1.0) * 2.0;
+                        instances.push(MarkerInstance {
+                            translate: [ndc_x, ndc_y],
+                            size,
+                            highlight,
+                            color,
+                            _padding: 0.0,
+                        });
+                    };
 
                 if let Some(first) = trace.samples.first() {
-                    push_marker(first.position, start_size, start_color);
+                    push_marker(first.position, start_size, start_color, 0.0);
                 }
 
                 let len = trace.samples.len();
@@ -2787,13 +2933,27 @@ impl ViewerState {
                     if idx == 0 || idx + 1 == len {
                         continue;
                     }
-                    push_marker(sample.position, path_size, path_color);
+                    push_marker(sample.position, path_size, path_color, 0.0);
                 }
 
                 if trace.samples.len() > 1 {
                     if let Some(last) = trace.samples.last() {
-                        push_marker(last.position, end_size, end_color);
+                        push_marker(last.position, end_size, end_color, 0.0);
                     }
+                }
+
+                for event in scene.hotspot_events() {
+                    let frame = match event.frame {
+                        Some(frame) => frame,
+                        None => continue,
+                    };
+                    let position = match trace.nearest_position(frame) {
+                        Some(pos) => pos,
+                        None => continue,
+                    };
+                    let (marker_size, marker_color, marker_highlight) =
+                        event_marker_style(event.kind());
+                    push_marker(position, marker_size, marker_color, marker_highlight);
                 }
             }
         }
