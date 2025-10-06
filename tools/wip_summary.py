@@ -46,6 +46,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Avoid blank lines between Why/What bullet entries so the commit template stays compact and scannable.",
                 "Use top-level directories for the <area> prefix (grim_engine, grim_viewer, grim_formats, grim_analysis, tools, docs, etc.) instead of generic labels like runtime; split work across commits when multiple components need separate context.",
                 "List one 'What' bullet per file touched using <path>: <brief change> so reviewers can map intent to diffs quickly.",
+                "Re-read the formatted commit after it lands; amend immediately if the prefix, Why/What blocks, or content drift from the guidelines.",
             ],
         },
     ],
