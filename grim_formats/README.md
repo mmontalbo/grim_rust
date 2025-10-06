@@ -80,6 +80,8 @@ and then either normalising the depth for preview purposes or forwarding the raw
 - `decode_bm` / `decode_bm_with_seed` return a `BmFile` plus its frames.
 - `BmFrame::as_rgba8888` converts RGB data to RGBA and normalises depth buffers
   for inspection.
+- `BmFrame::depth_stats` reports raw depth ranges and zero/non-zero counts so
+  regression harnesses can detect codec3 seeding regressions.
 - `examples/zbm_stats.rs` prints counts, value ranges, and diffs against a base
   bitmap.
 

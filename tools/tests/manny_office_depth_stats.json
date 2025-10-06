@@ -1,0 +1,13 @@
+{
+  "asset": "mo_0_ddtws.zbm",
+  "dimensions": [640, 480],
+  "checksum_fnv1a": 2336104930108325863,
+  "depth": {
+    "min": 7,
+    "max": 45045,
+    "min_hex": "0x0007",
+    "max_hex": "0xAFF5",
+    "zero_pixels": 0,
+    "nonzero_pixels": 307200
+  }
+}

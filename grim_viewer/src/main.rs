@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytemuck::{Pod, Zeroable, cast_slice};
 use clap::Parser;
 use font8x8::legacy::BASIC_LEGACY;
-use grim_formats::{BmFile, decode_bm, decode_bm_with_seed};
+use grim_formats::{BmFile, DepthStats, decode_bm, decode_bm_with_seed};
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use pollster::FutureExt;
 #[cfg(feature = "audio")]
@@ -522,7 +522,8 @@ fn main() -> Result<()> {
             preview.format,
             preview.frame_count
         );
-        if let Some((min, max)) = preview.depth_range {
+        if let Some(stats) = preview.depth_stats {
+            let (min, max) = (stats.min, stats.max);
             if preview.depth_preview {
                 println!(
                     "  raw depth range (16-bit) 0x{min:04X} – 0x{max:04X}; export visualises normalized depth"
@@ -532,6 +533,11 @@ fn main() -> Result<()> {
                     "  raw depth range (16-bit) 0x{min:04X} – 0x{max:04X}; color sourced from base bitmap"
                 );
             }
+            println!(
+                "  depth pixels zero {zero} / {total}",
+                zero = stats.zero_pixels,
+                total = stats.total_pixels()
+            );
         }
         println!(
             "  luminance avg {:.2}, min {}, max {}, opaque pixels {} / {}",
@@ -571,7 +577,8 @@ fn main() -> Result<()> {
                 preview.width, preview.height
             );
         }
-        if let Some((min, max)) = preview.depth_range {
+        if let Some(stats) = preview.depth_stats {
+            let (min, max) = (stats.min, stats.max);
             if preview.depth_preview {
                 println!(
                     "  source depth range (16-bit) 0x{min:04X} – 0x{max:04X}; render input is normalized depth"
@@ -581,6 +588,11 @@ fn main() -> Result<()> {
                     "  source depth range (16-bit) 0x{min:04X} – 0x{max:04X}; render input uses base bitmap colors"
                 );
             }
+            println!(
+                "  depth pixels zero {zero} / {total}",
+                zero = stats.zero_pixels,
+                total = stats.total_pixels()
+            );
         }
         println!(
             "  render luma avg {:.2}, min {}, max {}, opaque pixels {} / {}",
@@ -1742,8 +1754,17 @@ impl ViewerState {
                     texture.codec,
                     texture.format
                 );
-                if let Some((min, max)) = texture.depth_range {
-                    println!("  depth range (raw 16-bit): 0x{min:04X} – 0x{max:04X}");
+                if let Some(stats) = texture.depth_stats {
+                    println!(
+                        "  depth range (raw 16-bit): 0x{min:04X} – 0x{max:04X}",
+                        min = stats.min,
+                        max = stats.max
+                    );
+                    println!(
+                        "  depth pixels zero {zero} / {total}",
+                        zero = stats.zero_pixels,
+                        total = stats.total_pixels()
+                    );
                     if texture.depth_preview {
                         println!("  preview mapped to normalized depth values");
                     } else {
@@ -2391,7 +2412,7 @@ struct PreviewTexture {
     frame_count: u32,
     codec: u32,
     format: u32,
-    depth_range: Option<(u16, u16)>,
+    depth_stats: Option<DepthStats>,
     depth_preview: bool,
 }
 
@@ -2419,10 +2440,11 @@ fn decode_asset_texture(
         .first()
         .ok_or_else(|| anyhow!("BM surface has no frames"))?;
 
-    let mut depth_range = None;
+    let mut depth_stats: Option<DepthStats> = None;
     let mut used_color_seed = false;
     let rgba = if metadata.format == 5 {
-        depth_range = Some(depth_min_max(&frame.data));
+        let stats = frame.depth_stats(&metadata)?;
+        depth_stats = Some(stats);
         if let Some(seed) = seed_bitmap {
             if let Some(base_frame) = seed.frames.first() {
                 let base_metadata = seed.metadata();
@@ -2438,11 +2460,6 @@ fn decode_asset_texture(
         frame.as_rgba8888(&metadata)?
     };
 
-    let depth_range = if metadata.format == 5 {
-        depth_range
-    } else {
-        None
-    };
     let depth_preview = metadata.format == 5 && !used_color_seed;
 
     if metadata.format == 5 {
@@ -2467,7 +2484,7 @@ fn decode_asset_texture(
         frame_count: bm.image_count,
         codec: bm.codec,
         format: metadata.format,
-        depth_range,
+        depth_stats,
         depth_preview,
     })
 }
@@ -2499,34 +2516,6 @@ fn diff_mismatch_ratio(diff: &TextureDiffSummary) -> f32 {
         0.0
     } else {
         diff.mismatched_pixels as f32 / diff.total_pixels as f32
-    }
-}
-
-fn depth_min_max(data: &[u8]) -> (u16, u16) {
-    if data.is_empty() {
-        return (0, 0);
-    }
-
-    let mut min_value = u16::MAX;
-    let mut max_value = u16::MIN;
-
-    for chunk in data.chunks_exact(2) {
-        let mut value = u16::from_le_bytes([chunk[0], chunk[1]]);
-        if value == 0xF81F {
-            value = 0;
-        }
-        if value < min_value {
-            min_value = value;
-        }
-        if value > max_value {
-            max_value = value;
-        }
-    }
-
-    if min_value == u16::MAX {
-        (0, 0)
-    } else {
-        (min_value, max_value)
     }
 }
 
@@ -3077,7 +3066,7 @@ fn generate_placeholder_texture(bytes: &[u8], asset_name: &str) -> PreviewTextur
         frame_count: 0,
         codec: 0,
         format: 0,
-        depth_range: None,
+        depth_stats: None,
         depth_preview: false,
     }
 }

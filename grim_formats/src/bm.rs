@@ -51,6 +51,62 @@ impl BmFrame {
             other => bail!("unsupported BM format {other} for preview"),
         }
     }
+
+    pub fn depth_stats(&self, metadata: &BmMetadata) -> Result<DepthStats> {
+        ensure!(
+            metadata.format == 5,
+            "depth stats requested for non-depth format {}",
+            metadata.format
+        );
+        ensure!(
+            metadata.bits_per_pixel == 16,
+            "depth stats only supported for 16bpp surfaces (got {}bpp)",
+            metadata.bits_per_pixel
+        );
+        ensure!(
+            self.data.len() % 2 == 0,
+            "depth buffer payload must be a multiple of 2 bytes"
+        );
+
+        const DEPTH_SENTINEL: u16 = 0xF81F;
+
+        let mut min_value = u16::MAX;
+        let mut max_value = u16::MIN;
+        let mut zero_pixels = 0usize;
+        let mut nonzero_pixels = 0usize;
+
+        for chunk in self.data.chunks_exact(2) {
+            let mut value = u16::from_le_bytes([chunk[0], chunk[1]]);
+            if value == DEPTH_SENTINEL {
+                value = 0;
+            }
+            if value == 0 {
+                zero_pixels += 1;
+            } else {
+                nonzero_pixels += 1;
+            }
+            if value < min_value {
+                min_value = value;
+            }
+            if value > max_value {
+                max_value = value;
+            }
+        }
+
+        if zero_pixels + nonzero_pixels == 0 {
+            min_value = 0;
+            max_value = 0;
+        } else if min_value == u16::MAX {
+            min_value = 0;
+        }
+
+        Ok(DepthStats {
+            min: min_value,
+            max: max_value,
+            zero_pixels,
+            nonzero_pixels,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +117,20 @@ pub struct BmMetadata {
     pub width: u32,
     pub height: u32,
     pub format: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthStats {
+    pub min: u16,
+    pub max: u16,
+    pub zero_pixels: usize,
+    pub nonzero_pixels: usize,
+}
+
+impl DepthStats {
+    pub fn total_pixels(&self) -> usize {
+        self.zero_pixels + self.nonzero_pixels
+    }
 }
 
 fn parse_bm_header(bytes: &[u8]) -> Result<(BmMetadata, usize)> {
@@ -463,6 +533,21 @@ mod tests {
     }
 
     #[test]
+    fn codec3_seed_window_reuses_trailing_seed_bytes() {
+        let seed: Vec<u8> = vec![0x11, 0x22, 0x33, 0x44];
+        let mut output = vec![0u8; seed.len()];
+        let compressed = [0x08, 0x00, 0xFC];
+
+        decompress_codec3(&compressed, &mut output, Some(&seed))
+            .expect("decode with seed succeeds");
+
+        assert_eq!(
+            output, seed,
+            "codec3 copy should source bytes from the seed trail"
+        );
+    }
+
+    #[test]
     fn decodes_desk_delta_without_corruption() {
         let base_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_0_ddtws.bm");
@@ -498,6 +583,20 @@ mod tests {
                 diff_bytes = diff_bytes
             );
             assert_eq!(checksum, 233_610_493_010_832_586_3u64);
+
+            if label == "base" {
+                let stats = delta_frame
+                    .depth_stats(&delta_bm.metadata())
+                    .expect("depth stats available");
+                assert_eq!(stats.min, 0x0007);
+                assert_eq!(stats.max, 0xAFF5);
+                assert_eq!(stats.zero_pixels, 0);
+                assert_eq!(
+                    stats.nonzero_pixels,
+                    (delta_bm.width * delta_bm.height) as usize
+                );
+                assert_eq!(stats.total_pixels(), stats.nonzero_pixels);
+            }
         }
     }
 

@@ -1,5 +1,5 @@
-use anyhow::{Result, anyhow};
-use grim_formats::decode_bm;
+use anyhow::{Result, anyhow, ensure};
+use grim_formats::{BmFrame, BmMetadata, decode_bm};
 use std::{collections::HashMap, env};
 
 fn main() -> Result<()> {
@@ -15,6 +15,7 @@ fn main() -> Result<()> {
         .frames
         .first()
         .ok_or_else(|| anyhow!("zbm has no frames"))?;
+    let metadata = zbm.metadata();
 
     let base_data = if let Some(path) = base_path {
         let bm_bytes = std::fs::read(path)?;
@@ -28,31 +29,35 @@ fn main() -> Result<()> {
         None
     };
 
-    print_stats(&zbm_frame.data, base_data.as_deref())?;
+    print_stats(zbm_frame, &metadata, base_data.as_deref())?;
     Ok(())
 }
 
-fn print_stats(zbm: &[u8], base: Option<&[u8]>) -> Result<()> {
-    let mut zero_pixels = 0usize;
-    let mut nonzero_pixels = 0usize;
-    let mut min_value = u16::MAX;
-    let mut max_value = u16::MIN;
+fn print_stats(frame: &BmFrame, metadata: &BmMetadata, base: Option<&[u8]>) -> Result<()> {
+    ensure!(
+        metadata.format == 5,
+        "expected depth buffer format (got {})",
+        metadata.format
+    );
+
+    let stats = frame.depth_stats(metadata)?;
+    let data = frame.data.as_slice();
+
+    if let Some(base) = base {
+        ensure!(
+            base.len() == data.len(),
+            "base bitmap does not match depth map dimensions"
+        );
+    }
+
     let mut diff_from_base = 0usize;
     let mut diff_hist = HashMap::new();
+    let mut first_values = Vec::with_capacity(8);
 
-    for (idx, chunk) in zbm.chunks_exact(2).enumerate() {
-        let value = u16::from_le_bytes([chunk[0], chunk[1]]);
-        if value == 0 {
-            zero_pixels += 1;
-        } else {
-            nonzero_pixels += 1;
-        }
-
-        if value < min_value {
-            min_value = value;
-        }
-        if value > max_value {
-            max_value = value;
+    for (idx, chunk) in data.chunks_exact(2).enumerate() {
+        let value = normalize_depth(u16::from_le_bytes([chunk[0], chunk[1]]));
+        if idx < 8 {
+            first_values.push(value);
         }
 
         if let Some(base) = base {
@@ -67,17 +72,20 @@ fn print_stats(zbm: &[u8], base: Option<&[u8]>) -> Result<()> {
         }
     }
 
-    let total = zero_pixels + nonzero_pixels;
+    let total = stats.total_pixels();
     println!(
-        "pixels: {total} (zero: {zero_pixels}, nonzero: {nonzero_pixels}) min=0x{min_value:04X} max=0x{max_value:04X}"
+        "pixels: {total} (zero: {zero}, nonzero: {nonzero}) min=0x{min:04X} max=0x{max:04X}",
+        zero = stats.zero_pixels,
+        nonzero = stats.nonzero_pixels,
+        min = stats.min,
+        max = stats.max
     );
     if base.is_some() {
         println!("pixels differing from base: {diff_from_base}");
     }
 
     println!("first 8 pixel values (hex):");
-    for chunk in zbm.chunks_exact(2).take(8) {
-        let value = u16::from_le_bytes([chunk[0], chunk[1]]);
+    for value in first_values {
         print!("{:04X} ", value);
     }
     println!();
@@ -92,4 +100,8 @@ fn print_stats(zbm: &[u8], base: Option<&[u8]>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn normalize_depth(value: u16) -> u16 {
+    if value == 0xF81F { 0 } else { value }
 }

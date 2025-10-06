@@ -21,7 +21,7 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Hotspot demo now runs the real Manny desk script so the Lua host captures the approach, dialogue, and audio cues end-to-end.",
                 "Viewer overlays now render audio and boot timeline metadata directly from --audio-log-json / --timeline so hook sequencing stays visible while iterating.",
-                "Stabilise codec3 decoding so Manny's office colour plates and .zbm depth stay faithful in engine captures.",
+                "Codec3 decode harness now asserts seeded window behaviour and records Manny office depth ranges so tooling can flag regressions before captures drift.",
                 "Runtime regression harness now captures Manny's walk path and desk interaction into shared baselines under tools/tests; next focus shifts to threading timeline metadata through the same artefact.",
             ],
         },
@@ -31,7 +31,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Geometry-driven head targeting now records real sector hits; upcoming work focuses on surfacing those cues to downstream tooling.",
                 "Timeline overlay highlight now ships; next up is feeding it hotspot/movement traces so interactive regressions line up with stage sequencing.",
                 "Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
-                "Expose the combined runtime regression artefacts to downstream tooling so movement/audio logs and upcoming timeline traces stay in lock-step.",
+                "Expose the combined runtime regression artefacts — now including codec3 depth stats — to downstream tooling so movement/audio logs and upcoming timeline traces stay in lock-step.",
             ],
         },
         {
@@ -40,7 +40,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Thread the timeline overlay data into the runtime regression baselines so stage changes, hotspot hits, and audio logs travel together for the hotspot run.",
                 "Surface overlay selection data during hotspot playback so Manny's first interaction run can assert both geometry and hook sequencing.",
                 "With the movement harness in place, demo entering Manny's office from boot with one interactive hotspot and capture the flow alongside the movement log in a reusable regression script.",
-                "Lock in regression coverage for codec3 colour + depth paths and the Manny hotspot/movement smoke tests so the scene stays stable once playable.",
+                "Promote the new codec3 depth stats artefact into viewer/runtime tooling and backstop it with automated snapshot comparisons before playthrough polish resumes.",
             ],
         },
         {
