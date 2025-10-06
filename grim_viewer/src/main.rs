@@ -1604,6 +1604,60 @@ impl SceneBounds {
         self.update(other.min);
         self.update(other.max);
     }
+
+    fn projection_axes(&self) -> (usize, usize) {
+        let spans = [
+            (self.max[0] - self.min[0]).abs(),
+            (self.max[1] - self.min[1]).abs(),
+            (self.max[2] - self.min[2]).abs(),
+        ];
+
+        let mut horizontal = 0usize;
+        for axis in 1..3 {
+            if spans[axis] > spans[horizontal] {
+                horizontal = axis;
+            }
+        }
+
+        let mut vertical = (horizontal + 1) % 3;
+        for axis in 0..3 {
+            if axis == horizontal {
+                continue;
+            }
+            if spans[axis] > spans[vertical] || vertical == horizontal {
+                vertical = axis;
+            }
+        }
+
+        (horizontal, vertical)
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::SceneBounds;
+
+    #[test]
+    fn projection_axes_prioritise_largest_spans() {
+        let bounds = SceneBounds {
+            min: [0.0, -2.0, 1.0],
+            max: [3.0, 4.0, 1.5],
+        };
+        let (horizontal, vertical) = bounds.projection_axes();
+        assert_eq!(horizontal, 1);
+        assert_eq!(vertical, 0);
+    }
+
+    #[test]
+    fn projection_axes_fall_back_when_axes_flat() {
+        let bounds = SceneBounds {
+            min: [1.0, 1.0, 1.0],
+            max: [1.0, 2.5, 1.0],
+        };
+        let (horizontal, vertical) = bounds.projection_axes();
+        assert_eq!(horizontal, 1);
+        assert_ne!(vertical, horizontal);
+    }
 }
 
 #[repr(C)]
@@ -2905,8 +2959,11 @@ impl ViewerState {
             None => return instances,
         };
 
-        let width = (bounds.max[0] - bounds.min[0]).max(0.001);
-        let depth = (bounds.max[2] - bounds.min[2]).max(0.001);
+        let (horizontal_axis, vertical_axis) = bounds.projection_axes();
+        let horizontal_min = bounds.min[horizontal_axis];
+        let vertical_min = bounds.min[vertical_axis];
+        let horizontal_span = (bounds.max[horizontal_axis] - horizontal_min).max(0.001);
+        let vertical_span = (bounds.max[vertical_axis] - vertical_min).max(0.001);
         let selected = self.selected_entity;
 
         if let Some(trace) = scene.movement_trace() {
@@ -2922,13 +2979,13 @@ impl ViewerState {
 
                 let mut push_marker =
                     |position: [f32; 3], size: f32, color: [f32; 3], highlight: f32| {
-                        let norm_x = (position[0] - bounds.min[0]) / width;
-                        let norm_z = (position[2] - bounds.min[2]) / depth;
-                        if !norm_x.is_finite() || !norm_z.is_finite() {
+                        let norm_h = (position[horizontal_axis] - horizontal_min) / horizontal_span;
+                        let norm_v = (position[vertical_axis] - vertical_min) / vertical_span;
+                        if !norm_h.is_finite() || !norm_v.is_finite() {
                             return;
                         }
-                        let ndc_x = norm_x.clamp(0.0, 1.0) * 2.0 - 1.0;
-                        let ndc_y = 1.0 - norm_z.clamp(0.0, 1.0) * 2.0;
+                        let ndc_x = norm_h.clamp(0.0, 1.0) * 2.0 - 1.0;
+                        let ndc_y = 1.0 - norm_v.clamp(0.0, 1.0) * 2.0;
                         instances.push(MarkerInstance {
                             translate: [ndc_x, ndc_y],
                             size,
@@ -2978,10 +3035,10 @@ impl ViewerState {
                 None => continue,
             };
 
-            let norm_x = (position[0] - bounds.min[0]) / width;
-            let norm_z = (position[2] - bounds.min[2]) / depth;
-            let ndc_x = norm_x.clamp(0.0, 1.0) * 2.0 - 1.0;
-            let ndc_y = 1.0 - norm_z.clamp(0.0, 1.0) * 2.0;
+            let norm_h = (position[horizontal_axis] - horizontal_min) / horizontal_span;
+            let norm_v = (position[vertical_axis] - vertical_min) / vertical_span;
+            let ndc_x = norm_h.clamp(0.0, 1.0) * 2.0 - 1.0;
+            let ndc_y = 1.0 - norm_v.clamp(0.0, 1.0) * 2.0;
 
             let is_selected = matches!(selected, Some(sel) if sel == idx);
             let base_size = match entity.kind {

@@ -27,7 +27,7 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Finish hotspot overlay playback in grim_viewer so Manny's movement/head-target markers line up with the updated regression frames and we can debug the desk interaction live.",
+                "Add an interactive scrubber to grim_viewer so Manny's movement/head-target markers can be stepped alongside the regression frames while debugging the desk interaction.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
         },
@@ -61,7 +61,7 @@ WIP_DATA: Dict[str, Any] = {
             "slug": "hotspot_overlay",
             "title": "Hotspot overlay integration",
             "description": "Surface hotspot traces in viewer",
-            "prompt": "Objective: build on the movement overlay by wiring hotspot/timeline selections into grim_viewer so geometry/head-targeting debugging stays aligned with the runtime captures. With hotspot events now anchored to movement frames, line up the viewer's scrubbing/preview flow on top of those markers.",
+            "prompt": "Objective: build on the movement overlay by wiring hotspot/timeline selections into grim_viewer so geometry/head-targeting debugging stays aligned with the runtime captures. With movement/head markers now matching the regression frames, layer in playback controls and per-event focus so scrubbing the desk interaction stays synced across tooling.",
         },
         {
             "slug": "codec3_regression",
