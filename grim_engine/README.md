@@ -33,6 +33,14 @@ state we need to validate the first playable milestone.
   if the runtime diverges, providing a convenient acceptance test before making
   engine changes.
 
+## Regression Harnesses
+- `cargo test -p grim_engine -- movement_demo_matches_fixture` boots the Lua
+  host, records a fresh movement log, and verifies it matches
+  `tests/fixtures/movement_demo_log.json`. Refresh the fixture with
+  `cargo run -p grim_engine -- --run-lua --movement-demo --movement-log-json \
+  grim_engine/tests/fixtures/movement_demo_log.json` whenever the intended walk
+  path changes (document the reasoning in the commit that updates it).
+
 ## Extending the Crate
 - When adding Lua bindings, mirror ScummVM's semantics and document any gaps so
   downstream tools understand the partial implementations.

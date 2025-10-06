@@ -22,7 +22,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Boot simulation now stubs Manny's desk cut-scene so the Lua host logs memo retrieval and computer interactions without the original precompiled scripts.",
                 "Viewer overlays now render audio and boot timeline metadata directly from --audio-log-json / --timeline so hook sequencing stays visible while iterating.",
                 "Stabilise codec3 decoding so Manny's office colour plates and .zbm depth stay faithful in engine captures.",
-                "Movement demo now proves Manny can walk inside mo.set; focus shifts to wiring a hotspot interaction and promoting the movement log into regression coverage.",
+                "Movement regression harness now guards Manny's walk path; next focus shifts to wiring a hotspot interaction and sharing movement/timeline data across tooling.",
             ],
         },
         {
@@ -31,7 +31,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Geometry-driven head targeting now records real sector hits; upcoming work focuses on surfacing those cues to downstream tooling.",
                 "Timeline overlay highlight now ships; next up is feeding it hotspot/movement traces so interactive regressions line up with stage sequencing.",
                 "Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
-                "Promote the new movement log into automated coverage and extend the harness to cover a hotspot interaction.",
+                "Extend the new movement regression harness to cover a hotspot interaction and capture combined movement/timeline traces.",
             ],
         },
         {
@@ -39,7 +39,7 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Marry the timeline overlay with the movement logger so stage changes and sector hits travel in one regression artifact.",
                 "Surface overlay selection data during hotspot playback so Manny's first interaction run can assert both geometry and hook sequencing.",
-                "Demo entering Manny's office from boot with one interactive hotspot, then capture the flow alongside the movement log in a reusable regression script.",
+                "With the movement harness in place, demo entering Manny's office from boot with one interactive hotspot and capture the flow alongside the movement log in a reusable regression script.",
                 "Lock in regression coverage for codec3 colour + depth paths and the Manny hotspot/movement smoke tests so the scene stays stable once playable.",
             ],
         },
@@ -48,6 +48,7 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Format commits as: <area>: <short change summary> on the first line, then blank line, followed by 'Why:' and 'What:' bullet blocks summarising intent and implementation.",
                 "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
+                "Avoid blank lines between Why/What bullet entries so the commit template stays compact and scannable.",
             ],
         },
     ],
@@ -57,12 +58,6 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Hotspot interaction demo",
             "description": "Prove a single hotspot end-to-end",
             "prompt": "Objective: pick one Manny's office hotspot (tube, computer, or desk) and deliver the full interaction path: approach, use verb, and hear/see the corresponding dialogue. Keep the change list tight, document temporary shims, and note follow-ups for remaining hotspots.",
-        },
-        {
-            "slug": "movement_regression",
-            "title": "Movement regression harness",
-            "description": "Automate Manny walk coverage",
-            "prompt": "Objective: evolve the movement demo into a guardrail. Feed the JSON log into an assertion step (CLI or test), fail when Manny misses expected positions/sector hits, and document how to run it. Ensure cargo test -p grim_engine drives the harness so future control changes stay honest.",
         },
         {
             "slug": "runtime_regression_harness",
