@@ -23,6 +23,7 @@ DEFAULT_ASSET = "mo_0_ddtws.bm"
 DEFAULT_TIMELINE = ROOT_DIR / "tools" / "tests" / "manny_office_timeline.json"
 DEFAULT_MOVEMENT_LOG = ROOT_DIR / "tools" / "tests" / "movement_log.json"
 DEFAULT_EVENT_LOG = ROOT_DIR / "tools" / "tests" / "hotspot_events.json"
+DEFAULT_LAYOUT_PRESET = ROOT_DIR / "grim_viewer" / "presets" / "manny_office_layout.json"
 
 
 def main() -> None:
@@ -155,6 +156,7 @@ def build_verify_args(args, extra: Sequence[str]) -> List[str]:
         viewer_args.extend(["--movement-log", movement])
     if event_log:
         viewer_args.extend(["--event-log", event_log])
+    ensure_layout_preset(viewer_args, extra)
     viewer_args.extend(extra)
     return viewer_args
 
@@ -182,6 +184,7 @@ def build_run_args(args, extra: Sequence[str]) -> List[str]:
         viewer_args.extend(["--movement-log", movement])
     if event_log:
         viewer_args.extend(["--event-log", event_log])
+    ensure_layout_preset(viewer_args, extra)
     viewer_args.extend(extra)
     return viewer_args
 
@@ -217,6 +220,20 @@ def exec_viewer(args, viewer_args: Sequence[str]) -> int:
     print(f"[grim_viewer] launching: {' '.join(command)}")
     completed = subprocess.run(command, env=env)
     return completed.returncode
+
+
+def ensure_layout_preset(viewer_args: List[str], extra: Sequence[str]) -> None:
+    if has_layout_flag(viewer_args) or has_layout_flag(extra):
+        return
+    if DEFAULT_LAYOUT_PRESET.exists():
+        viewer_args.extend(["--layout-preset", str(DEFAULT_LAYOUT_PRESET)])
+
+
+def has_layout_flag(args: Sequence[str]) -> bool:
+    for entry in args:
+        if entry == "--layout-preset" or entry.startswith("--layout-preset="):
+            return True
+    return False
 
 
 def normalize_tail(tail: Iterable[str] | None) -> List[str]:

@@ -1,0 +1,25 @@
+{
+  "audio": {
+    "width": 520,
+    "height": 144,
+    "padding_x": 8,
+    "padding_y": 8
+  },
+  "timeline": {
+    "width": 640,
+    "height": 224,
+    "padding_x": 8,
+    "padding_y": 8
+  },
+  "scrubber": {
+    "width": 520,
+    "height": 176,
+    "padding_x": 8,
+    "padding_y": 8
+  },
+  "minimap": {
+    "min_side": 160.0,
+    "preferred_fraction": 0.3,
+    "max_fraction": 0.5
+  }
+}

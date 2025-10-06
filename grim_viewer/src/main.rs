@@ -90,6 +90,52 @@ struct Args {
     /// Skip creating a winit window/event loop; useful for headless automation
     #[arg(long)]
     headless: bool,
+
+    /// Optional layout preset JSON describing overlay sizes and minimap constraints
+    #[arg(long)]
+    layout_preset: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LayoutPreset {
+    #[serde(default)]
+    audio: Option<PanelPreset>,
+    #[serde(default)]
+    timeline: Option<PanelPreset>,
+    #[serde(default)]
+    scrubber: Option<PanelPreset>,
+    #[serde(default)]
+    minimap: Option<MinimapPreset>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PanelPreset {
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    padding_x: Option<u32>,
+    #[serde(default)]
+    padding_y: Option<u32>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+impl PanelPreset {
+    fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct MinimapPreset {
+    #[serde(default)]
+    min_side: Option<f32>,
+    #[serde(default)]
+    preferred_fraction: Option<f32>,
+    #[serde(default)]
+    max_fraction: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1218,6 +1264,16 @@ fn main() -> Result<()> {
         args.render_diff_threshold
     );
 
+    let layout_preset = args
+        .layout_preset
+        .as_ref()
+        .map(|path| load_layout_preset(path.as_path()))
+        .transpose()?;
+
+    if let Some(path) = args.layout_preset.as_ref() {
+        println!("Using layout preset {}", path.display());
+    }
+
     let (asset_name, asset_bytes, source_archive) =
         load_asset_bytes(&args.manifest, &args.asset).context("loading requested asset")?;
     println!(
@@ -1526,6 +1582,7 @@ fn main() -> Result<()> {
         decode_result,
         scene.clone(),
         audio_overlay_requested,
+        layout_preset,
     )
     .block_on()?;
 
@@ -2731,6 +2788,14 @@ fn parse_f32(value: &str) -> Option<f32> {
     trimmed.parse::<f32>().ok()
 }
 
+fn load_layout_preset(path: &Path) -> Result<LayoutPreset> {
+    let data = fs::read_to_string(path)
+        .with_context(|| format!("reading layout preset {}", path.display()))?;
+    let preset: LayoutPreset = serde_json::from_str(&data)
+        .with_context(|| format!("parsing layout preset {}", path.display()))?;
+    Ok(preset)
+}
+
 fn load_asset_bytes(manifest_path: &Path, asset: &str) -> Result<(String, Vec<u8>, PathBuf)> {
     let data = std::fs::read(manifest_path)
         .with_context(|| format!("reading asset manifest {}", manifest_path.display()))?;
@@ -2848,6 +2913,26 @@ impl From<&OverlayConfig> for PanelSize {
             width: config.width as f32,
             height: config.height as f32,
         }
+    }
+}
+
+impl OverlayConfig {
+    fn with_preset(mut self, preset: Option<&PanelPreset>) -> Self {
+        if let Some(preset) = preset {
+            if let Some(width) = preset.width {
+                self.width = width;
+            }
+            if let Some(height) = preset.height {
+                self.height = height;
+            }
+            if let Some(padding_x) = preset.padding_x {
+                self.padding_x = padding_x;
+            }
+            if let Some(padding_y) = preset.padding_y {
+                self.padding_y = padding_y;
+            }
+        }
+        self
     }
 }
 
@@ -3186,6 +3271,7 @@ impl ViewerState {
         decode_result: Result<PreviewTexture>,
         scene: Option<Arc<ViewerScene>>,
         enable_audio_overlay: bool,
+        layout_preset: Option<LayoutPreset>,
     ) -> Result<Self> {
         let size = window.inner_size();
 
@@ -3389,14 +3475,23 @@ impl ViewerState {
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
         });
 
-        let (audio_overlay, audio_panel) = if enable_audio_overlay {
+        let layout_preset = layout_preset.unwrap_or_default();
+        let audio_preset = layout_preset.audio.as_ref();
+        let scrubber_preset = layout_preset.scrubber.as_ref();
+        let timeline_preset = layout_preset.timeline.as_ref();
+        let minimap_preset = layout_preset.minimap.as_ref();
+
+        let audio_enabled =
+            enable_audio_overlay && audio_preset.map(PanelPreset::enabled).unwrap_or(true);
+        let (audio_overlay, audio_panel) = if audio_enabled {
             let config = OverlayConfig {
                 width: 520,
                 height: 144,
                 padding_x: 8,
                 padding_y: 8,
                 label: "audio-overlay",
-            };
+            }
+            .with_preset(audio_preset);
             let panel = PanelSize::from(&config);
             let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
             (Some(overlay), Some(panel))
@@ -3408,14 +3503,18 @@ impl ViewerState {
             .as_ref()
             .and_then(|scene| MovementScrubber::new(scene));
 
-        let (scrubber_overlay, scrubber_panel) = if scrubber.is_some() {
+        let scrubber_available = scrubber.is_some();
+        let scrubber_enabled =
+            scrubber_available && scrubber_preset.map(PanelPreset::enabled).unwrap_or(true);
+        let (scrubber_overlay, scrubber_panel) = if scrubber_enabled {
             let config = OverlayConfig {
                 width: 520,
                 height: 176,
                 padding_x: 8,
                 padding_y: 8,
                 label: "scrubber-overlay",
-            };
+            }
+            .with_preset(scrubber_preset);
             let panel = PanelSize::from(&config);
             let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
             (Some(overlay), Some(panel))
@@ -3428,14 +3527,17 @@ impl ViewerState {
             .and_then(|scene| scene.timeline.as_ref())
             .is_some();
 
-        let (timeline_overlay, timeline_panel) = if timeline_available {
+        let timeline_enabled =
+            timeline_available && timeline_preset.map(PanelPreset::enabled).unwrap_or(true);
+        let (timeline_overlay, timeline_panel) = if timeline_enabled {
             let config = OverlayConfig {
                 width: 640,
                 height: 224,
                 padding_x: 8,
                 padding_y: 8,
                 label: "timeline-overlay",
-            };
+            }
+            .with_preset(timeline_preset);
             let panel = PanelSize::from(&config);
             let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
             (Some(overlay), Some(panel))
@@ -3443,7 +3545,18 @@ impl ViewerState {
             (None, None)
         };
 
-        let minimap_constraints = MinimapConstraints::default();
+        let mut minimap_constraints = MinimapConstraints::default();
+        if let Some(preset) = minimap_preset {
+            if let Some(min_side) = preset.min_side {
+                minimap_constraints.min_side = min_side;
+            }
+            if let Some(preferred_fraction) = preset.preferred_fraction {
+                minimap_constraints.preferred_fraction = preferred_fraction;
+            }
+            if let Some(max_fraction) = preset.max_fraction {
+                minimap_constraints.max_fraction = max_fraction;
+            }
+        }
         let ui_layout = UiLayout::new(
             size,
             audio_panel,

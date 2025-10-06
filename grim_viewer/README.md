@@ -35,6 +35,26 @@ timeline markers, and track audio cues during development.
 - `--headless --verify-render` performs the offscreen render diff, useful in CI
   or quick sanity checks before editing shader code.
 
+## Layout Presets
+- `grim_viewer` accepts `--layout-preset <file>` to size HUD panels with the
+  Taffy helper instead of hardcoding coordinates. JSON presets expose per-panel
+  `width`, `height`, `padding_x`, and `padding_y` fields; add `"enabled": false`
+  to hide a panel without editing Rust.
+- The Manny baseline preset lives at
+  `grim_viewer/presets/manny_office_layout.json`. The helper script
+  `python tools/grim_viewer.py run` automatically forwards it, so day-to-day
+  launches always share the same declarative layout.
+- Tweak the preset (or point `--layout-preset` at a copy) when you need extra
+  room for new overlays. Minimap sizing uses `min_side`, `preferred_fraction`,
+  and `max_fraction` to describe its responsive bounds.
+- Example snippet that shrinks the timeline while disabling the audio panel:
+  ```json
+  {
+    "audio": { "enabled": false },
+    "timeline": { "width": 560, "height": 200 }
+  }
+  ```
+
 ## Extending the Crate
 - Use the types in `audio_log.rs` to normalize new event sources so overlays
   stay consistent.
