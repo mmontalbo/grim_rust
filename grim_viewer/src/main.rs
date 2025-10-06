@@ -2206,6 +2206,15 @@ enum MarkerProjection<'a> {
         horizontal_span: f32,
         vertical_span: f32,
     },
+    TopDownPanel {
+        horizontal_axis: usize,
+        vertical_axis: usize,
+        horizontal_min: f32,
+        vertical_min: f32,
+        horizontal_span: f32,
+        vertical_span: f32,
+        layout: MinimapLayout,
+    },
 }
 
 impl<'a> MarkerProjection<'a> {
@@ -2234,7 +2243,107 @@ impl<'a> MarkerProjection<'a> {
                 let ndc_y = 1.0 - scaled_v * 2.0;
                 Some([ndc_x, ndc_y])
             }
+            MarkerProjection::TopDownPanel {
+                horizontal_axis,
+                vertical_axis,
+                horizontal_min,
+                vertical_min,
+                horizontal_span,
+                vertical_span,
+                layout,
+            } => {
+                let norm_h = (position[*horizontal_axis] - *horizontal_min) / *horizontal_span;
+                let norm_v = (position[*vertical_axis] - *vertical_min) / *vertical_span;
+                if !norm_h.is_finite() || !norm_v.is_finite() {
+                    return None;
+                }
+                layout.project(norm_h, norm_v)
+            }
         }
+    }
+}
+
+const MINIMAP_WINDOW_PADDING_PX: f32 = 16.0;
+const MINIMAP_CONTENT_MARGIN: f32 = 0.08;
+const MINIMAP_MIN_MARKER_SIZE: f32 = 0.012;
+
+#[derive(Clone, Copy)]
+struct MinimapLayout {
+    center: [f32; 2],
+    half_extent_x: f32,
+    half_extent_y: f32,
+}
+
+impl MinimapLayout {
+    fn from_window(size: PhysicalSize<u32>) -> Option<Self> {
+        let width = size.width as f32;
+        let height = size.height as f32;
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+
+        let available_width = width - 2.0 * MINIMAP_WINDOW_PADDING_PX;
+        let available_height = height - 2.0 * MINIMAP_WINDOW_PADDING_PX;
+        if available_width <= 0.0 || available_height <= 0.0 {
+            return None;
+        }
+
+        let limit = available_width
+            .min(available_height)
+            .min(width * 0.5)
+            .min(height * 0.5);
+        if limit <= 0.0 {
+            return None;
+        }
+
+        let panel_size = limit;
+        let right_px = width - MINIMAP_WINDOW_PADDING_PX;
+        let left_px = right_px - panel_size;
+        let bottom_px = height - MINIMAP_WINDOW_PADDING_PX;
+        let top_px = bottom_px - panel_size;
+
+        let center_x_px = left_px + panel_size * 0.5;
+        let center_y_px = top_px + panel_size * 0.5;
+
+        let half_extent_x = panel_size / width;
+        let half_extent_y = panel_size / height;
+
+        let center_x = (center_x_px / width) * 2.0 - 1.0;
+        let center_y = 1.0 - (center_y_px / height) * 2.0;
+
+        Some(Self {
+            center: [center_x, center_y],
+            half_extent_x,
+            half_extent_y,
+        })
+    }
+
+    fn panel_width(&self) -> f32 {
+        self.half_extent_x * 2.0
+    }
+
+    fn panel_height(&self) -> f32 {
+        self.half_extent_y * 2.0
+    }
+
+    fn scaled_size(&self, fraction: f32) -> f32 {
+        (self.panel_width().min(self.panel_height()) * fraction).max(MINIMAP_MIN_MARKER_SIZE)
+    }
+
+    fn project(&self, norm_h: f32, norm_v: f32) -> Option<[f32; 2]> {
+        if !norm_h.is_finite() || !norm_v.is_finite() {
+            return None;
+        }
+        let clamp_h = norm_h.clamp(0.0, 1.0);
+        let clamp_v = norm_v.clamp(0.0, 1.0);
+        let usable = (1.0 - 2.0 * MINIMAP_CONTENT_MARGIN).max(0.0);
+        let scaled_h = MINIMAP_CONTENT_MARGIN + clamp_h * usable;
+        let scaled_v = MINIMAP_CONTENT_MARGIN + (1.0 - clamp_v) * usable;
+
+        let offset_x = (scaled_h - 0.5) * self.panel_width();
+        let offset_y = (0.5 - scaled_v) * self.panel_height();
+
+        Some([self.center[0] + offset_x, self.center[1] + offset_y])
     }
 }
 
@@ -3426,6 +3535,10 @@ impl ViewerState {
         self.size
     }
 
+    fn minimap_layout(&self) -> Option<MinimapLayout> {
+        MinimapLayout::from_window(self.size)
+    }
+
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
@@ -3510,6 +3623,42 @@ impl ViewerState {
                 0..MARKER_VERTICES.len() as u32,
                 0..marker_instances.len() as u32,
             );
+        }
+
+        if let Some(minimap_instances) = self.build_minimap_instances() {
+            if !minimap_instances.is_empty() {
+                self.ensure_marker_capacity(minimap_instances.len());
+                self.queue.write_buffer(
+                    &self.marker_instance_buffer,
+                    0,
+                    cast_slice(&minimap_instances),
+                );
+
+                let mut minimap_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("minimap-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                minimap_pass.set_pipeline(&self.marker_pipeline);
+                minimap_pass.set_vertex_buffer(0, self.marker_vertex_buffer.slice(..));
+                let minimap_byte_len =
+                    (minimap_instances.len() * std::mem::size_of::<MarkerInstance>()) as u64;
+                minimap_pass
+                    .set_vertex_buffer(1, self.marker_instance_buffer.slice(0..minimap_byte_len));
+                minimap_pass.draw(
+                    0..MARKER_VERTICES.len() as u32,
+                    0..minimap_instances.len() as u32,
+                );
+            }
         }
 
         if let Some(overlay) = self.audio_overlay.as_mut() {
@@ -3855,6 +4004,150 @@ impl ViewerState {
         }
 
         instances
+    }
+
+    fn build_minimap_instances(&self) -> Option<Vec<MarkerInstance>> {
+        let scene = self.scene.as_ref()?;
+        let bounds = scene.position_bounds.as_ref()?;
+        let layout = self.minimap_layout()?;
+
+        let (horizontal_axis, vertical_axis) = bounds.projection_axes();
+        let horizontal_min = bounds.min[horizontal_axis];
+        let vertical_min = bounds.min[vertical_axis];
+        let horizontal_span = (bounds.max[horizontal_axis] - horizontal_min).max(0.001);
+        let vertical_span = (bounds.max[vertical_axis] - vertical_min).max(0.001);
+
+        let projection = MarkerProjection::TopDownPanel {
+            horizontal_axis,
+            vertical_axis,
+            horizontal_min,
+            vertical_min,
+            horizontal_span,
+            vertical_span,
+            layout,
+        };
+
+        let mut instances = Vec::new();
+        let panel_size = layout.panel_width();
+        instances.push(MarkerInstance {
+            translate: layout.center,
+            size: panel_size,
+            highlight: 0.0,
+            color: [0.07, 0.08, 0.12],
+            _padding: 0.0,
+        });
+
+        let mut push_marker = |position: [f32; 3], size: f32, color: [f32; 3], highlight: f32| {
+            if let Some([ndc_x, ndc_y]) = projection.project(position) {
+                if !ndc_x.is_finite() || !ndc_y.is_finite() {
+                    return;
+                }
+                instances.push(MarkerInstance {
+                    translate: [ndc_x, ndc_y],
+                    size,
+                    highlight,
+                    color,
+                    _padding: 0.0,
+                });
+            }
+        };
+
+        let scale_size = |base: f32| layout.scaled_size(base * 0.5);
+
+        if let Some(trace) = scene.movement_trace() {
+            if !trace.samples.is_empty() {
+                let limit = 96_usize;
+                let step = (trace.samples.len().max(limit) / limit).max(1);
+                let path_color = [0.75, 0.65, 0.95];
+                let start_color = [0.35, 0.78, 0.88];
+                let end_color = [0.98, 0.58, 0.42];
+                let path_size = scale_size(0.032);
+                let start_size = scale_size(0.044);
+                let end_size = scale_size(0.045);
+
+                let (scrub_position, highlight_event_scene_index) = match self.scrubber.as_ref() {
+                    Some(scrubber) => (
+                        scrubber.current_position(trace),
+                        scrubber.highlighted_event().map(|event| event.scene_index),
+                    ),
+                    None => (None, None),
+                };
+
+                if let Some(first) = trace.samples.first() {
+                    push_marker(first.position, start_size, start_color, 0.0);
+                }
+
+                let len = trace.samples.len();
+                for (idx, sample) in trace.samples.iter().enumerate().step_by(step) {
+                    if idx == 0 || idx + 1 == len {
+                        continue;
+                    }
+                    push_marker(sample.position, path_size, path_color, 0.0);
+                }
+
+                if trace.samples.len() > 1 {
+                    if let Some(last) = trace.samples.last() {
+                        push_marker(last.position, end_size, end_color, 0.0);
+                    }
+                }
+
+                for (idx, event) in scene.hotspot_events().iter().enumerate() {
+                    let frame = match event.frame {
+                        Some(frame) => frame,
+                        None => continue,
+                    };
+                    let position = match trace.nearest_position(frame) {
+                        Some(pos) => pos,
+                        None => continue,
+                    };
+                    let (marker_size, mut marker_color, mut marker_highlight) =
+                        event_marker_style(event.kind());
+                    let marker_size = scale_size(marker_size);
+                    if Some(idx) == highlight_event_scene_index {
+                        marker_highlight = marker_highlight.max(0.9);
+                        marker_color = [0.98, 0.93, 0.32];
+                    }
+                    push_marker(position, marker_size, marker_color, marker_highlight);
+                }
+
+                if let Some(position) = scrub_position {
+                    push_marker(position, scale_size(0.058), [0.2, 0.95, 0.85], 1.0);
+                }
+            }
+        }
+
+        let selected = self.selected_entity;
+        for (idx, entity) in scene.entities.iter().enumerate() {
+            let position = match entity.position {
+                Some(pos) => pos,
+                None => continue,
+            };
+
+            let is_selected = matches!(selected, Some(sel) if sel == idx);
+            let base_size = match entity.kind {
+                SceneEntityKind::Actor => 0.06,
+                SceneEntityKind::Object => 0.05,
+                SceneEntityKind::InterestActor => 0.045,
+            };
+            let size = if is_selected {
+                scale_size(base_size * 1.2)
+            } else {
+                scale_size(base_size)
+            };
+            let color = if is_selected {
+                [0.95, 0.35, 0.25]
+            } else {
+                match entity.kind {
+                    SceneEntityKind::Actor => [0.25, 0.85, 0.62],
+                    SceneEntityKind::Object => [0.3, 0.65, 0.98],
+                    SceneEntityKind::InterestActor => [0.88, 0.74, 0.32],
+                }
+            };
+            let highlight = if is_selected { 1.0 } else { 0.0 };
+            push_marker(position, size, color, highlight);
+        }
+
+        Some(instances)
     }
 
     fn ensure_marker_capacity(&mut self, required: usize) {

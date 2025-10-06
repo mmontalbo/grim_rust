@@ -29,14 +29,15 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Prototype a dedicated minimap panel in the bottom-right quadrant that renders a true top-down 2D view of Manny's office to complement the perspective overlay during debugging.",
-                "Fold the refreshed Manny baseline overlays into the minimap work so perspective + top-down views stay aligned while we iterate on playback controls.",
+                "Shake down the new minimap panel in the bottom-right quadrant: validate Manny's path and hotspot markers stay registered against the baseline capture while scrubbing.",
+                "Rev the Manny baseline overlays once the minimap orientation is locked so the perspective and top-down views use the same regression artefacts.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
         },
         {
             "title": "Upcoming Targets",
             "body": [
+                "Add a minimap toggle and quick legend in grim_viewer once playback validation passes so the panel remains useful without overwhelming the first-playable workflow.",
                 "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth, event log) current so cargo test -p grim_engine -- runtime_regression remains green; hotspot events now backfill the opening frames and approach markers anchor to the first movement frame, so refresh the full capture set together when behaviour shifts.",
                 "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
             ],
