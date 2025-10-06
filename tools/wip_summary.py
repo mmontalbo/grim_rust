@@ -34,8 +34,8 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Upcoming Targets",
             "body": [
-                "Capture a reproducible boot→hotspot script that bundles movement, audio, timeline, and depth artefacts for sharing.",
-                "Prototype a viewer overlay that can consume the hotspot event log alongside movement and depth stats.",
+                "Finish hotspot overlay playback in grim_viewer so movement, selection, and dialogue markers stay aligned end-to-end.",
+                "Run the Manny computer loop via grim_engine/grim_viewer to confirm load→navigate→interact is ship-ready (call out blockers if any).",
             ],
         },
         {
