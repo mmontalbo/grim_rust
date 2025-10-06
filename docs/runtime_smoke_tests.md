@@ -40,7 +40,15 @@ Key flags:
 - `--movement-demo` records Manny's trajectory; `--movement-log-json` stores
   the per-frame samples (position, yaw, walk-sector hits).
 - `--audio-log-json` captures the SFX/music events emitted by the run.
-- `--depth-stats-json` snapshots the codec3 depth summary so the viewer can\n  cross-check depth ranges without re-decoding assets.\n- `--event-log-json` records the hotspot/head-target trace used by the viewer's\n  movement overlay.\n
+- `--depth-stats-json` snapshots the codec3 depth summary so the viewer can
+  cross-check depth ranges without re-decoding assets. The capture stores the
+  seeded checksum alongside the minimum/maximum depth values so overlays can
+  confirm codec3 parity without re-decoding the bitmap each run.
+- `--event-log-json` records the hotspot/head-target trace used by the viewer's
+  movement overlay. Each entry carries the runtime sequence counter and, when
+  available, the movement frame that triggered the event so geometry changes
+  line up with Manny's position.
+
 The command prints a transcript to stdout that includes `hotspot.demo.start`/
 `hotspot.demo.end` markers alongside dialogue/cutscene logs. The JSON artefacts
 are written to the paths you supplied—place them under `tools/tests/` when you
@@ -59,11 +67,48 @@ want to share them with the regression harness.
   hook summary produced by `--timeline-json`; the regression harness keeps it
   in lockstep with the hotspot artefacts so the viewer overlay reflects the
   same snapshot.
+- **Depth stats (`manny_office_depth_stats.json`)** – codec3 metadata for the Manny desk
+  depth map (`mo_0_ddtws.zbm`). The JSON payload stores the image dimensions, seeded
+  FNV-1a checksum, and a small histogram (minimum/maximum values, their hexadecimal
+  forms, and zero/non-zero pixel counts). This lets regression runs confirm the depth
+  decode matches the retail engine without sharing the full bitmap.
+  Example capture:
+    ```json
+    {
+      "asset": "mo_0_ddtws.zbm",
+      "dimensions": [640, 480],
+      "checksum_fnv1a": 2336104930108325863,
+      "depth": {
+        "min": 7,
+        "max": 45045,
+        "zero_pixels": 0,
+        "nonzero_pixels": 307200
+      }
+    }
+    ```
 - **Hotspot event log (`hotspot_events.json`)** – selected runtime events
   (hotspot markers, set selections, Manny head-target updates, ignore-box
-  toggles, dialogue prompts) annotated with the last seen movement frame.
-  `grim_viewer` overlays these markers on the movement trace to highlight
-  geometry interactions.
+  toggles, dialogue prompts) annotated with the last seen movement frame and
+  ordered by the runtime sequence counter. `grim_viewer` overlays these markers
+  on the movement trace to highlight geometry interactions, and the regression
+  harness fails if the structured log diverges from the baseline.
+  Sample entries:
+    ```json
+    {
+      "events": [
+        {
+          "sequence": 1136,
+          "frame": 24,
+          "label": "hotspot.demo.start computer"
+        },
+        {
+          "sequence": 11419,
+          "frame": 24,
+          "label": "dialog.begin manny /moma112/"
+        }
+      ]
+    }
+    ```
 - **Stdout transcript** – includes `dialog.begin manny /moma112/` style markers
   and any geometry/debug events the Lua host recorded. Redirect it to a file if
   you need to diff runs across branches.

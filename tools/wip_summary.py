@@ -35,7 +35,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Upcoming Targets",
             "body": [
                 "Capture a reproducible boot→hotspot script that bundles movement, audio, timeline, and depth artefacts for sharing.",
-                "Document the --depth-stats-json workflow and capture the runtime event log as a structured artefact for future overlays.",
+                "Prototype a viewer overlay that can consume the hotspot event log alongside movement and depth stats.",
             ],
         },
         {
