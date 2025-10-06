@@ -1000,8 +1000,10 @@ name = "grim_formats"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "memmap2",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]

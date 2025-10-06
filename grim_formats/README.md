@@ -92,6 +92,20 @@ stored as null-terminated strings paired with 64-bit offsets and 32-bit sizes.
 LAB files simply concatenate the payloads, so feeding the byte slice into the
 appropriate decoder is sufficient.
 
+### Extraction utility
+
+The binary `lab_extract` materialises entire LAB archives (or a filtered subset)
+into a directory tree:
+
+```bash
+cargo run -p grim_formats --bin lab_extract -- \
+  --root "$GRIM_INSTALL_PATH" \
+  --dest extracted
+```
+
+Use `--lab` to target specific archives, `--manifest` for a newline-delimited
+list of filenames, and `--asset` to grab a handful of entries interactively.
+
 ---
 
 ## Other Known Formats (to map later)
