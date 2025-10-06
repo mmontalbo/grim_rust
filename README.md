@@ -20,8 +20,10 @@ flow and prototype modern tooling around it.
 - `grim_formats/` – asset format helpers and CLIs; see `grim_formats/README.md`.
 - `grim_viewer/` – visual tooling built on the extracted data; see
   `grim_viewer/README.md`.
-- `docs/` – reference material, including `docs/startup_overview.md` for the
-  retail boot and startup notes.
+- `docs/` – reference material:
+  - `docs/startup_overview.md` walks through the retail boot sequence.
+  - `docs/runtime_smoke_tests.md` documents the Manny hotspot demo and the CLI
+    loop we use for runtime smoke tests.
 - `tools/` – repo-level utilities such as `tools/wip_summary.py` for the current
   project plan and `tools/sync_assets.sh` for asset preparation.
 
@@ -29,6 +31,10 @@ flow and prototype modern tooling around it.
 - Run workspace checks from inside `nix-shell`: `cargo fmt` and `cargo test` (or
   crate-specific commands) keep the tree tidy.
 - Use `tools/wip_summary.py [--workstream SLUG]` to review the current project
-  focus before diving into a new task.
+  focus before diving into a new task. When you finish a thread, update the
+  corresponding section in `tools/wip_summary.py` (usually by pruning the
+  completed workstream and nudging the “Active Threads” / “Next Steps”) so the
+  next contributor sees the new priority without having to chase context in the
+  commit log.
 - Component-specific workflows and deep dives live in each crate's README; start
   there when modifying a particular subsystem.
