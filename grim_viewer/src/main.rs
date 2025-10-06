@@ -2404,12 +2404,66 @@ impl MinimapLayout {
         let clamp_v = norm_v.clamp(0.0, 1.0);
         let usable = (1.0 - 2.0 * MINIMAP_CONTENT_MARGIN).max(0.0);
         let scaled_h = MINIMAP_CONTENT_MARGIN + clamp_h * usable;
-        let scaled_v = MINIMAP_CONTENT_MARGIN + (1.0 - clamp_v) * usable;
+        let scaled_v = MINIMAP_CONTENT_MARGIN + clamp_v * usable;
 
         let offset_x = (scaled_h - 0.5) * self.panel_width();
         let offset_y = (0.5 - scaled_v) * self.panel_height();
 
         Some([self.center[0] + offset_x, self.center[1] + offset_y])
+    }
+}
+
+#[cfg(test)]
+mod minimap_tests {
+    use super::{MarkerProjection, MinimapLayout};
+    use winit::dpi::PhysicalSize;
+
+    #[test]
+    fn minimap_panel_matches_top_down_orientation() {
+        let layout = MinimapLayout::from_window(PhysicalSize::new(1280, 720))
+            .expect("layout should resolve for standard window size");
+
+        let top_down = MarkerProjection::TopDown {
+            horizontal_axis: 0,
+            vertical_axis: 1,
+            horizontal_min: 0.0,
+            vertical_min: 0.0,
+            horizontal_span: 1.0,
+            vertical_span: 1.0,
+        };
+
+        let panel = MarkerProjection::TopDownPanel {
+            horizontal_axis: 0,
+            vertical_axis: 1,
+            horizontal_min: 0.0,
+            vertical_min: 0.0,
+            horizontal_span: 1.0,
+            vertical_span: 1.0,
+            layout,
+        };
+
+        let bottom_flat = top_down
+            .project([0.0, 0.0, 0.0])
+            .expect("baseline projection should succeed")[1];
+        let top_flat = top_down
+            .project([0.0, 1.0, 0.0])
+            .expect("baseline projection should succeed")[1];
+
+        let bottom_panel = panel
+            .project([0.0, 0.0, 0.0])
+            .expect("panel projection should succeed")[1];
+        let top_panel = panel
+            .project([0.0, 1.0, 0.0])
+            .expect("panel projection should succeed")[1];
+
+        assert!(
+            top_flat < bottom_flat,
+            "top-down projection should place higher axes lower in clip space"
+        );
+        assert!(
+            top_panel < bottom_panel,
+            "minimap panel should preserve top-down vertical orientation"
+        );
     }
 }
 

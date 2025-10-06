@@ -29,7 +29,7 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Shake down the new minimap panel in the bottom-right quadrant: validate Manny's path and hotspot markers stay registered against the baseline capture while scrubbing.",
+                "Wire the minimap panel into headless verification so Manny's path and hotspot markers fail fast when they drift while scrubbing.",
                 "Introduce a lightweight Rust-side layout helper (or egui overlay) so viewer panels can be positioned declaratively without leaving the existing wgpu stack.",
                 "Rev the Manny baseline overlays once the minimap orientation is locked so the perspective and top-down views use the same regression artefacts.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
