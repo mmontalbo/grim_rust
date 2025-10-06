@@ -324,6 +324,16 @@ impl MovementTrace {
         self.samples.len()
     }
 
+    #[cfg(test)]
+    fn first_frame(&self) -> u32 {
+        self.first_frame
+    }
+
+    #[cfg(test)]
+    fn last_frame(&self) -> u32 {
+        self.last_frame
+    }
+
     fn yaw_range(&self) -> Option<(f32, f32)> {
         match (self.yaw_min, self.yaw_max) {
             (Some(min), Some(max)) => Some((min, max)),
@@ -721,6 +731,8 @@ mod scrubber_tests {
                     label: "actor.manny.head_target /tube".to_string(),
                 },
             ],
+            camera: None,
+            active_setup: None,
         };
         scene.attach_movement_trace(trace);
         scene
@@ -4454,6 +4466,8 @@ fn summarize_texture_diff(preview: &PreviewTexture, rendered: &[u8]) -> Result<T
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
+    use std::path::PathBuf;
 
     fn make_diff(total: u32, mismatched: u32) -> TextureDiffSummary {
         TextureDiffSummary {
@@ -4491,6 +4505,98 @@ mod tests {
             err.to_string()
                 .contains("render diff threshold must be between 0 and 1")
         );
+    }
+
+    #[test]
+    fn manny_movement_projects_with_recovered_camera() -> Result<()> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root should exist");
+
+        let timeline_path = workspace_root.join("tools/tests/manny_office_timeline.json");
+        let manifest_path = workspace_root.join("artifacts/manny_office_assets.json");
+        let movement_path = workspace_root.join("tools/tests/movement_log.json");
+        let event_log_path = workspace_root.join("tools/tests/hotspot_events.json");
+        let dev_install = workspace_root.join("dev-install");
+
+        if !(timeline_path.is_file()
+            && manifest_path.is_file()
+            && movement_path.is_file()
+            && dev_install.is_dir())
+        {
+            eprintln!("skipping camera projection test; Manny baseline artefacts not available");
+            return Ok(());
+        }
+
+        let scene = match load_scene_from_timeline(
+            &timeline_path,
+            &manifest_path,
+            Some("mo_tube_balloon.zbm"),
+        ) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipping camera projection test; unable to load scene: {err}");
+                return Ok(());
+            }
+        };
+        let camera = match scene.camera.as_ref() {
+            Some(camera) => camera,
+            None => {
+                eprintln!("skipping camera projection test; timeline did not recover camera");
+                return Ok(());
+            }
+        };
+        assert_eq!(camera.name, "mo_ddtws");
+
+        let asset_bytes = match load_asset_bytes(&manifest_path, "mo_tube_balloon.zbm") {
+            Ok((_, bytes, _)) => bytes,
+            Err(err) => {
+                eprintln!("skipping camera projection test; unable to load asset: {err}");
+                return Ok(());
+            }
+        };
+        let preview = match decode_asset_texture("mo_tube_balloon.zbm", &asset_bytes, None) {
+            Ok(preview) => preview,
+            Err(err) => {
+                eprintln!("skipping camera projection test; unable to decode asset: {err}");
+                return Ok(());
+            }
+        };
+        let aspect = (preview.width.max(1) as f32) / (preview.height.max(1) as f32);
+
+        let projector = scene
+            .camera_projector(aspect)
+            .expect("camera should provide a projector");
+
+        let trace = load_movement_trace(&movement_path)?;
+        let mut projected = 0usize;
+
+        for frame in [trace.first_frame(), trace.last_frame()] {
+            if let Some(position) = trace.nearest_position(frame) {
+                let ndc = projector
+                    .project(position)
+                    .expect("movement sample should project");
+                assert!(ndc[0].abs() <= 1.05 && ndc[1].abs() <= 1.05);
+                projected += 1;
+            }
+        }
+
+        if event_log_path.is_file() {
+            let events = load_hotspot_event_log(&event_log_path)?;
+            for event in events.iter().filter_map(|entry| entry.frame) {
+                if let Some(position) = trace.nearest_position(event) {
+                    let ndc = projector
+                        .project(position)
+                        .expect("hotspot marker should project");
+                    assert!(ndc[0].abs() <= 1.05 && ndc[1].abs() <= 1.05);
+                    projected += 1;
+                    break;
+                }
+            }
+        }
+
+        assert!(projected >= 2, "expected to project baseline samples");
+
+        Ok(())
     }
 }
 

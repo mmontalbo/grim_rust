@@ -24,13 +24,14 @@ timeline markers, and track audio cues during development.
   the pneumatic tube, desk, or other milestone interactions.
 
 ## Typical Usage
+- `python tools/grim_viewer.py run` launches the viewer preloaded with the Manny
+  computer baseline (timeline, movement, hotspot markers). The recovered camera
+  projects the overlay directly onto the plate, so the default view now matches
+  the in-game perspective.
 - `cargo run -p grim_viewer -- --manifest artifacts/manny_office_assets.json`
-  launches the interactive viewer and loads the default plate.
-- `--timeline` overlays boot metadata exported by the engine host, while
-  `--audio-log` streams cue updates captured during a Lua run.
-- `--event-log` layers hotspot/head-target markers and set selection traces
-  recorded by the runtime onto the movement trace so geometry issues stay
-  visible alongside the walk path.
+  still works for custom runs; pass `--timeline`, `--movement-log`, and
+  `--event-log` explicitly when you want the overlay in other scenes.
+- `--audio-log` streams cue updates captured during a Lua run.
 - `--headless --verify-render` performs the offscreen render diff, useful in CI
   or quick sanity checks before editing shader code.
 

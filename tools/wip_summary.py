@@ -22,14 +22,15 @@ WIP_DATA: Dict[str, Any] = {
                 "Familiarise yourself with README.md and the sections below, then pick up the next item in this summary and work it through to a committable state (tests/docs updated, WIP refreshed, commit created).",
                 "List all available workstreams with: python tools/wip_summary.py --json (or refer to the ## Workstreams section).",
                 "For a specific thread, run: python tools/wip_summary.py --workstream <slug> (for example --workstream codec3_regression).",
+                "Use python tools/grim_viewer.py run to load the Manny baseline overlays (add -- --headless on machines without a windowing environment).",
                 "The Manny office regression artefacts we reference live under tools/tests/ (movement_log.json, hotspot_events.json, etc.); skim them the first time so you know what the viewer overlays are visualising.",
             ],
         },
         {
             "title": "Current Focus",
             "body": [
-                "Validate the camera-projected overlay against the Manny computer regression capture and refresh docs/artefacts so the perspective view becomes the default debugging path.",
                 "Prototype a dedicated minimap panel in the bottom-right quadrant that renders a true top-down 2D view of Manny's office to complement the perspective overlay during debugging.",
+                "Fold the refreshed Manny baseline overlays into the minimap work so perspective + top-down views stay aligned while we iterate on playback controls.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
         },

@@ -20,6 +20,9 @@ import shutil
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT_DIR / "artifacts" / "manny_office_assets.json"
 DEFAULT_ASSET = "mo_tube_balloon.zbm"
+DEFAULT_TIMELINE = ROOT_DIR / "tools" / "tests" / "manny_office_timeline.json"
+DEFAULT_MOVEMENT_LOG = ROOT_DIR / "tools" / "tests" / "movement_log.json"
+DEFAULT_EVENT_LOG = ROOT_DIR / "tools" / "tests" / "hotspot_events.json"
 
 
 def main() -> None:
@@ -37,8 +40,18 @@ def main() -> None:
     )
     common.add_argument(
         "--timeline",
-        default=None,
-        help="Optional boot timeline manifest to enumerate entities",
+        default=str(DEFAULT_TIMELINE),
+        help="Boot timeline manifest to enumerate entities (pass 'none' to disable)",
+    )
+    common.add_argument(
+        "--movement-log",
+        default=str(DEFAULT_MOVEMENT_LOG),
+        help="Movement log JSON to overlay (pass 'none' to disable)",
+    )
+    common.add_argument(
+        "--event-log",
+        default=str(DEFAULT_EVENT_LOG),
+        help="Hotspot event log JSON to overlay (pass 'none' to disable)",
     )
     common.add_argument(
         "--render-diff-threshold",
@@ -128,12 +141,20 @@ def build_verify_args(args, extra: Sequence[str]) -> List[str]:
         "--headless",
         "--verify-render",
     ]
-    if args.timeline:
-        viewer_args.extend(["--timeline", args.timeline])
+    timeline = normalize_optional_path(args.timeline)
+    movement = normalize_optional_path(args.movement_log)
+    event_log = normalize_optional_path(args.event_log)
+
+    if timeline:
+        viewer_args.extend(["--timeline", timeline])
     if args.dump_frame:
         viewer_args.extend(["--dump-frame", args.dump_frame])
     if args.dump_render:
         viewer_args.extend(["--dump-render", args.dump_render])
+    if movement:
+        viewer_args.extend(["--movement-log", movement])
+    if event_log:
+        viewer_args.extend(["--event-log", event_log])
     viewer_args.extend(extra)
     return viewer_args
 
@@ -147,12 +168,20 @@ def build_run_args(args, extra: Sequence[str]) -> List[str]:
         "--render-diff-threshold",
         str(args.render_diff_threshold),
     ]
-    if args.timeline:
-        viewer_args.extend(["--timeline", args.timeline])
+    timeline = normalize_optional_path(args.timeline)
+    movement = normalize_optional_path(args.movement_log)
+    event_log = normalize_optional_path(args.event_log)
+
+    if timeline:
+        viewer_args.extend(["--timeline", timeline])
     if args.dump_frame:
         viewer_args.extend(["--dump-frame", args.dump_frame])
     if args.dump_render:
         viewer_args.extend(["--dump-render", args.dump_render])
+    if movement:
+        viewer_args.extend(["--movement-log", movement])
+    if event_log:
+        viewer_args.extend(["--event-log", event_log])
     viewer_args.extend(extra)
     return viewer_args
 
@@ -197,6 +226,15 @@ def normalize_tail(tail: Iterable[str] | None) -> List[str]:
     if tail and tail[0] == "--":
         return tail[1:]
     return tail
+
+
+def normalize_optional_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed or trimmed.lower() in {"none", "off", "disable"}:
+        return None
+    return trimmed
 
 
 def parse_env(entry: str) -> tuple[str, str]:
