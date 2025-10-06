@@ -27,7 +27,7 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth, event log) current so cargo test -p grim_engine -- runtime_regression remains green; hotspot events now backfill the opening frames so refresh the full capture set together when behaviour shifts.",
+                "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth, event log) current so cargo test -p grim_engine -- runtime_regression remains green; hotspot events now backfill the opening frames and approach markers anchor to the first movement frame, so refresh the full capture set together when behaviour shifts.",
                 "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
             ],
         },

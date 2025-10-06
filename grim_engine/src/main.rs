@@ -999,6 +999,33 @@ mod tests {
             "expected fallback frame of 0"
         );
     }
+
+    #[test]
+    fn hotspot_event_log_anchors_approach_to_next_frame() {
+        let events = vec![
+            "movement.frame 114 0.607,2.021".to_string(),
+            "hotspot.demo.approach computer".to_string(),
+            "movement.frame 1 0.500,1.975".to_string(),
+            "movement.frame 2 0.501,1.970".to_string(),
+            "hotspot.demo.start computer".to_string(),
+        ];
+
+        let log = build_hotspot_event_log(&events);
+
+        let approach = log
+            .events
+            .iter()
+            .find(|event| event.label == "hotspot.demo.approach computer")
+            .expect("approach event missing");
+        assert_eq!(approach.frame, Some(1));
+
+        let start = log
+            .events
+            .iter()
+            .find(|event| event.label == "hotspot.demo.start computer")
+            .expect("start event missing");
+        assert_eq!(start.frame, Some(2));
+    }
 }
 
 fn describe_hook_kind(kind: HookKind) -> &'static str {
@@ -1269,12 +1296,18 @@ fn build_hotspot_event_log(events: &[String]) -> HotspotEventLog {
             continue;
         }
 
+        let mut frame = last_frame;
+        let force_backfill = should_anchor_to_next_frame(line);
+        if force_backfill {
+            frame = None;
+        }
+
         let entry = HotspotEventLogEntry {
             sequence: index as u32,
-            frame: last_frame,
+            frame,
             label: line.to_string(),
         };
-        let needs_backfill = entry.frame.is_none();
+        let needs_backfill = force_backfill || entry.frame.is_none();
         filtered.push(entry);
         if needs_backfill {
             pending_without_frame.push(filtered.len() - 1);
@@ -1300,6 +1333,10 @@ fn parse_movement_frame(line: &str) -> Option<u32> {
     let mut parts = remainder.split_whitespace();
     let frame_str = parts.next()?;
     frame_str.parse().ok()
+}
+
+fn should_anchor_to_next_frame(line: &str) -> bool {
+    line.starts_with("hotspot.demo.approach ")
 }
 
 fn is_relevant_event(line: &str, actor_prefixes: &[&str]) -> bool {
