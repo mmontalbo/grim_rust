@@ -22,7 +22,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Boot simulation now stubs Manny's desk cut-scene so the Lua host logs memo retrieval and computer interactions without the original precompiled scripts.",
                 "Viewer now renders the audio overlay direct from --audio-log-json; timeline overlays remain on deck so hook sequencing stays visible while iterating.",
                 "Stabilise codec3 decoding so Manny's office colour plates and .zbm depth stay faithful in engine captures.",
-                "Shift focus from instrumentation proofs to demonstrating a controllable Manny plus at least one hotspot running end-to-end inside the runtime.",
+                "Movement demo now proves Manny can walk inside mo.set; focus shifts to wiring a hotspot interaction and promoting the movement log into regression coverage.",
             ],
         },
         {
@@ -31,7 +31,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Geometry-driven head targeting now records real sector hits; upcoming work focuses on surfacing those cues to downstream tooling.",
                 "Timeline overlay plumbing is queued so the viewer can surface hook sequencing while geometry instrumentation continues to evolve.",
                 "Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
-                "Stand up lightweight regression checks (geometry snapshots, audio logs, interaction smoke) so future refactors protect the playable loop.",
+                "Promote the new movement log into automated coverage and extend the harness to cover a hotspot interaction.",
             ],
         },
         {
@@ -39,8 +39,8 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Project Manny's office boot timeline overlays into the viewer to close out milestone 1 instrumentation.",
                 "Feed the overlay with hook sequencing and selection affordances so geometry and timeline views stay in sync.",
-                "Demo entering Manny's office from boot with walk-able Manny and one interactive hotspot, then capture the flow in a reusable regression script.",
-                "Lock in regression coverage for codec3 colour + depth paths and the Manny hotspot smoke test so the scene stays stable once playable.",
+                "Demo entering Manny's office from boot with one interactive hotspot, then capture the flow alongside the movement log in a reusable regression script.",
+                "Lock in regression coverage for codec3 colour + depth paths and the Manny hotspot/movement smoke tests so the scene stays stable once playable.",
             ],
         },
     ],
@@ -52,16 +52,16 @@ WIP_DATA: Dict[str, Any] = {
             "prompt": "Objective: layer Manny's office boot timeline metadata into grim_viewer so hook sequencing and entity focus appear directly in the HUD. Consume the existing --timeline JSON manifest, project stage labels and hook indices alongside the marker grid, and let ←/→ cycling highlight the corresponding overlay entry. Preserve behaviour when --timeline is absent. Document the flag pairing in docs/startup_overview.md, add targeted unit coverage for any timeline parsing helpers, and run cargo fmt && cargo test -p grim_viewer before handing off.",
         },
         {
-            "slug": "runtime_movement",
-            "title": "Runtime movement slice",
-            "description": "Put Manny under player control",
-            "prompt": "Objective: hook input, walkboxes, and camera follow so Manny can traverse the office without script hacks. Focus on the Lua↔Rust control loop, log any missing bindings, and land a capture (video or log) proving movement and facing adjustments behave as expected.",
-        },
-        {
             "slug": "hotspot_demo",
             "title": "Hotspot interaction demo",
             "description": "Prove a single hotspot end-to-end",
             "prompt": "Objective: pick one Manny's office hotspot (tube, computer, or desk) and deliver the full interaction path: approach, use verb, and hear/see the corresponding dialogue. Keep the change list tight, document temporary shims, and note follow-ups for remaining hotspots.",
+        },
+        {
+            "slug": "movement_regression",
+            "title": "Movement regression harness",
+            "description": "Automate Manny walk coverage",
+            "prompt": "Objective: evolve the movement demo into a guardrail. Feed the JSON log into an assertion step (CLI or test), fail when Manny misses expected positions/sector hits, and document how to run it. Ensure cargo test -p grim_engine drives the harness so future control changes stay honest.",
         },
         {
             "slug": "runtime_regression_harness",
