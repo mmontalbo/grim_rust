@@ -29,9 +29,9 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Prototype a Taffy-driven layout path for viewer panels so we can reason about and communicate UI placement declaratively.",
+                "Fold the new Taffy layout helper into day-to-day viewer workflows (docs + presets) so panels stay declarative without bespoke math.",
                 "Wire the minimap panel into headless verification so Manny's path and hotspot markers fail fast when they drift while scrubbing.",
-                "Introduce a lightweight Rust-side layout helper (or egui overlay) so viewer panels can be positioned declaratively without leaving the existing wgpu stack.",
+                "Prototype an egui-powered overlay inspector so the Taffy layout can be tweaked interactively without wgpu math spelunking.",
                 "Rev the Manny baseline overlays once the minimap orientation is locked so the perspective and top-down views use the same regression artefacts.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
@@ -51,6 +51,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Format commits as: <area>: <short change summary> on the first line, then blank line, followed by 'Why:' and 'What:' bullet blocks summarising intent and implementation.",
                 "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
                 "Avoid blank lines between Why/What bullet entries so the commit template stays compact and scannable.",
+                "Example (with template configured): git commit -m 'grim_viewer: refresh overlay layout' -m $'Why:\\n- unblock minimap verification' -m $'What:\\n- grim_viewer/src/ui_layout.rs: add Taffy helper'",
                 "Use top-level directories for the <area> prefix (grim_engine, grim_viewer, grim_formats, grim_analysis, tools, docs, etc.) instead of generic labels like runtime; split work across commits when multiple components need separate context.",
                 "List one 'What' bullet per file touched using <path>: <brief change> so reviewers can map intent to diffs quickly.",
                 "Re-read the formatted commit after it lands; amend immediately if the prefix, Why/What blocks, or content drift from the guidelines.",

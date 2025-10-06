@@ -11,6 +11,7 @@ use std::{
 
 mod audio_log;
 mod timeline;
+mod ui_layout;
 
 use audio_log::{AudioAggregation, AudioLogTracker};
 
@@ -30,6 +31,7 @@ use serde_json::Value;
 use timeline::{
     HookLookup, HookReference, TimelineSummary, build_timeline_summary, parse_hook_reference,
 };
+use ui_layout::{MinimapConstraints, PanelKind, PanelSize, UiLayout, ViewportRect};
 use wgpu::{
     Backends, COPY_BYTES_PER_ROW_ALIGNMENT, InstanceDescriptor, InstanceFlags, Maintain,
     SurfaceError, util::DeviceExt,
@@ -2329,7 +2331,6 @@ impl<'a> MarkerProjection<'a> {
     }
 }
 
-const MINIMAP_WINDOW_PADDING_PX: f32 = 16.0;
 const MINIMAP_CONTENT_MARGIN: f32 = 0.08;
 const MINIMAP_MIN_MARKER_SIZE: f32 = 0.012;
 
@@ -2341,41 +2342,27 @@ struct MinimapLayout {
 }
 
 impl MinimapLayout {
-    fn from_window(size: PhysicalSize<u32>) -> Option<Self> {
-        let width = size.width as f32;
-        let height = size.height as f32;
+    fn from_rect(rect: ViewportRect, window: PhysicalSize<u32>) -> Option<Self> {
+        let width = window.width.max(1) as f32;
+        let height = window.height.max(1) as f32;
         if width <= 0.0 || height <= 0.0 {
             return None;
         }
 
-        let available_width = width - 2.0 * MINIMAP_WINDOW_PADDING_PX;
-        let available_height = height - 2.0 * MINIMAP_WINDOW_PADDING_PX;
-        if available_width <= 0.0 || available_height <= 0.0 {
+        let rect_width = rect.width.max(0.0);
+        let rect_height = rect.height.max(0.0);
+        if rect_width <= 0.0 || rect_height <= 0.0 {
             return None;
         }
 
-        let limit = available_width
-            .min(available_height)
-            .min(width * 0.5)
-            .min(height * 0.5);
-        if limit <= 0.0 {
-            return None;
-        }
-
-        let panel_size = limit;
-        let right_px = width - MINIMAP_WINDOW_PADDING_PX;
-        let left_px = right_px - panel_size;
-        let bottom_px = height - MINIMAP_WINDOW_PADDING_PX;
-        let top_px = bottom_px - panel_size;
-
-        let center_x_px = left_px + panel_size * 0.5;
-        let center_y_px = top_px + panel_size * 0.5;
-
-        let half_extent_x = panel_size / width;
-        let half_extent_y = panel_size / height;
+        let center_x_px = rect.x + rect_width * 0.5;
+        let center_y_px = rect.y + rect_height * 0.5;
 
         let center_x = (center_x_px / width) * 2.0 - 1.0;
         let center_y = 1.0 - (center_y_px / height) * 2.0;
+
+        let half_extent_x = rect_width / width;
+        let half_extent_y = rect_height / height;
 
         Some(Self {
             center: [center_x, center_y],
@@ -2415,13 +2402,20 @@ impl MinimapLayout {
 
 #[cfg(test)]
 mod minimap_tests {
+    use super::ui_layout::{MinimapConstraints, PanelKind, UiLayout};
     use super::{MarkerProjection, MinimapLayout};
     use winit::dpi::PhysicalSize;
 
     #[test]
     fn minimap_panel_matches_top_down_orientation() {
-        let layout = MinimapLayout::from_window(PhysicalSize::new(1280, 720))
+        let window_size = PhysicalSize::new(1280, 720);
+        let ui_layout = UiLayout::new(window_size, None, None, None, MinimapConstraints::default())
             .expect("layout should resolve for standard window size");
+        let minimap_rect = ui_layout
+            .panel_rect(PanelKind::Minimap)
+            .expect("minimap panel should exist");
+        let layout = MinimapLayout::from_rect(minimap_rect, window_size)
+            .expect("layout should resolve for minimap panel");
 
         let top_down = MarkerProjection::TopDown {
             horizontal_axis: 0,
@@ -2840,20 +2834,21 @@ fn read_asset_slice(path: &Path, offset: u64, size: u32) -> Result<Vec<u8>> {
 }
 
 #[derive(Clone, Copy)]
-enum OverlayAnchor {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-}
-
-#[derive(Clone, Copy)]
 struct OverlayConfig {
     width: u32,
     height: u32,
     padding_x: u32,
     padding_y: u32,
-    anchor: OverlayAnchor,
     label: &'static str,
+}
+
+impl From<&OverlayConfig> for PanelSize {
+    fn from(config: &OverlayConfig) -> Self {
+        PanelSize {
+            width: config.width as f32,
+            height: config.height as f32,
+        }
+    }
 }
 
 struct TextOverlay {
@@ -2866,11 +2861,11 @@ struct TextOverlay {
     height: u32,
     padding_x: u32,
     padding_y: u32,
-    anchor: OverlayAnchor,
     pixels: Vec<u8>,
     dirty: bool,
     visible: bool,
     label: &'static str,
+    layout_rect: ViewportRect,
 }
 
 impl TextOverlay {
@@ -2951,9 +2946,15 @@ impl TextOverlay {
             extent,
         );
 
+        let initial_rect = ViewportRect {
+            x: 0.0,
+            y: 0.0,
+            width: config.width as f32,
+            height: config.height as f32,
+        };
+
         let vertex_buffer = {
-            let vertices =
-                Self::vertex_positions(config.width, config.height, config.anchor, window_size);
+            let vertices = Self::vertex_positions(initial_rect, window_size);
             let vertex_label = format!("{}-vertices", config.label);
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(vertex_label.as_str()),
@@ -2972,11 +2973,11 @@ impl TextOverlay {
             height: config.height,
             padding_x: config.padding_x,
             padding_y: config.padding_y,
-            anchor: config.anchor,
             pixels,
             dirty: false,
             visible: false,
             label: config.label,
+            layout_rect: initial_rect,
         })
     }
 
@@ -2987,12 +2988,13 @@ impl TextOverlay {
     }
 
     fn create_vertex_buffer(
-        &self,
         device: &wgpu::Device,
         window_size: PhysicalSize<u32>,
+        rect: ViewportRect,
+        label: &str,
     ) -> wgpu::Buffer {
-        let vertices = Self::vertex_positions(self.width, self.height, self.anchor, window_size);
-        let label = format!("{}-vertices", self.label);
+        let vertices = Self::vertex_positions(rect, window_size);
+        let label = format!("{}-vertices", label);
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label.as_str()),
             contents: cast_slice(&vertices),
@@ -3000,33 +3002,13 @@ impl TextOverlay {
         })
     }
 
-    fn vertex_positions(
-        width: u32,
-        height: u32,
-        anchor: OverlayAnchor,
-        window_size: PhysicalSize<u32>,
-    ) -> [QuadVertex; 4] {
+    fn vertex_positions(rect: ViewportRect, window_size: PhysicalSize<u32>) -> [QuadVertex; 4] {
         let win_width = window_size.width.max(1) as f32;
         let win_height = window_size.height.max(1) as f32;
-        let width_ndc = (width as f32 / win_width) * 2.0;
-        let height_ndc = (height as f32 / win_height) * 2.0;
-
-        let (left, right) = match anchor {
-            OverlayAnchor::TopLeft | OverlayAnchor::BottomLeft => {
-                (-1.0, (-1.0 + width_ndc).min(1.0))
-            }
-            OverlayAnchor::TopRight => ((1.0 - width_ndc).max(-1.0), 1.0),
-        };
-        let (top, bottom) = match anchor {
-            OverlayAnchor::TopLeft | OverlayAnchor::TopRight => {
-                let bottom = (1.0 - height_ndc).max(-1.0);
-                (1.0, bottom)
-            }
-            OverlayAnchor::BottomLeft => {
-                let top = (-1.0 + height_ndc).min(1.0);
-                (top, -1.0)
-            }
-        };
+        let left = (rect.x / win_width) * 2.0 - 1.0;
+        let right = ((rect.x + rect.width) / win_width) * 2.0 - 1.0;
+        let top = 1.0 - (rect.y / win_height) * 2.0;
+        let bottom = 1.0 - ((rect.y + rect.height) / win_height) * 2.0;
 
         [
             QuadVertex {
@@ -3048,8 +3030,14 @@ impl TextOverlay {
         ]
     }
 
-    fn update_vertices(&mut self, device: &wgpu::Device, window_size: PhysicalSize<u32>) {
-        self.vertex_buffer = self.create_vertex_buffer(device, window_size);
+    fn update_layout(
+        &mut self,
+        device: &wgpu::Device,
+        window_size: PhysicalSize<u32>,
+        rect: ViewportRect,
+    ) {
+        self.layout_rect = rect;
+        self.vertex_buffer = Self::create_vertex_buffer(device, window_size, rect, self.label);
     }
 
     fn set_lines(&mut self, lines: &[String]) {
@@ -3187,6 +3175,7 @@ struct ViewerState {
     marker_vertex_buffer: wgpu::Buffer,
     marker_instance_buffer: wgpu::Buffer,
     marker_capacity: usize,
+    ui_layout: UiLayout,
 }
 
 impl ViewerState {
@@ -3400,70 +3389,68 @@ impl ViewerState {
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
         });
 
-        let audio_overlay = if enable_audio_overlay {
-            Some(TextOverlay::new(
-                &device,
-                &queue,
-                &bind_group_layout,
-                size,
-                OverlayConfig {
-                    width: 520,
-                    height: 144,
-                    padding_x: 8,
-                    padding_y: 8,
-                    anchor: OverlayAnchor::TopLeft,
-                    label: "audio-overlay",
-                },
-            )?)
+        let (audio_overlay, audio_panel) = if enable_audio_overlay {
+            let config = OverlayConfig {
+                width: 520,
+                height: 144,
+                padding_x: 8,
+                padding_y: 8,
+                label: "audio-overlay",
+            };
+            let panel = PanelSize::from(&config);
+            let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
+            (Some(overlay), Some(panel))
         } else {
-            None
+            (None, None)
         };
 
         let scrubber = scene
             .as_ref()
             .and_then(|scene| MovementScrubber::new(scene));
 
-        let scrubber_overlay = if scrubber.is_some() {
-            Some(TextOverlay::new(
-                &device,
-                &queue,
-                &bind_group_layout,
-                size,
-                OverlayConfig {
-                    width: 520,
-                    height: 176,
-                    padding_x: 8,
-                    padding_y: 8,
-                    anchor: OverlayAnchor::BottomLeft,
-                    label: "scrubber-overlay",
-                },
-            )?)
+        let (scrubber_overlay, scrubber_panel) = if scrubber.is_some() {
+            let config = OverlayConfig {
+                width: 520,
+                height: 176,
+                padding_x: 8,
+                padding_y: 8,
+                label: "scrubber-overlay",
+            };
+            let panel = PanelSize::from(&config);
+            let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
+            (Some(overlay), Some(panel))
         } else {
-            None
+            (None, None)
         };
 
-        let timeline_overlay = if scene
+        let timeline_available = scene
             .as_ref()
             .and_then(|scene| scene.timeline.as_ref())
-            .is_some()
-        {
-            Some(TextOverlay::new(
-                &device,
-                &queue,
-                &bind_group_layout,
-                size,
-                OverlayConfig {
-                    width: 640,
-                    height: 224,
-                    padding_x: 8,
-                    padding_y: 8,
-                    anchor: OverlayAnchor::TopRight,
-                    label: "timeline-overlay",
-                },
-            )?)
+            .is_some();
+
+        let (timeline_overlay, timeline_panel) = if timeline_available {
+            let config = OverlayConfig {
+                width: 640,
+                height: 224,
+                padding_x: 8,
+                padding_y: 8,
+                label: "timeline-overlay",
+            };
+            let panel = PanelSize::from(&config);
+            let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
+            (Some(overlay), Some(panel))
         } else {
-            None
+            (None, None)
         };
+
+        let minimap_constraints = MinimapConstraints::default();
+        let ui_layout = UiLayout::new(
+            size,
+            audio_panel,
+            timeline_panel,
+            scrubber_panel,
+            minimap_constraints,
+        )?;
 
         let quad_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<QuadVertex>() as u64,
@@ -3650,12 +3637,14 @@ impl ViewerState {
             marker_vertex_buffer,
             marker_instance_buffer,
             marker_capacity: initial_marker_capacity,
+            ui_layout,
         };
 
         state.surface.configure(&state.device, &state.config);
         state.print_selected_entity();
         state.refresh_timeline_overlay();
         state.refresh_scrubber_overlay();
+        state.apply_panel_layouts();
 
         Ok(state)
     }
@@ -3668,8 +3657,28 @@ impl ViewerState {
         self.size
     }
 
+    fn apply_panel_layouts(&mut self) {
+        let window_size = self.size;
+        if let Some(overlay) = self.audio_overlay.as_mut() {
+            if let Some(rect) = self.ui_layout.panel_rect(PanelKind::Audio) {
+                overlay.update_layout(&self.device, window_size, rect);
+            }
+        }
+        if let Some(overlay) = self.timeline_overlay.as_mut() {
+            if let Some(rect) = self.ui_layout.panel_rect(PanelKind::Timeline) {
+                overlay.update_layout(&self.device, window_size, rect);
+            }
+        }
+        if let Some(overlay) = self.scrubber_overlay.as_mut() {
+            if let Some(rect) = self.ui_layout.panel_rect(PanelKind::Scrubber) {
+                overlay.update_layout(&self.device, window_size, rect);
+            }
+        }
+    }
+
     fn minimap_layout(&self) -> Option<MinimapLayout> {
-        MinimapLayout::from_window(self.size)
+        let rect = self.ui_layout.panel_rect(PanelKind::Minimap)?;
+        MinimapLayout::from_rect(rect, self.size)
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -3678,14 +3687,9 @@ impl ViewerState {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            if let Some(overlay) = self.audio_overlay.as_mut() {
-                overlay.update_vertices(&self.device, new_size);
-            }
-            if let Some(overlay) = self.timeline_overlay.as_mut() {
-                overlay.update_vertices(&self.device, new_size);
-            }
-            if let Some(overlay) = self.scrubber_overlay.as_mut() {
-                overlay.update_vertices(&self.device, new_size);
+            match self.ui_layout.set_window_size(new_size) {
+                Ok(()) => self.apply_panel_layouts(),
+                Err(err) => eprintln!("[grim_viewer] layout resize failed: {err:?}"),
             }
         }
     }
