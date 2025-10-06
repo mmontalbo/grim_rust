@@ -4240,8 +4240,24 @@ fn install_actor_scaffold(
         manny_handle,
     )?;
 
+    let meche_table = {
+        let (meche_id, meche_handle) = {
+            let mut ctx = context.borrow_mut();
+            ctx.register_actor_with_handle("Meche", Some(1002))
+        };
+        build_actor_table(
+            lua,
+            context.clone(),
+            system_key.clone(),
+            meche_id.clone(),
+            "Meche".to_string(),
+            meche_handle,
+        )?
+    };
+
     let globals = lua.globals();
     globals.set("manny", manny_table.clone())?;
+    globals.set("meche", meche_table.clone())?;
 
     {
         let mut ctx = context.borrow_mut();
@@ -5491,12 +5507,192 @@ fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
         })?,
     )?;
 
+    let cache_vector_context = context.clone();
+    globals.set(
+        "CacheCurrentWalkVector",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            cache_vector_context
+                .borrow_mut()
+                .log_event("geometry.cache_walk_vector".to_string());
+            Ok(())
+        })?,
+    )?;
+
+    let stop_context = context.clone();
+    globals.set(
+        "stop_script",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let description = args
+                .get(0)
+                .map(describe_value)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            stop_context
+                .borrow_mut()
+                .log_event(format!("script.stop {description}"));
+            Ok(())
+        })?,
+    )?;
+
+    let current_script_context = context.clone();
+    globals.set(
+        "GetCurrentScript",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            current_script_context
+                .borrow_mut()
+                .log_event("script.current".to_string());
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    if matches!(
+        globals.get::<_, Value>("WalkVector"),
+        Ok(Value::Nil) | Err(_)
+    ) {
+        let walk_vector = lua.create_table()?;
+        walk_vector.set("x", 0.0)?;
+        walk_vector.set("y", 0.0)?;
+        walk_vector.set("z", 0.0)?;
+        globals.set("WalkVector", walk_vector)?;
+    }
+
+    install_cutscene_helpers(lua, context.clone())?;
+    install_idle_scaffold(lua, context.clone())?;
+
     wrap_start_cut_scene(lua, context.clone())?;
     wrap_end_cut_scene(lua, context.clone())?;
     wrap_set_override(lua, context.clone())?;
     wrap_kill_override(lua, context.clone())?;
     wrap_wait_for_message(lua, context.clone())?;
 
+    Ok(())
+}
+
+fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+
+    let stop_commentary_context = context.clone();
+    globals.set(
+        "StopCommentaryImmediately",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            stop_commentary_context
+                .borrow_mut()
+                .log_event("cut_scene.stop_commentary".to_string());
+            Ok(())
+        })?,
+    )?;
+
+    let kill_render_context = context.clone();
+    globals.set(
+        "killRenderModeText",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            kill_render_context
+                .borrow_mut()
+                .log_event("render.kill_mode_text".to_string());
+            Ok(())
+        })?,
+    )?;
+
+    let destroy_buttons_context = context.clone();
+    globals.set(
+        "DestroyAllUIButtonsImmediately",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            destroy_buttons_context
+                .borrow_mut()
+                .log_event("ui.destroy_buttons_immediate".to_string());
+            Ok(())
+        })?,
+    )?;
+
+    let start_movie_context = context.clone();
+    globals.set(
+        "StartFullscreenMovie",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let movie = args
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            start_movie_context
+                .borrow_mut()
+                .log_event(format!("cut_scene.fullscreen.start {movie}"));
+            Ok(true)
+        })?,
+    )?;
+
+    let movie_state_context = context.clone();
+    globals.set(
+        "IsFullscreenMoviePlaying",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            movie_state_context
+                .borrow_mut()
+                .log_event("cut_scene.fullscreen.poll".to_string());
+            Ok(false)
+        })?,
+    )?;
+
+    let hide_skip_context = context.clone();
+    globals.set(
+        "hideSkipButton",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            hide_skip_context
+                .borrow_mut()
+                .log_event("cut_scene.skip.hide".to_string());
+            Ok(())
+        })?,
+    )?;
+
+    let show_skip_context = context;
+    globals.set(
+        "showSkipButton",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            show_skip_context
+                .borrow_mut()
+                .log_event("cut_scene.skip.show".to_string());
+            Ok(())
+        })?,
+    )?;
+
+    Ok(())
+}
+
+fn install_idle_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+    let globals = lua.globals();
+    if matches!(globals.get::<_, Value>("Idle"), Ok(Value::Table(_))) {
+        return Ok(());
+    }
+
+    let idle_table = lua.create_table()?;
+    let create_context = context.clone();
+    idle_table.set(
+        "create",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let name = args
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            create_context
+                .borrow_mut()
+                .log_event(format!("idle.create {name}"));
+
+            let state_table = lua_ctx.create_table()?;
+            let add_state_context = create_context.clone();
+            state_table.set(
+                "add_state",
+                lua_ctx.create_function(move |_, args: Variadic<Value>| {
+                    let state_name = args
+                        .get(0)
+                        .and_then(value_to_string)
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    add_state_context
+                        .borrow_mut()
+                        .log_event(format!("idle.state {state_name}"));
+                    Ok(())
+                })?,
+            )?;
+            Ok(state_table)
+        })?,
+    )?;
+
+    globals.set("Idle", idle_table)?;
     Ok(())
 }
 
@@ -6341,7 +6537,13 @@ fn install_music_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
     metatable.set("__index", fallback)?;
     music.set_metatable(Some(metatable));
 
-    globals.set("music", music)?;
+    globals.set("music", music.clone())?;
+    if matches!(
+        globals.get::<_, Value>("music_state"),
+        Ok(Value::Nil) | Err(_)
+    ) {
+        globals.set("music_state", music)?;
+    }
     Ok(())
 }
 
@@ -6470,6 +6672,17 @@ fn install_ui_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result
         })?,
     )?;
 
+    let update_buttons_context = context;
+    globals.set(
+        "UpdateUIButtons",
+        lua.create_function(move |_, _: mlua::Variadic<mlua::Value>| {
+            update_buttons_context
+                .borrow_mut()
+                .log_event("ui.update_buttons".to_string());
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }
 
@@ -6565,6 +6778,22 @@ fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
             render_context
                 .borrow_mut()
                 .log_event(format!("render.mode {description}"));
+            Ok(())
+        })?,
+    )?;
+
+    let display_context = context;
+    globals.set(
+        "EngineDisplay",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let description = args
+                .iter()
+                .map(describe_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            display_context
+                .borrow_mut()
+                .log_event(format!("render.display [{}]", description));
             Ok(())
         })?,
     )?;
@@ -7659,69 +7888,6 @@ mod tests {
         let mut graph = ResourceGraph::default();
         graph.sets.push(set_metadata);
         EngineContext::new(Rc::new(graph), false, None, callback)
-    }
-
-    fn install_menu_common_for_tests(lua: &Lua, context: Rc<RefCell<EngineContext>>) {
-        install_game_pauser(lua, context.clone()).expect("game pauser installed");
-        install_menu_common(lua, context).expect("menu_common installed");
-    }
-
-    #[test]
-    fn menu_common_show_and_hide_track_visibility() {
-        let lua = Lua::new();
-        let context = Rc::new(RefCell::new(make_context()));
-        install_menu_common_for_tests(&lua, context.clone());
-
-        let globals = lua.globals();
-        let menu: Table = globals.get("menu_common").expect("menu table");
-        assert!(!menu.get::<_, bool>("is_visible").unwrap_or(true));
-
-        let show: Function = menu.get("show").expect("show function");
-        show.call::<_, ()>((menu.clone(),)).expect("show executes");
-
-        {
-            let guard = context.borrow();
-            let state = guard.menus.get("menu_common").expect("state").borrow();
-            assert!(state.visible, "menu state should mark visible");
-        }
-        assert!(menu.get::<_, bool>("is_visible").unwrap_or(false));
-
-        let hide: Function = menu.get("hide").expect("hide function");
-        hide.call::<_, ()>((menu.clone(),)).expect("hide executes");
-
-        {
-            let guard = context.borrow();
-            {
-                let state = guard.menus.get("menu_common").expect("state").borrow();
-                assert!(!state.visible, "menu state should mark hidden");
-            }
-            assert!(guard.events.iter().any(|event| event == "menu_common.show"));
-            assert!(guard.events.iter().any(|event| event == "menu_common.hide"));
-        }
-        assert!(!menu.get::<_, bool>("is_visible").unwrap_or(true));
-    }
-
-    #[test]
-    fn menu_common_auto_freeze_toggles_game_pause() {
-        let lua = Lua::new();
-        let context = Rc::new(RefCell::new(make_context()));
-        install_menu_common_for_tests(&lua, context.clone());
-
-        let globals = lua.globals();
-        let menu: Table = globals.get("menu_common").expect("menu table");
-        let auto: Function = menu.get("auto_freeze").expect("auto_freeze");
-        auto.call::<_, ()>((menu.clone(), true)).expect("auto on");
-
-        let show: Function = menu.get("show").expect("show function");
-        show.call::<_, ()>((menu.clone(),)).expect("show executes");
-
-        let hide: Function = menu.get("hide").expect("hide function");
-        hide.call::<_, ()>((menu.clone(),)).expect("hide executes");
-
-        let events = &context.borrow().events;
-        assert!(events.iter().any(|e| e == "game_pauser.pause on"));
-        assert!(events.iter().any(|e| e == "game_pauser.pause off"));
-        assert!(events.iter().any(|e| e == "menu_common.auto_freeze on"));
     }
 
     fn install_menu_common_for_tests(lua: &Lua, context: Rc<RefCell<EngineContext>>) {
