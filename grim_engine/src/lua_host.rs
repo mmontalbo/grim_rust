@@ -379,6 +379,65 @@ impl MovementOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum HotspotSlug {
+    Computer,
+}
+
+impl HotspotSlug {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "computer" => Some(HotspotSlug::Computer),
+            _ => None,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            HotspotSlug::Computer => "computer",
+        }
+    }
+
+    fn object_field(&self) -> &'static str {
+        match self {
+            HotspotSlug::Computer => "computer",
+        }
+    }
+
+    fn approach_target(&self) -> Vec3 {
+        match self {
+            HotspotSlug::Computer => Vec3 {
+                x: 0.5,
+                y: 1.975,
+                z: 0.0,
+            },
+        }
+    }
+
+    fn approach_steps(&self) -> u32 {
+        match self {
+            HotspotSlug::Computer => 24,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct HotspotOptions {
+    slug: HotspotSlug,
+}
+
+impl HotspotOptions {
+    pub fn parse(value: &str) -> Result<Self> {
+        let slug = HotspotSlug::from_str(value)
+            .ok_or_else(|| anyhow!("unknown hotspot demo: {}", value))?;
+        Ok(Self { slug })
+    }
+
+    fn slug(&self) -> HotspotSlug {
+        self.slug
+    }
+}
+
 #[derive(Serialize)]
 struct MovementSample {
     frame: u32,
@@ -801,6 +860,7 @@ struct EngineContext {
     audio_callback: Option<Rc<dyn AudioCallback>>,
     set_geometry: BTreeMap<String, ParsedSetGeometry>,
     sector_states: BTreeMap<String, BTreeMap<String, bool>>,
+    moving_actors: BTreeSet<u32>,
 }
 
 impl EngineContext {
@@ -868,6 +928,7 @@ impl EngineContext {
             audio_callback,
             set_geometry: BTreeMap::new(),
             sector_states: BTreeMap::new(),
+            moving_actors: BTreeSet::new(),
         }
     }
 
@@ -2531,6 +2592,59 @@ impl EngineContext {
             .and_then(|actor| actor.rotation)
     }
 
+    fn actor_identity_by_handle(&self, handle: u32) -> Option<(String, String)> {
+        let id = self.actor_handles.get(&handle)?.clone();
+        let label = self
+            .actors
+            .get(&id)
+            .map(|actor| actor.name.clone())
+            .unwrap_or_else(|| id.clone());
+        Some((id, label))
+    }
+
+    fn set_actor_rotation_by_handle(&mut self, handle: u32, rotation: Vec3) -> bool {
+        let Some((id, label)) = self.actor_identity_by_handle(handle) else {
+            self.log_event(format!("actor.rot.unknown_handle #{handle}"));
+            return false;
+        };
+        self.set_actor_rotation(&id, &label, rotation);
+        true
+    }
+
+    fn set_actor_moving(&mut self, handle: u32, moving: bool) {
+        if moving {
+            self.moving_actors.insert(handle);
+        } else {
+            self.moving_actors.remove(&handle);
+        }
+    }
+
+    fn is_actor_moving(&self, handle: u32) -> bool {
+        self.moving_actors.contains(&handle)
+    }
+
+    fn walk_actor_to_handle(&mut self, handle: u32, target: Vec3) -> bool {
+        let Some(current) = self.actor_position_by_handle(handle) else {
+            self.log_event(format!("walk.to unknown_handle #{handle}"));
+            return false;
+        };
+
+        let delta = Vec3 {
+            x: target.x - current.x,
+            y: target.y - current.y,
+            z: target.z - current.z,
+        };
+
+        if delta.x.abs() + delta.y.abs() + delta.z.abs() <= f32::EPSILON {
+            return true;
+        }
+
+        self.set_actor_moving(handle, true);
+        let moved = self.walk_actor_vector(handle, delta, None, None);
+        self.set_actor_moving(handle, false);
+        moved
+    }
+
     fn point_in_active_walk(&self, set_file: &str, point: (f32, f32)) -> bool {
         if let Some(geometry) = self.set_geometry.get(set_file) {
             for sector in geometry
@@ -3068,6 +3182,7 @@ pub fn run_boot_sequence(
     geometry_json: Option<&Path>,
     audio_callback: Option<Rc<dyn AudioCallback>>,
     movement: Option<MovementOptions>,
+    hotspot: Option<HotspotOptions>,
 ) -> Result<()> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
@@ -3117,6 +3232,10 @@ pub fn run_boot_sequence(
 
     if let Some(options) = movement.as_ref() {
         simulate_movement(&lua, context.clone(), options)?;
+    }
+
+    if let Some(options) = hotspot.as_ref() {
+        simulate_hotspot_demo(&lua, context.clone(), options)?;
     }
 
     let snapshot = context.borrow();
@@ -3264,6 +3383,110 @@ fn simulate_movement(
         fs::write(path, json)
             .with_context(|| format!("writing movement log to {}", path.display()))?;
         println!("Saved movement log to {}", path.display());
+    }
+
+    Ok(())
+}
+
+fn simulate_hotspot_demo(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    options: &HotspotOptions,
+) -> Result<()> {
+    use anyhow::anyhow;
+
+    let slug = options.slug();
+
+    let (actor_handle, actor_id) = {
+        let guard = context.borrow();
+        let snapshot = match guard
+            .actors
+            .get("manny")
+            .or_else(|| guard.actors.get("Manny"))
+        {
+            Some(actor) => actor,
+            None => return Ok(()),
+        };
+        if snapshot.handle == 0 {
+            return Ok(());
+        }
+        let id = guard
+            .actor_handles
+            .get(&snapshot.handle)
+            .cloned()
+            .unwrap_or_else(|| snapshot.name.to_ascii_lowercase());
+        (snapshot.handle, id)
+    };
+
+    let target = slug.approach_target();
+    let steps = slug.approach_steps().max(1);
+
+    {
+        let mut guard = context.borrow_mut();
+        guard.log_event(format!("hotspot.demo.approach {}", slug.label()));
+    }
+
+    let mut frame: u32 = 0;
+    for step in 0..steps {
+        frame += 1;
+        let delta = {
+            let guard = context.borrow();
+            let current = guard
+                .actor_position_by_handle(actor_handle)
+                .unwrap_or(MANNY_OFFICE_SEED_POS);
+            let remaining = (steps - step) as f32;
+            Vec3 {
+                x: (target.x - current.x) / remaining.max(1.0),
+                y: (target.y - current.y) / remaining.max(1.0),
+                z: (target.z - current.z) / remaining.max(1.0),
+            }
+        };
+
+        {
+            let mut guard = context.borrow_mut();
+            guard.walk_actor_vector(actor_handle, delta, None, None);
+        }
+
+        drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
+
+        if let Some(sample) = {
+            let guard = context.borrow();
+            capture_movement_sample(&guard, actor_handle, &actor_id, frame)
+        } {
+            let mut guard = context.borrow_mut();
+            guard.log_event(format!(
+                "movement.frame {} {:.3},{:.3}",
+                frame, sample.position[0], sample.position[1]
+            ));
+        }
+    }
+
+    let globals = lua.globals();
+    let mo_table: Table = globals
+        .get("mo")
+        .context("mo table missing for hotspot demo")?;
+    let object: Table = mo_table
+        .get(slug.object_field())
+        .with_context(|| format!("mo.{} missing for hotspot demo", slug.object_field()))?;
+    let sentence: Function = globals
+        .get("Sentence")
+        .context("Sentence function missing for hotspot demo")?;
+
+    {
+        let mut guard = context.borrow_mut();
+        guard.log_event(format!("hotspot.demo.start {}", slug.label()));
+    }
+
+    sentence
+        .call::<_, ()>(("use", object.clone()))
+        .context("executing hotspot Sentence")?;
+
+    drive_active_scripts(lua, context.clone(), 64, 256).map_err(|err| anyhow!(err))?;
+    drive_active_scripts(lua, context.clone(), 32, 256).map_err(|err| anyhow!(err))?;
+
+    {
+        let mut guard = context.borrow_mut();
+        guard.log_event(format!("hotspot.demo.end {}", slug.label()));
     }
 
     Ok(())
@@ -4214,6 +4437,50 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
             Ok(())
         })?,
     )?;
+
+    let walk_to_ctx = context.clone();
+    globals.set(
+        "WalkActorTo",
+        lua.create_function(move |_, args: Variadic<Value>| -> LuaResult<bool> {
+            let mut values = args.into_iter();
+            let handle = values
+                .next()
+                .and_then(|value| value_to_actor_handle(&value));
+            let Some(handle) = handle else {
+                return Ok(false);
+            };
+            let x = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let y = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let z = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let mut ctx = walk_to_ctx.borrow_mut();
+            let moved = ctx.walk_actor_to_handle(handle, Vec3 { x, y, z });
+            Ok(moved)
+        })?,
+    )?;
+
+    let is_moving_ctx = context.clone();
+    globals.set(
+        "IsActorMoving",
+        lua.create_function(move |_, actor: Value| {
+            let handle = value_to_actor_handle(&actor).unwrap_or(0);
+            let moving = if handle == 0 {
+                false
+            } else {
+                is_moving_ctx.borrow().is_actor_moving(handle)
+            };
+            Ok(moving)
+        })?,
+    )?;
+
     let sleep_context = context.clone();
     globals.set(
         "sleep_for",
@@ -4366,6 +4633,35 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
                 }
             }
             Ok((0.0, 0.0, 0.0))
+        })?,
+    )?;
+
+    let set_actor_rot_ctx = context.clone();
+    globals.set(
+        "SetActorRot",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut values = args.into_iter();
+            let handle = values
+                .next()
+                .and_then(|value| value_to_actor_handle(&value));
+            let Some(handle) = handle else {
+                return Ok(());
+            };
+            let x = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let y = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let z = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let mut ctx = set_actor_rot_ctx.borrow_mut();
+            ctx.set_actor_rotation_by_handle(handle, Vec3 { x, y, z });
+            Ok(())
         })?,
     )?;
 

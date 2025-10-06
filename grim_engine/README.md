@@ -40,6 +40,11 @@ state we need to validate the first playable milestone.
   `cargo run -p grim_engine -- --run-lua --movement-demo --movement-log-json \
   grim_engine/tests/fixtures/movement_demo_log.json` whenever the intended walk
   path changes (document the reasoning in the commit that updates it).
+- `cargo test -p grim_engine -- hotspot_demo_emits_keyboard_audio` exercises the
+  computer hotspot demo and asserts that the expected typing cues are emitted.
+  You can invoke it manually with `cargo run -p grim_engine -- --run-lua
+  --hotspot-demo computer --audio-log-json hotspot_audio.json` to review the
+  captured audio trace.
 
 ## Extending the Crate
 - When adding Lua bindings, mirror ScummVM's semantics and document any gaps so

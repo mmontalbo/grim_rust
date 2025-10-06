@@ -28,7 +28,7 @@ use assets::MANNY_OFFICE_ASSETS;
 use audio_bridge::RecordingAudioCallback;
 use geometry_diff::run_geometry_diff;
 use lab_collection::{collect_assets, AssetMetadata, AssetReport, LabCollection};
-use lua_host::{run_boot_sequence, MovementOptions};
+use lua_host::{run_boot_sequence, HotspotOptions, MovementOptions};
 use scheduler::{MovieQueue, ScriptScheduler};
 use state::{
     EngineState, HookApplication, HookReference, MovieEvent, ScriptEvent, SetState,
@@ -121,10 +121,18 @@ struct Args {
     /// Path to write the movement trajectory log as JSON (with --movement-demo)
     #[arg(long)]
     movement_log_json: Option<PathBuf>,
+
+    /// Run a Manny hotspot demo after boot (requires --run-lua)
+    #[arg(long, value_name = "SLUG")]
+    hotspot_demo: Option<String>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if !args.run_lua && args.hotspot_demo.is_some() {
+        bail!("--hotspot-demo requires --run-lua");
+    }
 
     if args.run_lua {
         if args.verify_geometry {
@@ -169,6 +177,11 @@ fn main() -> Result<()> {
             None
         };
 
+        let hotspot = match args.hotspot_demo.as_ref() {
+            Some(slug) => Some(HotspotOptions::parse(slug)?),
+            None => None,
+        };
+
         run_boot_sequence(
             &args.data_root,
             args.lab_root.as_deref(),
@@ -176,6 +189,7 @@ fn main() -> Result<()> {
             args.lua_geometry_json.as_deref(),
             audio_callback,
             movement,
+            hotspot,
         )?;
 
         if let (Some(path), Some(recorder)) = (args.audio_log_json.as_ref(), audio_recorder) {
@@ -242,6 +256,7 @@ fn main() -> Result<()> {
             args.lab_root.as_deref(),
             args.verbose,
             Some(snapshot_path.as_path()),
+            None,
             None,
             None,
         )?;
@@ -851,6 +866,7 @@ mod tests {
             Some(lab_root.as_path()),
             false,
             Some(snapshot_file.path()),
+            None,
             None,
             None,
         )?;
