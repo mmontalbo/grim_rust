@@ -22,12 +22,14 @@ WIP_DATA: Dict[str, Any] = {
                 "Familiarise yourself with README.md and the sections below, then pick up the next item in this summary and work it through to a committable state (tests/docs updated, WIP refreshed, commit created).",
                 "List all available workstreams with: python tools/wip_summary.py --json (or refer to the ## Workstreams section).",
                 "For a specific thread, run: python tools/wip_summary.py --workstream <slug> (for example --workstream codec3_regression).",
+                "The Manny office regression artefacts we reference live under tools/tests/ (movement_log.json, hotspot_events.json, etc.); skim them the first time so you know what the viewer overlays are visualising.",
             ],
         },
         {
             "title": "Current Focus",
             "body": [
-                "Add an interactive scrubber to grim_viewer so Manny's movement/head-target markers can be stepped alongside the regression frames while debugging the desk interaction.",
+                "Recover the Manny office camera transform and project Manny/head-target markers into plate space so the scrubber overlay reflects the true perspective instead of the abstract minimap.",
+                "Prototype a dedicated minimap panel in the bottom-right quadrant that renders a true top-down 2D view of Manny's office to complement the perspective overlay during debugging.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
         },

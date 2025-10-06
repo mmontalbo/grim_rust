@@ -361,6 +361,262 @@ impl MovementTrace {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ScrubEvent {
+    scene_index: usize,
+    frame: u32,
+    label: String,
+}
+
+#[derive(Debug, Clone)]
+struct MovementScrubber {
+    current_sample: usize,
+    sample_frames: Vec<u32>,
+    head_targets: Vec<ScrubEvent>,
+    highlighted_event: Option<usize>,
+}
+
+impl MovementScrubber {
+    fn new(scene: &ViewerScene) -> Option<Self> {
+        let trace = scene.movement_trace()?;
+        if trace.samples.is_empty() {
+            return None;
+        }
+
+        let sample_frames: Vec<u32> = trace.samples.iter().map(|sample| sample.frame).collect();
+        let mut head_targets: Vec<ScrubEvent> = scene
+            .hotspot_events()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, event)| match (event.kind(), event.frame) {
+                (HotspotEventKind::HeadTarget, Some(frame)) => Some(ScrubEvent {
+                    scene_index: idx,
+                    frame,
+                    label: event.label.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        head_targets.sort_by(|a, b| a.frame.cmp(&b.frame));
+
+        let mut scrubber = Self {
+            current_sample: 0,
+            sample_frames,
+            head_targets,
+            highlighted_event: None,
+        };
+        scrubber.update_highlight();
+        Some(scrubber)
+    }
+
+    fn current_frame(&self) -> u32 {
+        self.sample_frames
+            .get(self.current_sample)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn current_position(&self, trace: &MovementTrace) -> Option<[f32; 3]> {
+        trace
+            .samples
+            .get(self.current_sample)
+            .map(|sample| sample.position)
+    }
+
+    fn current_yaw(&self, trace: &MovementTrace) -> Option<f32> {
+        trace
+            .samples
+            .get(self.current_sample)
+            .and_then(|sample| sample.yaw)
+    }
+
+    fn highlighted_event(&self) -> Option<&ScrubEvent> {
+        self.highlighted_event
+            .and_then(|idx| self.head_targets.get(idx))
+    }
+
+    fn next_event(&self) -> Option<&ScrubEvent> {
+        let current_frame = self.current_frame();
+        self.head_targets
+            .iter()
+            .find(|event| event.frame > current_frame)
+    }
+
+    fn step(&mut self, delta: i32) -> bool {
+        if self.sample_frames.is_empty() {
+            return false;
+        }
+        let len = self.sample_frames.len() as i32;
+        let current = self.current_sample as i32;
+        let next = (current + delta).clamp(0, len - 1);
+        if next == current {
+            return false;
+        }
+        self.current_sample = next as usize;
+        self.update_highlight();
+        true
+    }
+
+    fn seek_to_frame(&mut self, frame: u32) -> bool {
+        if self.sample_frames.is_empty() {
+            return false;
+        }
+        let mut best_idx = self.current_sample;
+        let mut best_delta = u32::MAX;
+        for (idx, sample_frame) in self.sample_frames.iter().enumerate() {
+            let delta = sample_frame.abs_diff(frame);
+            if delta < best_delta {
+                best_delta = delta;
+                best_idx = idx;
+                if delta == 0 {
+                    break;
+                }
+            }
+        }
+        if best_idx == self.current_sample {
+            self.highlighted_event = self
+                .head_targets
+                .iter()
+                .position(|event| event.frame == frame);
+            return false;
+        }
+        self.current_sample = best_idx;
+        self.update_highlight();
+        true
+    }
+
+    fn jump_to_head_target(&mut self, direction: i32) -> bool {
+        if self.head_targets.is_empty() {
+            return false;
+        }
+
+        let current_frame = self.current_frame();
+        let next_index = if direction >= 0 {
+            self.head_targets
+                .iter()
+                .enumerate()
+                .find(|(_, event)| event.frame > current_frame)
+                .map(|(idx, _)| idx)
+                .or(Some(0))
+        } else {
+            self.head_targets
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, event)| event.frame < current_frame)
+                .map(|(idx, _)| idx)
+                .or_else(|| self.head_targets.len().checked_sub(1))
+        };
+
+        if let Some(idx) = next_index {
+            let frame = self.head_targets[idx].frame;
+            let moved = self.seek_to_frame(frame);
+            self.highlighted_event = Some(idx);
+            if !moved {
+                self.update_highlight();
+            }
+            return true;
+        }
+        false
+    }
+
+    fn overlay_lines(&self, trace: &MovementTrace) -> Vec<String> {
+        const MAX_LINE: usize = 78;
+
+        if self.sample_frames.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = Vec::new();
+        lines.push("Scrubber".to_string());
+
+        let frame = self.current_frame();
+        let position = trace
+            .samples
+            .get(self.current_sample)
+            .map(|sample| sample.position)
+            .unwrap_or([0.0, 0.0, 0.0]);
+        let idx_label = format!(
+            "  frame: {frame} ({}/{})",
+            self.current_sample + 1,
+            self.sample_frames.len()
+        );
+        lines.push(truncate_line(&idx_label, MAX_LINE));
+
+        lines.push(truncate_line(
+            &format!(
+                "  pos: ({:.3}, {:.3}, {:.3})",
+                position[0], position[1], position[2]
+            ),
+            MAX_LINE,
+        ));
+
+        if let Some(yaw) = self.current_yaw(trace) {
+            lines.push(truncate_line(&format!("  yaw: {:.3}", yaw), MAX_LINE));
+        }
+
+        if let Some(event) = self.highlighted_event() {
+            let delta_label = if event.frame <= frame {
+                format!("-{}", frame - event.frame)
+            } else {
+                format!("+{}", event.frame - frame)
+            };
+            lines.push(truncate_line(
+                &format!("  head: [{}|Δ{}] {}", event.frame, delta_label, event.label),
+                MAX_LINE,
+            ));
+        } else {
+            lines.push("  head: (no target)".to_string());
+        }
+
+        if let Some(next) = self.next_event() {
+            lines.push(truncate_line(
+                &format!("  next head: [{}] {}", next.frame, next.label),
+                MAX_LINE,
+            ));
+        }
+
+        lines.push(truncate_line(
+            "  Map: rectangles show Manny/top-down bounds; aqua tracks the current frame.",
+            MAX_LINE,
+        ));
+        lines.push(truncate_line(
+            "  Legend: teal spawn, violet path, orange finish, gold head target highlight.",
+            MAX_LINE,
+        ));
+        lines.push("  Controls: [ ] step, { } jump".to_string());
+
+        lines
+    }
+
+    fn update_highlight(&mut self) {
+        if self.head_targets.is_empty() || self.sample_frames.is_empty() {
+            self.highlighted_event = None;
+            return;
+        }
+
+        let current_frame = self.current_frame();
+        let mut best_past: Option<(usize, u32)> = None;
+        let mut best_future: Option<(usize, u32)> = None;
+
+        for (idx, event) in self.head_targets.iter().enumerate() {
+            if event.frame <= current_frame {
+                let delta = current_frame - event.frame;
+                if best_past.map_or(true, |(_, best)| delta < best) {
+                    best_past = Some((idx, delta));
+                }
+            } else {
+                let delta = event.frame - current_frame;
+                if best_future.map_or(true, |(_, best)| delta < best) {
+                    best_future = Some((idx, delta));
+                }
+            }
+        }
+
+        self.highlighted_event = best_past.or(best_future).map(|(idx, _)| idx);
+    }
+}
+
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
@@ -410,6 +666,111 @@ mod movement_tests {
 
         assert!((trace.bounds.min[0] - 0.0).abs() < 1e-6);
         assert!((trace.bounds.max[1] - 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod scrubber_tests {
+    use super::*;
+
+    fn sample_scene() -> ViewerScene {
+        let samples = vec![
+            MovementSample {
+                frame: 1,
+                position: [0.0, 0.0, 0.0],
+                yaw: Some(0.0),
+                sector: None,
+            },
+            MovementSample {
+                frame: 2,
+                position: [1.0, 0.0, 0.0],
+                yaw: Some(0.2),
+                sector: None,
+            },
+            MovementSample {
+                frame: 4,
+                position: [2.0, 0.0, 0.0],
+                yaw: Some(0.4),
+                sector: None,
+            },
+            MovementSample {
+                frame: 5,
+                position: [3.0, 0.0, 0.0],
+                yaw: Some(0.6),
+                sector: None,
+            },
+        ];
+
+        let trace = MovementTrace::from_samples(samples).expect("trace");
+        let mut scene = ViewerScene {
+            entities: Vec::new(),
+            position_bounds: None,
+            timeline: None,
+            movement: None,
+            hotspot_events: vec![
+                HotspotEvent {
+                    sequence: 1,
+                    frame: Some(2),
+                    label: "actor.manny.head_target /desk".to_string(),
+                },
+                HotspotEvent {
+                    sequence: 2,
+                    frame: Some(5),
+                    label: "actor.manny.head_target /tube".to_string(),
+                },
+            ],
+        };
+        scene.attach_movement_trace(trace);
+        scene
+    }
+
+    #[test]
+    fn scrubber_prefers_recent_head_target() {
+        let scene = sample_scene();
+        let mut scrubber = MovementScrubber::new(&scene).expect("scrubber");
+
+        assert_eq!(scrubber.current_frame(), 1);
+        assert_eq!(
+            scrubber.highlighted_event().map(|event| event.frame),
+            Some(2)
+        );
+
+        scrubber.step(1);
+        assert_eq!(scrubber.current_frame(), 2);
+        assert_eq!(
+            scrubber.highlighted_event().map(|event| event.frame),
+            Some(2)
+        );
+
+        scrubber.step(1);
+        assert_eq!(scrubber.current_frame(), 4);
+        assert_eq!(
+            scrubber.highlighted_event().map(|event| event.frame),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn scrubber_jumps_between_head_targets() {
+        let scene = sample_scene();
+        let mut scrubber = MovementScrubber::new(&scene).expect("scrubber");
+
+        assert_eq!(scrubber.current_frame(), 1);
+        scrubber.step(1);
+        assert_eq!(scrubber.current_frame(), 2);
+
+        scrubber.jump_to_head_target(1);
+        assert_eq!(
+            scrubber.highlighted_event().map(|event| event.frame),
+            Some(5)
+        );
+        assert_eq!(scrubber.current_frame(), 5);
+
+        scrubber.jump_to_head_target(-1);
+        assert_eq!(
+            scrubber.highlighted_event().map(|event| event.frame),
+            Some(2)
+        );
     }
 }
 
@@ -1067,6 +1428,9 @@ fn main() -> Result<()> {
             println!(
                 "  Overlay markers: teal = spawn, violet = path, orange = hotspot finish, lime = selection."
             );
+            println!(
+                "  Scrubber controls: '['/']' step Manny frames; '{{'/'}}' jump head-target markers."
+            );
         }
         let event_preview = scene.hotspot_events();
         if !event_preview.is_empty() {
@@ -1182,6 +1546,15 @@ fn main() -> Result<()> {
                                 },
                             ..
                         } => state.previous_entity(),
+                        WindowEvent::KeyboardInput {
+                            event:
+                                KeyEvent {
+                                    logical_key: Key::Character(key),
+                                    state: ElementState::Pressed,
+                                    ..
+                                },
+                            ..
+                        } => state.handle_character_input(key.as_ref()),
                         WindowEvent::Resized(new_size) => state.resize(new_size),
                         WindowEvent::RedrawRequested => match state.render() {
                             Ok(_) => {}
@@ -1965,6 +2338,7 @@ fn read_asset_slice(path: &Path, offset: u64, size: u32) -> Result<Vec<u8>> {
 enum OverlayAnchor {
     TopLeft,
     TopRight,
+    BottomLeft,
 }
 
 #[derive(Clone, Copy)]
@@ -2132,11 +2506,21 @@ impl TextOverlay {
         let height_ndc = (height as f32 / win_height) * 2.0;
 
         let (left, right) = match anchor {
-            OverlayAnchor::TopLeft => (-1.0, (-1.0 + width_ndc).min(1.0)),
+            OverlayAnchor::TopLeft | OverlayAnchor::BottomLeft => {
+                (-1.0, (-1.0 + width_ndc).min(1.0))
+            }
             OverlayAnchor::TopRight => ((1.0 - width_ndc).max(-1.0), 1.0),
         };
-        let top = 1.0;
-        let bottom = (1.0 - height_ndc).max(-1.0);
+        let (top, bottom) = match anchor {
+            OverlayAnchor::TopLeft | OverlayAnchor::TopRight => {
+                let bottom = (1.0 - height_ndc).max(-1.0);
+                (1.0, bottom)
+            }
+            OverlayAnchor::BottomLeft => {
+                let top = (-1.0 + height_ndc).min(1.0);
+                (top, -1.0)
+            }
+        };
 
         [
             QuadVertex {
@@ -2277,9 +2661,11 @@ struct ViewerState {
     _sampler: wgpu::Sampler,
     audio_overlay: Option<TextOverlay>,
     timeline_overlay: Option<TextOverlay>,
+    scrubber_overlay: Option<TextOverlay>,
     background: wgpu::Color,
     scene: Option<Arc<ViewerScene>>,
     selected_entity: Option<usize>,
+    scrubber: Option<MovementScrubber>,
     marker_pipeline: wgpu::RenderPipeline,
     marker_vertex_buffer: wgpu::Buffer,
     marker_instance_buffer: wgpu::Buffer,
@@ -2492,6 +2878,29 @@ impl ViewerState {
             None
         };
 
+        let scrubber = scene
+            .as_ref()
+            .and_then(|scene| MovementScrubber::new(scene));
+
+        let scrubber_overlay = if scrubber.is_some() {
+            Some(TextOverlay::new(
+                &device,
+                &queue,
+                &bind_group_layout,
+                size,
+                OverlayConfig {
+                    width: 520,
+                    height: 176,
+                    padding_x: 8,
+                    padding_y: 8,
+                    anchor: OverlayAnchor::BottomLeft,
+                    label: "scrubber-overlay",
+                },
+            )?)
+        } else {
+            None
+        };
+
         let timeline_overlay = if scene
             .as_ref()
             .and_then(|scene| scene.timeline.as_ref())
@@ -2690,9 +3099,11 @@ impl ViewerState {
             _sampler: sampler,
             audio_overlay,
             timeline_overlay,
+            scrubber_overlay,
             background,
             scene: scene.clone(),
             selected_entity,
+            scrubber,
             marker_pipeline,
             marker_vertex_buffer,
             marker_instance_buffer,
@@ -2702,6 +3113,7 @@ impl ViewerState {
         state.surface.configure(&state.device, &state.config);
         state.print_selected_entity();
         state.refresh_timeline_overlay();
+        state.refresh_scrubber_overlay();
 
         Ok(state)
     }
@@ -2724,6 +3136,9 @@ impl ViewerState {
                 overlay.update_vertices(&self.device, new_size);
             }
             if let Some(overlay) = self.timeline_overlay.as_mut() {
+                overlay.update_vertices(&self.device, new_size);
+            }
+            if let Some(overlay) = self.scrubber_overlay.as_mut() {
                 overlay.update_vertices(&self.device, new_size);
             }
         }
@@ -2811,6 +3226,13 @@ impl ViewerState {
             self.draw_overlay(&mut encoder, &view, overlay, "timeline-overlay-pass");
         }
 
+        if let Some(overlay) = self.scrubber_overlay.as_mut() {
+            overlay.upload(&self.queue);
+        }
+        if let Some(overlay) = self.scrubber_overlay.as_ref() {
+            self.draw_overlay(&mut encoder, &view, overlay, "scrubber-overlay-pass");
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
@@ -2862,6 +3284,19 @@ impl ViewerState {
         }
     }
 
+    fn refresh_scrubber_overlay(&mut self) {
+        if let Some(overlay) = self.scrubber_overlay.as_mut() {
+            if let (Some(scrubber), Some(scene)) = (self.scrubber.as_ref(), self.scene.as_deref()) {
+                if let Some(trace) = scene.movement_trace() {
+                    let lines = scrubber.overlay_lines(trace);
+                    overlay.set_lines(&lines);
+                    return;
+                }
+            }
+            overlay.set_lines(&[]);
+        }
+    }
+
     fn next_entity(&mut self) {
         if let Some(scene) = self.scene.as_ref() {
             if scene.entities.is_empty() {
@@ -2889,6 +3324,40 @@ impl ViewerState {
             self.selected_entity = Some(prev);
             self.print_selected_entity();
             self.refresh_timeline_overlay();
+        }
+    }
+
+    fn scrub_step(&mut self, delta: i32) {
+        if let Some(scrubber) = self.scrubber.as_mut() {
+            let changed = scrubber.step(delta);
+            if self.scrubber_overlay.is_some() {
+                self.refresh_scrubber_overlay();
+            }
+            if changed {
+                self.window().request_redraw();
+            }
+        }
+    }
+
+    fn scrub_jump_to_head_target(&mut self, direction: i32) {
+        if let Some(scrubber) = self.scrubber.as_mut() {
+            let changed = scrubber.jump_to_head_target(direction);
+            if self.scrubber_overlay.is_some() {
+                self.refresh_scrubber_overlay();
+            }
+            if changed {
+                self.window().request_redraw();
+            }
+        }
+    }
+
+    fn handle_character_input(&mut self, key: &str) {
+        match key {
+            "]" => self.scrub_step(1),
+            "[" => self.scrub_step(-1),
+            "}" => self.scrub_jump_to_head_target(1),
+            "{" => self.scrub_jump_to_head_target(-1),
+            _ => {}
         }
     }
 
@@ -2984,8 +3453,13 @@ impl ViewerState {
                         if !norm_h.is_finite() || !norm_v.is_finite() {
                             return;
                         }
-                        let ndc_x = norm_h.clamp(0.0, 1.0) * 2.0 - 1.0;
-                        let ndc_y = 1.0 - norm_v.clamp(0.0, 1.0) * 2.0;
+                        const MAP_MARGIN: f32 = 0.08;
+                        let clamp_h = norm_h.clamp(0.0, 1.0);
+                        let clamp_v = norm_v.clamp(0.0, 1.0);
+                        let scaled_h = MAP_MARGIN + clamp_h * (1.0 - 2.0 * MAP_MARGIN);
+                        let scaled_v = MAP_MARGIN + clamp_v * (1.0 - 2.0 * MAP_MARGIN);
+                        let ndc_x = scaled_h * 2.0 - 1.0;
+                        let ndc_y = 1.0 - scaled_v * 2.0;
                         instances.push(MarkerInstance {
                             translate: [ndc_x, ndc_y],
                             size,
@@ -2994,6 +3468,14 @@ impl ViewerState {
                             _padding: 0.0,
                         });
                     };
+
+                let (scrub_position, highlight_event_scene_index) = match self.scrubber.as_ref() {
+                    Some(scrubber) => (
+                        scrubber.current_position(trace),
+                        scrubber.highlighted_event().map(|event| event.scene_index),
+                    ),
+                    None => (None, None),
+                };
 
                 if let Some(first) = trace.samples.first() {
                     push_marker(first.position, start_size, start_color, 0.0);
@@ -3013,7 +3495,7 @@ impl ViewerState {
                     }
                 }
 
-                for event in scene.hotspot_events() {
+                for (idx, event) in scene.hotspot_events().iter().enumerate() {
                     let frame = match event.frame {
                         Some(frame) => frame,
                         None => continue,
@@ -3022,9 +3504,18 @@ impl ViewerState {
                         Some(pos) => pos,
                         None => continue,
                     };
-                    let (marker_size, marker_color, marker_highlight) =
+                    let (mut marker_size, mut marker_color, mut marker_highlight) =
                         event_marker_style(event.kind());
+                    if Some(idx) == highlight_event_scene_index {
+                        marker_highlight = marker_highlight.max(0.9);
+                        marker_color = [0.98, 0.93, 0.32];
+                        marker_size *= 1.08;
+                    }
                     push_marker(position, marker_size, marker_color, marker_highlight);
+                }
+
+                if let Some(position) = scrub_position {
+                    push_marker(position, 0.058, [0.2, 0.95, 0.85], 1.0);
                 }
             }
         }
