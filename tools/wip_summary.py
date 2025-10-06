@@ -23,7 +23,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Viewer overlays now render audio and boot timeline metadata directly from --audio-log-json / --timeline so hook sequencing stays visible while iterating.",
                 "Codec3 decode harness now asserts seeded window behaviour and records Manny office depth ranges so tooling can flag regressions before captures drift.",
                 "Runtime regression harness now emits Manny office codec3 depth stats alongside movement/audio logs so downstream baselines stay aligned while timeline traces roll in.",
-                "Runtime regression harness now captures Manny's walk path and desk interaction into shared baselines under tools/tests; next focus shifts to threading timeline metadata through the same artefact.",
+                "Movement regression harness now guards Manny's walk path fixture while the hotspot baseline captures the full computer interaction under tools/tests.",
                 "Runtime regression harness now threads the boot timeline manifest into the hotspot baselines so overlay metadata travels with the movement/audio captures.",
             ],
         },
@@ -34,6 +34,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Timeline overlay highlight now ships; next up is feeding it hotspot/movement traces so interactive regressions line up with stage sequencing.",
                 "Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
                 "Wire the new codec3 depth stats artefact into viewer/runtime tooling so overlays and comparisons can consume it automatically.",
+                "Extend the movement regression harness to surface hotspot playback traces and timeline hooks directly inside the viewer overlay.",
             ],
         },
         {
@@ -52,13 +53,6 @@ WIP_DATA: Dict[str, Any] = {
                 "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
                 "Avoid blank lines between Why/What bullet entries so the commit template stays compact and scannable.",
                 "List one 'What' bullet per file touched using <path>: <brief change> so reviewers can map intent to diffs quickly.",
-            ],
-        },
-        {
-            "title": "Commit Conventions",
-            "body": [
-                "Format commits as: <area>: <short change summary> on the first line, then blank line, followed by 'Why:' and 'What:' bullet blocks summarising intent and implementation.",
-                "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
             ],
         },
     ],
