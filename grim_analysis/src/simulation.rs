@@ -676,7 +676,6 @@ fn classify_stateful_method(target: &str, method: &str) -> Option<StateSubsystem
         "set_walk_rate",
         "follow_boxes",
         "set_collision_mode",
-        "set_visibility",
         "set_costume",
         "setpos",
         "setrot",
@@ -731,9 +730,14 @@ fn classify_stateful_method(target: &str, method: &str) -> Option<StateSubsystem
         return Some(StateSubsystem::InterestActors);
     }
 
-    if OBJECT_METHODS
-        .iter()
-        .any(|candidate| method_lower == *candidate || method_lower.starts_with(*candidate))
+    if is_actorish_method(&target_lower, &method_lower) {
+        return Some(StateSubsystem::Actors);
+    }
+
+    if is_objectish_method(&target_lower, &method_lower)
+        || OBJECT_METHODS
+            .iter()
+            .any(|candidate| method_lower == *candidate || method_lower.starts_with(*candidate))
         || method_lower.ends_with("_state")
         || method_lower.starts_with("put_in_")
         || method_lower.contains("object_state")
@@ -762,6 +766,7 @@ fn classify_stateful_method(target: &str, method: &str) -> Option<StateSubsystem
         .iter()
         .any(|candidate| method_lower == *candidate || method_lower.contains(*candidate))
         || target_lower.contains("ambient")
+        || target_lower.contains("music")
     {
         return Some(StateSubsystem::Audio);
     }
@@ -781,9 +786,194 @@ fn classify_stateful_method(target: &str, method: &str) -> Option<StateSubsystem
     None
 }
 
+fn is_actorish_method(target_lower: &str, method_lower: &str) -> bool {
+    const ACTOR_EXACT_METHODS: &[&str] = &[
+        "brennis_start_idle",
+        "set_up_meche",
+        "check_for_raoul_setup",
+        "check_glottis_volume",
+        "check_evas_head",
+        "cheat_tie_rope",
+        "clear_hands",
+        "find_sector_name",
+        "get_look_rate",
+        "getpos",
+        "getrot",
+        "in_danger_box",
+        "init_actor",
+        "init_glottis",
+        "init_strike_stuff",
+        "kill_crying",
+        "moveto",
+        "put_bonewagon_in_set",
+        "restore_pos",
+        "salcu_setup",
+        "save_pos",
+        "say_line",
+        "set_colormap",
+        "set_speech_mode",
+        "set_talk_color",
+        "setup_actors",
+        "set_up_angelitos",
+        "set_up_barrel_bees",
+        "set_up_baster",
+        "set_up_mechanic_objects",
+        "setup_gatekeeper",
+        "setup_velasco_idles",
+        "shut_up",
+        "start_glottis_idle",
+        "start_work",
+        "stop_idles",
+        "strike_idles",
+        "update_glottis",
+        "wait_for_message",
+        "work_idles",
+    ];
+
+    if ACTOR_EXACT_METHODS
+        .iter()
+        .any(|candidate| method_lower == *candidate)
+    {
+        return true;
+    }
+
+    const ACTOR_SUBSTRINGS: &[&str] = &[
+        "angelito",
+        "bee",
+        "bonewagon",
+        "copal",
+        "doug",
+        "gatekeeper",
+        "glottis",
+        "hands",
+        "idle",
+        "line",
+        "naranja",
+        "pugsy",
+        "raoul",
+        "salvador",
+        "speech",
+        "talk",
+        "toto",
+        "velasco",
+    ];
+
+    if ACTOR_SUBSTRINGS
+        .iter()
+        .any(|keyword| method_lower.contains(keyword) || target_lower.contains(keyword))
+    {
+        return true;
+    }
+
+    false
+}
+
+fn is_objectish_method(target_lower: &str, method_lower: &str) -> bool {
+    if method_lower == "create" && target_lower != "actor" {
+        return true;
+    }
+
+    const OBJECT_EXACT_METHODS: &[&str] = &[
+        "activate_forklift_boxes",
+        "activate_trapdoor_boxes",
+        "add_digit",
+        "attach",
+        "camerachange",
+        "choose_random_sign_point",
+        "close",
+        "destroy",
+        "display_number",
+        "display_str",
+        "exit_close",
+        "disable",
+        "hide",
+        "init",
+        "init_hq",
+        "init_ropes",
+        "inside_use_point",
+        "is_locked",
+        "lock",
+        "lock_display",
+        "make_visible",
+        "magnetize",
+        "open",
+        "set_boxes",
+        "set_new_out_point",
+        "set_visibility",
+        "set_up_states",
+        "set_up_switcher_door",
+        "show",
+        "show_modal",
+        "switch_to_set",
+        "update_look_point",
+        "update_states",
+    ];
+
+    if OBJECT_EXACT_METHODS
+        .iter()
+        .any(|candidate| method_lower == *candidate)
+    {
+        return true;
+    }
+
+    if method_lower.starts_with("init_")
+        && method_lower != "init_actor"
+        && method_lower != "init_glottis"
+        && !method_lower.contains("strike")
+    {
+        return true;
+    }
+
+    if method_lower.starts_with("set_up_") {
+        const ACTOR_SET_UP_METHODS: &[&str] = &[
+            "set_up_angelitos",
+            "set_up_barrel_bees",
+            "set_up_baster",
+            "set_up_mechanic_objects",
+        ];
+        return !ACTOR_SET_UP_METHODS
+            .iter()
+            .any(|candidate| method_lower == *candidate);
+    }
+
+    if method_lower.starts_with("setup_") {
+        const ACTOR_SETUP_METHODS: &[&str] =
+            &["setup_actors", "setup_gatekeeper", "setup_velasco_idles"];
+        return !ACTOR_SETUP_METHODS
+            .iter()
+            .any(|candidate| method_lower == *candidate);
+    }
+
+    if method_lower.starts_with("activate_") || method_lower.ends_with("_boxes") {
+        return true;
+    }
+
+    if method_lower == "lock" || method_lower == "unlock" {
+        return true;
+    }
+
+    if method_lower == "inside_use_point" || method_lower == "side_use_point" {
+        return true;
+    }
+
+    if method_lower == "choose_random_sign_point" {
+        return true;
+    }
+
+    if method_lower == "switch_to_set" {
+        return true;
+    }
+
+    target_lower.contains("door")
+        || target_lower.contains("menu")
+        || target_lower.contains("field")
+        || target_lower.contains("hud")
+        || target_lower.contains("system")
+}
+
 fn should_ignore_method_call(_target: &str, method: &str) -> bool {
     let method_lower = method.to_ascii_lowercase();
-    matches!(method_lower.as_str(), "current_setup" | "is_open")
+    matches!(method_lower.as_ref(), "current_setup" | "is_open")
 }
 
 #[cfg(test)]
