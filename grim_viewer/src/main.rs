@@ -1487,7 +1487,7 @@ fn main() -> Result<()> {
                 "Entity focus drives the highlighted marker, timeline overlay, and console dump for the active actor/object."
             );
             println!(
-                "Markers overlay: green/blue squares mark entities; red highlights the current selection."
+                "Markers overlay: color-coded discs track entities (red = selected) and mirror the minimap anchors."
             );
         }
         if let Some(trace) = scene.movement_trace() {
@@ -1510,7 +1510,7 @@ fn main() -> Result<()> {
                 println!("  yaw range: {:.3} – {:.3}", min_yaw, max_yaw);
             }
             println!(
-                "  Overlay markers: teal = spawn, violet = path, orange = hotspot finish, lime = selection."
+                "  Overlay markers: jade = desk anchor, violet = path, amber = tube anchor, teal = Manny, gold = highlighted hotspot, red = entity selection."
             );
             println!(
                 "  Scrubber controls: '['/']' step Manny frames; '{{'/'}}' jump head-target markers."
@@ -1814,6 +1814,13 @@ impl ViewerScene {
 
     fn hotspot_events(&self) -> &[HotspotEvent] {
         &self.hotspot_events
+    }
+
+    fn entity_position(&self, name: &str) -> Option<[f32; 3]> {
+        self.entities
+            .iter()
+            .find(|entity| entity.name.eq_ignore_ascii_case(name))
+            .and_then(|entity| entity.position)
     }
 
     fn camera_projector(&self, aspect_ratio: f32) -> Option<CameraProjector> {
@@ -4161,28 +4168,26 @@ impl ViewerState {
             }
         };
 
+        let mut scrub_position: Option<[f32; 3]> = None;
+        let mut highlight_event_scene_index: Option<usize> = None;
+        let mut desk_position: Option<[f32; 3]> = None;
+        let mut tube_hint_position: Option<[f32; 3]> = None;
+
         if let Some(trace) = scene.movement_trace() {
             if !trace.samples.is_empty() {
+                desk_position = trace.samples.first().map(|sample| sample.position);
+                tube_hint_position = trace.samples.last().map(|sample| sample.position);
+
+                if let Some(scrubber) = self.scrubber.as_ref() {
+                    scrub_position = scrubber.current_position(trace);
+                    highlight_event_scene_index =
+                        scrubber.highlighted_event().map(|event| event.scene_index);
+                }
+
                 let limit = 96_usize;
                 let step = (trace.samples.len().max(limit) / limit).max(1);
                 let path_color = [0.78, 0.58, 0.95];
-                let start_color = [0.32, 0.74, 0.86];
-                let end_color = [0.95, 0.55, 0.42];
                 let path_size = 0.032;
-                let start_size = 0.044;
-                let end_size = 0.045;
-
-                let (scrub_position, highlight_event_scene_index) = match self.scrubber.as_ref() {
-                    Some(scrubber) => (
-                        scrubber.current_position(trace),
-                        scrubber.highlighted_event().map(|event| event.scene_index),
-                    ),
-                    None => (None, None),
-                };
-
-                if let Some(first) = trace.samples.first() {
-                    push_marker(first.position, start_size, start_color, 0.0);
-                }
 
                 let len = trace.samples.len();
                 for (idx, sample) in trace.samples.iter().enumerate().step_by(step) {
@@ -4190,12 +4195,6 @@ impl ViewerState {
                         continue;
                     }
                     push_marker(sample.position, path_size, path_color, 0.0);
-                }
-
-                if trace.samples.len() > 1 {
-                    if let Some(last) = trace.samples.last() {
-                        push_marker(last.position, end_size, end_color, 0.0);
-                    }
                 }
 
                 for (idx, event) in scene.hotspot_events().iter().enumerate() {
@@ -4216,11 +4215,26 @@ impl ViewerState {
                     }
                     push_marker(position, marker_size, marker_color, marker_highlight);
                 }
-
-                if let Some(position) = scrub_position {
-                    push_marker(position, 0.058, [0.2, 0.95, 0.85], 1.0);
-                }
             }
+        }
+
+        let manny_anchor = scrub_position.or(desk_position);
+
+        if let Some(position) = desk_position {
+            push_marker(position, 0.075, [0.28, 0.82, 0.52], 0.45);
+        }
+
+        let tube_anchor = scene
+            .entity_position("mo.tube")
+            .or_else(|| scene.entity_position("mo.tube.interest_actor"))
+            .or(tube_hint_position);
+
+        if let Some(position) = tube_anchor {
+            push_marker(position, 0.085, [0.98, 0.74, 0.28], 0.65);
+        }
+
+        if let Some(position) = manny_anchor {
+            push_marker(position, 0.1, [0.2, 0.95, 0.85], 1.0);
         }
 
         for (idx, entity) in scene.entities.iter().enumerate() {
@@ -4303,28 +4317,26 @@ impl ViewerState {
 
         let scale_size = |base: f32| layout.scaled_size(base * 0.5);
 
+        let mut scrub_position: Option<[f32; 3]> = None;
+        let mut highlight_event_scene_index: Option<usize> = None;
+        let mut desk_position: Option<[f32; 3]> = None;
+        let mut tube_hint_position: Option<[f32; 3]> = None;
+
         if let Some(trace) = scene.movement_trace() {
             if !trace.samples.is_empty() {
+                desk_position = trace.samples.first().map(|sample| sample.position);
+                tube_hint_position = trace.samples.last().map(|sample| sample.position);
+
+                if let Some(scrubber) = self.scrubber.as_ref() {
+                    scrub_position = scrubber.current_position(trace);
+                    highlight_event_scene_index =
+                        scrubber.highlighted_event().map(|event| event.scene_index);
+                }
+
                 let limit = 96_usize;
                 let step = (trace.samples.len().max(limit) / limit).max(1);
                 let path_color = [0.75, 0.65, 0.95];
-                let start_color = [0.35, 0.78, 0.88];
-                let end_color = [0.98, 0.58, 0.42];
                 let path_size = scale_size(0.032);
-                let start_size = scale_size(0.044);
-                let end_size = scale_size(0.045);
-
-                let (scrub_position, highlight_event_scene_index) = match self.scrubber.as_ref() {
-                    Some(scrubber) => (
-                        scrubber.current_position(trace),
-                        scrubber.highlighted_event().map(|event| event.scene_index),
-                    ),
-                    None => (None, None),
-                };
-
-                if let Some(first) = trace.samples.first() {
-                    push_marker(first.position, start_size, start_color, 0.0);
-                }
 
                 let len = trace.samples.len();
                 for (idx, sample) in trace.samples.iter().enumerate().step_by(step) {
@@ -4332,12 +4344,6 @@ impl ViewerState {
                         continue;
                     }
                     push_marker(sample.position, path_size, path_color, 0.0);
-                }
-
-                if trace.samples.len() > 1 {
-                    if let Some(last) = trace.samples.last() {
-                        push_marker(last.position, end_size, end_color, 0.0);
-                    }
                 }
 
                 for (idx, event) in scene.hotspot_events().iter().enumerate() {
@@ -4363,11 +4369,26 @@ impl ViewerState {
                         marker_highlight,
                     );
                 }
-
-                if let Some(position) = scrub_position {
-                    push_marker(position, scale_size(0.058), [0.2, 0.95, 0.85], 1.0);
-                }
             }
+        }
+
+        let manny_anchor = scrub_position.or(desk_position);
+
+        if let Some(position) = desk_position {
+            push_marker(position, scale_size(0.058), [0.32, 0.82, 0.52], 0.4);
+        }
+
+        let tube_anchor = scene
+            .entity_position("mo.tube")
+            .or_else(|| scene.entity_position("mo.tube.interest_actor"))
+            .or(tube_hint_position);
+
+        if let Some(position) = tube_anchor {
+            push_marker(position, scale_size(0.064), [0.98, 0.74, 0.28], 0.6);
+        }
+
+        if let Some(position) = manny_anchor {
+            push_marker(position, scale_size(0.07), [0.2, 0.95, 0.85], 1.0);
         }
 
         let selected = self.selected_entity;

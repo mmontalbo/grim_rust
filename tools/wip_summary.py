@@ -29,8 +29,8 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Smoke-test the Manny layout preset in windowed and headless runs after the scrubber legend width bump so Taffy stays stable before we chase minimap automation.",
-                "Wire the minimap panel into headless verification so Manny's path and hotspot markers fail fast when they drift while scrubbing.",
+                "Put the Manny office entity list on a diet (Manny, desk, tube, props) so the viewer stops surfacing Meche and other set-global leftovers.",
+                "Keep minimap and plate overlays in lockstep so every shown entity has the same name, colour, and highlight in both views.",
                 "Prototype an egui-powered overlay inspector so the Taffy layout can be tweaked interactively without wgpu math spelunking.",
                 "Rev the Manny baseline overlays once the minimap orientation is locked so the perspective and top-down views use the same regression artefacts.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
