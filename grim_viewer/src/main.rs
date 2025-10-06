@@ -10,6 +10,7 @@ use std::{
 };
 
 mod audio_log;
+mod timeline;
 
 use audio_log::{AudioAggregation, AudioLogTracker};
 
@@ -24,6 +25,9 @@ use pollster::FutureExt;
 use rodio::OutputStream;
 use serde::Deserialize;
 use serde_json::Value;
+use timeline::{
+    HookLookup, HookReference, TimelineSummary, build_timeline_summary, parse_hook_reference,
+};
 use wgpu::{
     Backends, COPY_BYTES_PER_ROW_ALIGNMENT, InstanceDescriptor, InstanceFlags, Maintain,
     SurfaceError, util::DeviceExt,
@@ -214,6 +218,154 @@ fn audio_overlay_lines(status: &AudioStatus) -> Vec<String> {
                 line.push_str(&format!(" [{}]", entry.params.join(", ")));
             }
             lines.push(truncate_line(&line, 62));
+        }
+    }
+
+    lines
+}
+
+fn timeline_overlay_lines(
+    scene: Option<&ViewerScene>,
+    selected_index: Option<usize>,
+) -> Vec<String> {
+    const MAX_LINE: usize = 84;
+
+    let scene = match scene {
+        Some(scene) => scene,
+        None => return Vec::new(),
+    };
+    let summary = match scene.timeline.as_ref() {
+        Some(summary) => summary,
+        None => return Vec::new(),
+    };
+
+    let selected_entity = selected_index.and_then(|idx| scene.entities.get(idx));
+    if selected_entity.is_none() && summary.hooks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    lines.push("Entity Focus".to_string());
+
+    if let Some(entity) = selected_entity {
+        lines.push(truncate_line(
+            &format!("> [{}] {}", entity.kind.label(), entity.name),
+            MAX_LINE,
+        ));
+        if let Some(stage_index) = entity.timeline_stage_index {
+            let label = entity.timeline_stage_label.as_deref().unwrap_or("-");
+            lines.push(truncate_line(
+                &format!("  Stage {:02} {label}", stage_index),
+                MAX_LINE,
+            ));
+        } else if let Some(label) = entity.timeline_stage_label.as_deref() {
+            lines.push(truncate_line(&format!("  Stage -- {label}"), MAX_LINE));
+        }
+        if let Some(created) = entity.created_by.as_ref() {
+            lines.push(truncate_line(&format!("  Hook {created}"), MAX_LINE));
+        }
+    } else {
+        lines.push("  (Use Left/Right arrows to select a marker)".to_string());
+    }
+
+    let selected_hook_idx = selected_entity.and_then(|entity| {
+        entity
+            .timeline_hook_index
+            .or_else(|| {
+                entity
+                    .timeline_hook_name
+                    .as_ref()
+                    .and_then(|name| summary.hooks.iter().position(|hook| hook.key.name == *name))
+            })
+            .or_else(|| {
+                entity.timeline_stage_index.and_then(|stage_idx| {
+                    summary
+                        .hooks
+                        .iter()
+                        .position(|hook| hook.stage_index == Some(stage_idx))
+                })
+            })
+            .or_else(|| {
+                summary
+                    .hooks
+                    .iter()
+                    .position(|hook| hook.targets.iter().any(|target| target == &entity.name))
+            })
+    });
+
+    if !summary.hooks.is_empty() {
+        lines.push(String::new());
+        lines.push("Timeline Hooks".to_string());
+
+        for (idx, hook) in summary.hooks.iter().enumerate() {
+            let stage = hook
+                .stage_index
+                .map(|value| format!("{:02}", value))
+                .unwrap_or_else(|| String::from("--"));
+            let label = hook.stage_label.as_deref().unwrap_or("(no stage)");
+            let marker = if Some(idx) == selected_hook_idx {
+                '>'
+            } else {
+                ' '
+            };
+            let summary_line = format!("{marker} {stage} {} — {label}", hook.key.name);
+            lines.push(truncate_line(&summary_line, MAX_LINE));
+            if Some(idx) == selected_hook_idx {
+                if let Some(kind) = hook.kind.as_deref() {
+                    lines.push(truncate_line(&format!("    kind: {kind}"), MAX_LINE));
+                }
+                if let Some(source) = hook.defined_in.as_deref() {
+                    let location = match hook.defined_at_line {
+                        Some(line) => format!("{source}:{line}"),
+                        None => source.to_string(),
+                    };
+                    lines.push(truncate_line(&format!("    source: {location}"), MAX_LINE));
+                }
+                if !hook.prerequisites.is_empty() {
+                    let preview: Vec<&str> = hook
+                        .prerequisites
+                        .iter()
+                        .take(3)
+                        .map(String::as_str)
+                        .collect();
+                    let mut prereq_line = format!("    prereqs: {}", preview.join(" -> "));
+                    if hook.prerequisites.len() > preview.len() {
+                        let remaining = hook.prerequisites.len() - preview.len();
+                        prereq_line.push_str(&format!(" (+{remaining})"));
+                    }
+                    lines.push(truncate_line(&prereq_line, MAX_LINE));
+                }
+                if !hook.targets.is_empty() {
+                    let preview: Vec<&str> =
+                        hook.targets.iter().take(3).map(String::as_str).collect();
+                    let mut target_line = format!("    targets: {}", preview.join(", "));
+                    if hook.targets.len() > preview.len() {
+                        let remaining = hook.targets.len() - preview.len();
+                        target_line.push_str(&format!(" (+{remaining})"));
+                    }
+                    lines.push(truncate_line(&target_line, MAX_LINE));
+                }
+            }
+        }
+    }
+
+    if !summary.stages.is_empty() {
+        lines.push(String::new());
+        lines.push("Boot Stages".to_string());
+        let highlight_stage = selected_entity
+            .and_then(|entity| entity.timeline_stage_index)
+            .or_else(|| {
+                selected_hook_idx
+                    .and_then(|idx| summary.hooks.get(idx).and_then(|hook| hook.stage_index))
+            });
+        for stage in &summary.stages {
+            let marker = if Some(stage.index) == highlight_stage {
+                '>'
+            } else {
+                ' '
+            };
+            let stage_line = format!("{marker} {:02} {}", stage.index, stage.label);
+            lines.push(truncate_line(&stage_line, MAX_LINE));
         }
     }
 
@@ -641,6 +793,7 @@ enum AssetMetadataSummary {
 struct ViewerScene {
     entities: Vec<SceneEntity>,
     position_bounds: Option<SceneBounds>,
+    timeline: Option<TimelineSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -676,6 +829,10 @@ impl SceneEntityKey {
 struct SceneEntityBuilder {
     key: SceneEntityKey,
     created_by: Option<String>,
+    timeline_hook_index: Option<usize>,
+    timeline_stage_index: Option<u32>,
+    timeline_stage_label: Option<String>,
+    timeline_hook_name: Option<String>,
     methods: BTreeSet<String>,
     position: Option<[f32; 3]>,
     rotation: Option<[f32; 3]>,
@@ -690,6 +847,10 @@ impl SceneEntityBuilder {
         Self {
             key: SceneEntityKey::new(kind, name),
             created_by: None,
+            timeline_hook_index: None,
+            timeline_stage_index: None,
+            timeline_stage_label: None,
+            timeline_hook_name: None,
             methods: BTreeSet::new(),
             position: None,
             rotation: None,
@@ -700,9 +861,14 @@ impl SceneEntityBuilder {
         }
     }
 
-    fn apply_actor_snapshot(&mut self, value: &Value) {
-        if self.created_by.is_none() {
-            self.created_by = value.get("created_by").and_then(format_hook_reference);
+    fn apply_actor_snapshot(&mut self, value: &Value, hooks: &HookLookup) {
+        if let Some(reference_value) = value.get("created_by") {
+            if let Some(reference) = parse_hook_reference(reference_value) {
+                if self.created_by.is_none() {
+                    self.created_by = Some(format_hook_reference(&reference));
+                }
+                self.register_hook_reference(&reference, hooks);
+            }
         }
 
         if let Some(methods) = value
@@ -755,11 +921,18 @@ impl SceneEntityBuilder {
         }
     }
 
-    fn apply_event(&mut self, method: &str, args: &[String], trigger: Option<String>) {
-        if let Some(source) = trigger {
+    fn apply_event(
+        &mut self,
+        method: &str,
+        args: &[String],
+        trigger: Option<HookReference>,
+        hooks: &HookLookup,
+    ) {
+        if let Some(reference) = trigger {
             if self.created_by.is_none() {
-                self.created_by = Some(source);
+                self.created_by = Some(format_hook_reference(&reference));
             }
+            self.register_hook_reference(&reference, hooks);
         }
 
         self.methods.insert(method.to_string());
@@ -809,6 +982,10 @@ impl SceneEntityBuilder {
             kind: self.key.kind,
             name: self.key.name,
             created_by: self.created_by,
+            timeline_hook_index: self.timeline_hook_index,
+            timeline_stage_index: self.timeline_stage_index,
+            timeline_stage_label: self.timeline_stage_label,
+            timeline_hook_name: self.timeline_hook_name,
             methods: self.methods.into_iter().collect(),
             position: self.position,
             rotation: self.rotation,
@@ -818,6 +995,21 @@ impl SceneEntityBuilder {
             last_completed: self.last_completed,
         }
     }
+
+    fn register_hook_reference(&mut self, reference: &HookReference, hooks: &HookLookup) {
+        if self.timeline_hook_index.is_none() {
+            self.timeline_hook_index = hooks.find(reference);
+        }
+        if self.timeline_stage_index.is_none() {
+            self.timeline_stage_index = reference.stage_index;
+        }
+        if self.timeline_stage_label.is_none() {
+            self.timeline_stage_label = reference.stage_label.clone();
+        }
+        if self.timeline_hook_name.is_none() {
+            self.timeline_hook_name = Some(reference.name().to_string());
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -825,6 +1017,10 @@ struct SceneEntity {
     kind: SceneEntityKind,
     name: String,
     created_by: Option<String>,
+    timeline_hook_index: Option<usize>,
+    timeline_stage_index: Option<u32>,
+    timeline_stage_label: Option<String>,
+    timeline_hook_name: Option<String>,
     methods: Vec<String>,
     position: Option<[f32; 3]>,
     rotation: Option<[f32; 3]>,
@@ -915,6 +1111,9 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
     let manifest: Value = serde_json::from_slice(&data)
         .with_context(|| format!("parsing timeline manifest {}", path.display()))?;
 
+    let timeline_summary = build_timeline_summary(&manifest)?;
+    let hook_lookup = HookLookup::new(timeline_summary.as_ref());
+
     let mut builders: BTreeMap<SceneEntityKey, SceneEntityBuilder> = BTreeMap::new();
 
     if let Some(engine_state) = manifest.get("engine_state") {
@@ -932,7 +1131,7 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
                 let entry = builders
                     .entry(SceneEntityKey::new(SceneEntityKind::Actor, name.clone()))
                     .or_insert_with(|| SceneEntityBuilder::new(SceneEntityKind::Actor, name));
-                entry.apply_actor_snapshot(value);
+                entry.apply_actor_snapshot(value, &hook_lookup);
             }
         }
 
@@ -972,8 +1171,8 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
                             .collect()
                     })
                     .unwrap_or_default();
-                let trigger = event.get("triggered_by").and_then(format_hook_reference);
-                entry.apply_event(method, &args, trigger);
+                let trigger = event.get("triggered_by").and_then(parse_hook_reference);
+                entry.apply_event(method, &args, trigger, &hook_lookup);
             }
         }
     }
@@ -999,31 +1198,26 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
     Ok(ViewerScene {
         entities,
         position_bounds: bounds,
+        timeline: timeline_summary,
     })
 }
 
-fn format_hook_reference(value: &Value) -> Option<String> {
-    let hook_name = value.get("name")?.as_str()?;
-    let defined_in = value
-        .get("defined_in")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown.lua");
-    let line_suffix = value
-        .get("defined_at_line")
-        .and_then(|v| v.as_u64())
+fn format_hook_reference(reference: &HookReference) -> String {
+    let defined_in = reference.defined_in().unwrap_or("unknown.lua");
+    let line_suffix = reference
+        .defined_at_line()
         .map(|line| format!(":{}", line))
         .unwrap_or_default();
-    let stage_label = value
-        .get("stage")
-        .and_then(|stage| stage.get("label"))
-        .and_then(|label| label.as_str());
 
-    match stage_label {
-        Some(label) => Some(format!(
+    match reference.stage_label.as_deref() {
+        Some(label) => format!(
             "{} @ {}{} [{}]",
-            hook_name, defined_in, line_suffix, label
-        )),
-        None => Some(format!("{} @ {}{}", hook_name, defined_in, line_suffix)),
+            reference.name(),
+            defined_in,
+            line_suffix,
+            label
+        ),
+        None => format!("{} @ {}{}", reference.name(), defined_in, line_suffix),
     }
 }
 
@@ -1156,7 +1350,23 @@ fn read_asset_slice(path: &Path, offset: u64, size: u32) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-struct AudioOverlay {
+#[derive(Clone, Copy)]
+enum OverlayAnchor {
+    TopLeft,
+    TopRight,
+}
+
+#[derive(Clone, Copy)]
+struct OverlayConfig {
+    width: u32,
+    height: u32,
+    padding_x: u32,
+    padding_y: u32,
+    anchor: OverlayAnchor,
+    label: &'static str,
+}
+
+struct TextOverlay {
     texture: wgpu::Texture,
     _view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
@@ -1164,18 +1374,18 @@ struct AudioOverlay {
     vertex_buffer: wgpu::Buffer,
     width: u32,
     height: u32,
+    padding_x: u32,
+    padding_y: u32,
+    anchor: OverlayAnchor,
     pixels: Vec<u8>,
     dirty: bool,
     visible: bool,
+    label: &'static str,
 }
 
-impl AudioOverlay {
-    const WIDTH: u32 = 520;
-    const HEIGHT: u32 = 144;
+impl TextOverlay {
     const GLYPH_WIDTH: u32 = 8;
     const GLYPH_HEIGHT: u32 = 8;
-    const PADDING_X: u32 = 8;
-    const PADDING_Y: u32 = 8;
     const FG_COLOR: [u8; 4] = [255, 255, 255, 240];
     const BG_COLOR: [u8; 4] = [0, 0, 0, 96];
 
@@ -1184,14 +1394,16 @@ impl AudioOverlay {
         queue: &wgpu::Queue,
         bind_group_layout: &wgpu::BindGroupLayout,
         window_size: PhysicalSize<u32>,
+        config: OverlayConfig,
     ) -> Result<Self> {
         let extent = wgpu::Extent3d {
-            width: Self::WIDTH,
-            height: Self::HEIGHT,
+            width: config.width,
+            height: config.height,
             depth_or_array_layers: 1,
         };
+        let texture_label = format!("{}-texture", config.label);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("audio-overlay-texture"),
+            label: Some(texture_label.as_str()),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -1201,8 +1413,9 @@ impl AudioOverlay {
             view_formats: &[],
         });
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler_label = format!("{}-sampler", config.label);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("audio-overlay-sampler"),
+            label: Some(sampler_label.as_str()),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -1212,8 +1425,9 @@ impl AudioOverlay {
             ..Default::default()
         });
 
+        let bind_group_label = format!("{}-bind-group", config.label);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("audio-overlay-bind-group"),
+            label: Some(bind_group_label.as_str()),
             layout: bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1227,10 +1441,8 @@ impl AudioOverlay {
             ],
         });
 
-        let mut pixels = vec![0u8; (Self::WIDTH * Self::HEIGHT * 4) as usize];
-        for chunk in pixels.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&Self::BG_COLOR);
-        }
+        let mut pixels = vec![0u8; (config.width * config.height * 4) as usize];
+        Self::fill_background(&mut pixels);
 
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -1242,13 +1454,22 @@ impl AudioOverlay {
             &pixels,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * Self::WIDTH),
-                rows_per_image: Some(Self::HEIGHT),
+                bytes_per_row: Some(4 * config.width),
+                rows_per_image: Some(config.height),
             },
             extent,
         );
 
-        let vertex_buffer = Self::create_vertex_buffer(device, window_size);
+        let vertex_buffer = {
+            let vertices =
+                Self::vertex_positions(config.width, config.height, config.anchor, window_size);
+            let vertex_label = format!("{}-vertices", config.label);
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(vertex_label.as_str()),
+                contents: cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
 
         Ok(Self {
             texture,
@@ -1256,41 +1477,67 @@ impl AudioOverlay {
             _sampler: sampler,
             bind_group,
             vertex_buffer,
-            width: Self::WIDTH,
-            height: Self::HEIGHT,
+            width: config.width,
+            height: config.height,
+            padding_x: config.padding_x,
+            padding_y: config.padding_y,
+            anchor: config.anchor,
             pixels,
             dirty: false,
             visible: false,
+            label: config.label,
         })
     }
 
-    fn create_vertex_buffer(device: &wgpu::Device, window_size: PhysicalSize<u32>) -> wgpu::Buffer {
-        let vertices = Self::compute_vertices(window_size);
+    fn fill_background(pixels: &mut [u8]) {
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&Self::BG_COLOR);
+        }
+    }
+
+    fn create_vertex_buffer(
+        &self,
+        device: &wgpu::Device,
+        window_size: PhysicalSize<u32>,
+    ) -> wgpu::Buffer {
+        let vertices = Self::vertex_positions(self.width, self.height, self.anchor, window_size);
+        let label = format!("{}-vertices", self.label);
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("audio-overlay-vertices"),
+            label: Some(label.as_str()),
             contents: cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         })
     }
 
-    fn compute_vertices(window_size: PhysicalSize<u32>) -> [QuadVertex; 4] {
+    fn vertex_positions(
+        width: u32,
+        height: u32,
+        anchor: OverlayAnchor,
+        window_size: PhysicalSize<u32>,
+    ) -> [QuadVertex; 4] {
         let win_width = window_size.width.max(1) as f32;
         let win_height = window_size.height.max(1) as f32;
-        let width_ndc = (Self::WIDTH as f32 / win_width) * 2.0;
-        let height_ndc = (Self::HEIGHT as f32 / win_height) * 2.0;
-        let right = (-1.0 + width_ndc).min(1.0);
+        let width_ndc = (width as f32 / win_width) * 2.0;
+        let height_ndc = (height as f32 / win_height) * 2.0;
+
+        let (left, right) = match anchor {
+            OverlayAnchor::TopLeft => (-1.0, (-1.0 + width_ndc).min(1.0)),
+            OverlayAnchor::TopRight => ((1.0 - width_ndc).max(-1.0), 1.0),
+        };
+        let top = 1.0;
         let bottom = (1.0 - height_ndc).max(-1.0);
+
         [
             QuadVertex {
-                position: [-1.0, 1.0],
+                position: [left, top],
                 uv: [0.0, 0.0],
             },
             QuadVertex {
-                position: [right, 1.0],
+                position: [right, top],
                 uv: [1.0, 0.0],
             },
             QuadVertex {
-                position: [-1.0, bottom],
+                position: [left, bottom],
                 uv: [0.0, 1.0],
             },
             QuadVertex {
@@ -1301,22 +1548,34 @@ impl AudioOverlay {
     }
 
     fn update_vertices(&mut self, device: &wgpu::Device, window_size: PhysicalSize<u32>) {
-        self.vertex_buffer = Self::create_vertex_buffer(device, window_size);
+        self.vertex_buffer = self.create_vertex_buffer(device, window_size);
     }
 
     fn set_lines(&mut self, lines: &[String]) {
-        for chunk in self.pixels.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&Self::BG_COLOR);
+        Self::fill_background(&mut self.pixels);
+
+        let usable_width = self.width.saturating_sub(self.padding_x * 2);
+        let usable_height = self.height.saturating_sub(self.padding_y * 2);
+        if usable_width == 0 || usable_height == 0 {
+            self.dirty = true;
+            self.visible = !lines.is_empty();
+            return;
         }
 
-        let max_cols = ((self.width - Self::PADDING_X * 2) / Self::GLYPH_WIDTH) as usize;
-        let max_rows = ((self.height - Self::PADDING_Y * 2) / Self::GLYPH_HEIGHT) as usize;
+        let max_cols = (usable_width / Self::GLYPH_WIDTH) as usize;
+        let max_rows = (usable_height / Self::GLYPH_HEIGHT) as usize;
+
+        if max_cols == 0 || max_rows == 0 {
+            self.dirty = true;
+            self.visible = !lines.is_empty();
+            return;
+        }
 
         for (row_idx, line) in lines.iter().take(max_rows).enumerate() {
-            let glyph_row = Self::PADDING_Y + row_idx as u32 * Self::GLYPH_HEIGHT;
+            let glyph_row = self.padding_y + row_idx as u32 * Self::GLYPH_HEIGHT;
             for (col_idx, ch) in line.chars().take(max_cols).enumerate() {
                 let glyph = glyph_for_char(ch);
-                let glyph_col = Self::PADDING_X + col_idx as u32 * Self::GLYPH_WIDTH;
+                let glyph_col = self.padding_x + col_idx as u32 * Self::GLYPH_WIDTH;
                 for (y_offset, bits) in glyph.iter().enumerate() {
                     let y = glyph_row + y_offset as u32;
                     if y >= self.height {
@@ -1405,7 +1664,8 @@ struct ViewerState {
     _texture: wgpu::Texture,
     _texture_view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
-    audio_overlay: Option<AudioOverlay>,
+    audio_overlay: Option<TextOverlay>,
+    timeline_overlay: Option<TextOverlay>,
     background: wgpu::Color,
     scene: Option<Arc<ViewerScene>>,
     selected_entity: Option<usize>,
@@ -1594,11 +1854,42 @@ impl ViewerState {
         });
 
         let audio_overlay = if enable_audio_overlay {
-            Some(AudioOverlay::new(
+            Some(TextOverlay::new(
                 &device,
                 &queue,
                 &bind_group_layout,
                 size,
+                OverlayConfig {
+                    width: 520,
+                    height: 144,
+                    padding_x: 8,
+                    padding_y: 8,
+                    anchor: OverlayAnchor::TopLeft,
+                    label: "audio-overlay",
+                },
+            )?)
+        } else {
+            None
+        };
+
+        let timeline_overlay = if scene
+            .as_ref()
+            .and_then(|scene| scene.timeline.as_ref())
+            .is_some()
+        {
+            Some(TextOverlay::new(
+                &device,
+                &queue,
+                &bind_group_layout,
+                size,
+                OverlayConfig {
+                    width: 640,
+                    height: 224,
+                    padding_x: 8,
+                    padding_y: 8,
+                    anchor: OverlayAnchor::TopRight,
+                    label: "timeline-overlay",
+                },
             )?)
         } else {
             None
@@ -1753,7 +2044,7 @@ impl ViewerState {
             }
         });
 
-        let state = Self {
+        let mut state = Self {
             window,
             surface,
             device,
@@ -1778,6 +2069,7 @@ impl ViewerState {
             _texture_view: texture_view,
             _sampler: sampler,
             audio_overlay,
+            timeline_overlay,
             background,
             scene: scene.clone(),
             selected_entity,
@@ -1789,6 +2081,7 @@ impl ViewerState {
 
         state.surface.configure(&state.device, &state.config);
         state.print_selected_entity();
+        state.refresh_timeline_overlay();
 
         Ok(state)
     }
@@ -1808,6 +2101,9 @@ impl ViewerState {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
             if let Some(overlay) = self.audio_overlay.as_mut() {
+                overlay.update_vertices(&self.device, new_size);
+            }
+            if let Some(overlay) = self.timeline_overlay.as_mut() {
                 overlay.update_vertices(&self.device, new_size);
             }
         }
@@ -1883,28 +2179,16 @@ impl ViewerState {
 
         if let Some(overlay) = self.audio_overlay.as_mut() {
             overlay.upload(&self.queue);
-            if overlay.is_visible() {
-                let mut overlay_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("audio-overlay-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                overlay_pass.set_pipeline(&self.pipeline);
-                overlay_pass.set_bind_group(0, overlay.bind_group(), &[]);
-                overlay_pass.set_vertex_buffer(0, overlay.vertex_buffer().slice(..));
-                overlay_pass
-                    .set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                overlay_pass.draw_indexed(0..self.quad_index_count, 0, 0..1);
-            }
+        }
+        if let Some(overlay) = self.audio_overlay.as_ref() {
+            self.draw_overlay(&mut encoder, &view, overlay, "audio-overlay-pass");
+        }
+
+        if let Some(overlay) = self.timeline_overlay.as_mut() {
+            overlay.upload(&self.queue);
+        }
+        if let Some(overlay) = self.timeline_overlay.as_ref() {
+            self.draw_overlay(&mut encoder, &view, overlay, "timeline-overlay-pass");
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -1912,9 +2196,48 @@ impl ViewerState {
         Ok(())
     }
 
+    fn draw_overlay(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        overlay: &TextOverlay,
+        label: &'static str,
+    ) {
+        if !overlay.is_visible() {
+            return;
+        }
+        let mut overlay_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        overlay_pass.set_pipeline(&self.pipeline);
+        overlay_pass.set_bind_group(0, overlay.bind_group(), &[]);
+        overlay_pass.set_vertex_buffer(0, overlay.vertex_buffer().slice(..));
+        overlay_pass.set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        overlay_pass.draw_indexed(0..self.quad_index_count, 0, 0..1);
+    }
+
     fn update_audio_overlay(&mut self, status: &AudioStatus) {
         if let Some(overlay) = self.audio_overlay.as_mut() {
             let lines = audio_overlay_lines(status);
+            overlay.set_lines(&lines);
+        }
+    }
+
+    fn refresh_timeline_overlay(&mut self) {
+        if let Some(overlay) = self.timeline_overlay.as_mut() {
+            let scene = self.scene.as_deref();
+            let lines = timeline_overlay_lines(scene, self.selected_entity);
             overlay.set_lines(&lines);
         }
     }
@@ -1930,6 +2253,7 @@ impl ViewerState {
             };
             self.selected_entity = Some(next);
             self.print_selected_entity();
+            self.refresh_timeline_overlay();
         }
     }
 
@@ -1944,6 +2268,7 @@ impl ViewerState {
             };
             self.selected_entity = Some(prev);
             self.print_selected_entity();
+            self.refresh_timeline_overlay();
         }
     }
 

@@ -150,6 +150,15 @@ pipelines can monitor the log without spinning up a window. This gives a quick
 sanity check that the runtime bridge is emitting the audio events downstream
 tooling expects.
 
+Pair the viewer with `--timeline <manifest>` to surface the Manny boot sequence
+inside the HUD. The overlay (top-right) lists the staged hooks from
+`grim_engine --timeline-json` and highlights the entry that corresponds to the
+currently selected marker (`Left`/`Right` cycles the focus). Additional rows
+call out the source Lua file, hook kind, prerequisites, and a compact ordered
+view of the boot stages so geometry probes and timeline metadata stay in lockstep.
+Running without the timeline manifest keeps the viewer in its previous
+marker-only mode.
+
 For a turnkey loop, run `tools/run_manny_boot.sh`. The helper first invokes
 `grim_engine --run-lua` with timeline and audio exports, then launches
 `grim_viewer` against the freshly generated manifests. Any additional arguments

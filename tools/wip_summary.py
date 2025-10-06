@@ -20,7 +20,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Current Direction",
             "body": [
                 "Boot simulation now stubs Manny's desk cut-scene so the Lua host logs memo retrieval and computer interactions without the original precompiled scripts.",
-                "Viewer now renders the audio overlay direct from --audio-log-json; timeline overlays remain on deck so hook sequencing stays visible while iterating.",
+                "Viewer overlays now render audio and boot timeline metadata directly from --audio-log-json / --timeline so hook sequencing stays visible while iterating.",
                 "Stabilise codec3 decoding so Manny's office colour plates and .zbm depth stay faithful in engine captures.",
                 "Movement demo now proves Manny can walk inside mo.set; focus shifts to wiring a hotspot interaction and promoting the movement log into regression coverage.",
             ],
@@ -29,7 +29,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Active Threads",
             "body": [
                 "Geometry-driven head targeting now records real sector hits; upcoming work focuses on surfacing those cues to downstream tooling.",
-                "Timeline overlay plumbing is queued so the viewer can surface hook sequencing while geometry instrumentation continues to evolve.",
+                "Timeline overlay highlight now ships; next up is feeding it hotspot/movement traces so interactive regressions line up with stage sequencing.",
                 "Validate room bootstrap (scene assets, walkboxes, dialogues) inside the modern runtime and log gaps to close.",
                 "Promote the new movement log into automated coverage and extend the harness to cover a hotspot interaction.",
             ],
@@ -37,20 +37,14 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Next Steps",
             "body": [
-                "Project Manny's office boot timeline overlays into the viewer to close out milestone 1 instrumentation.",
-                "Feed the overlay with hook sequencing and selection affordances so geometry and timeline views stay in sync.",
+                "Marry the timeline overlay with the movement logger so stage changes and sector hits travel in one regression artifact.",
+                "Surface overlay selection data during hotspot playback so Manny's first interaction run can assert both geometry and hook sequencing.",
                 "Demo entering Manny's office from boot with one interactive hotspot, then capture the flow alongside the movement log in a reusable regression script.",
                 "Lock in regression coverage for codec3 colour + depth paths and the Manny hotspot/movement smoke tests so the scene stays stable once playable.",
             ],
         },
     ],
     "workstreams": [
-        {
-            "slug": "viewer_timeline_overlay",
-            "title": "Timeline overlay instrumentation",
-            "description": "Timeline overlay instrumentation",
-            "prompt": "Objective: layer Manny's office boot timeline metadata into grim_viewer so hook sequencing and entity focus appear directly in the HUD. Consume the existing --timeline JSON manifest, project stage labels and hook indices alongside the marker grid, and let ←/→ cycling highlight the corresponding overlay entry. Preserve behaviour when --timeline is absent. Document the flag pairing in docs/startup_overview.md, add targeted unit coverage for any timeline parsing helpers, and run cargo fmt && cargo test -p grim_viewer before handing off.",
-        },
         {
             "slug": "hotspot_demo",
             "title": "Hotspot interaction demo",
