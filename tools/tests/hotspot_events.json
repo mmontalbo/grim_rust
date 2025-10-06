@@ -2,58 +2,72 @@
   "events": [
     {
       "sequence": 4,
+      "frame": 1,
       "label": "actor.select manny"
     },
     {
       "sequence": 213,
+      "frame": 1,
       "label": "set.switch mo.set"
     },
     {
       "sequence": 263,
+      "frame": 1,
       "label": "actor.manny.base_costume suit"
     },
     {
       "sequence": 264,
+      "frame": 1,
       "label": "actor.manny.costume suit"
     },
     {
       "sequence": 266,
+      "frame": 1,
       "label": "actor.manny.base_costume suit"
     },
     {
       "sequence": 267,
+      "frame": 1,
       "label": "actor.manny.costume suit"
     },
     {
       "sequence": 269,
+      "frame": 1,
       "label": "actor.manny.enter mo.set"
     },
     {
       "sequence": 270,
+      "frame": 1,
       "label": "actor.manny.at_interest"
     },
     {
       "sequence": 273,
+      "frame": 1,
       "label": "set.setup.get mo.set -> 0"
     },
     {
       "sequence": 274,
+      "frame": 1,
       "label": "set.setup.make mo.set -> 1"
     },
     {
       "sequence": 277,
+      "frame": 1,
       "label": "actor.manny.walk_chore <nil> suit"
     },
     {
       "sequence": 282,
+      "frame": 1,
       "label": "set.setup.get mo.set -> 1"
     },
     {
       "sequence": 302,
+      "frame": 1,
       "label": "actor.manny.head_target /motx083/tube"
     },
     {
       "sequence": 309,
+      "frame": 1,
       "label": "set.setup.get mo.set -> 1"
     },
     {

@@ -969,6 +969,36 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn hotspot_event_log_backfills_initial_frames() {
+        let events = vec![
+            "actor.select manny".to_string(),
+            "set.switch mo.set".to_string(),
+            "movement.frame 12 0.000,0.000".to_string(),
+            "hotspot.demo.start computer".to_string(),
+        ];
+
+        let log = build_hotspot_event_log(&events);
+        let frames: Vec<Option<u32>> = log.events.iter().map(|event| event.frame).collect();
+
+        assert_eq!(frames, vec![Some(12), Some(12), Some(12)]);
+    }
+
+    #[test]
+    fn hotspot_event_log_defaults_to_zero_when_no_frames() {
+        let events = vec![
+            "actor.select manny".to_string(),
+            "hotspot.demo.start computer".to_string(),
+        ];
+
+        let log = build_hotspot_event_log(&events);
+
+        assert!(
+            log.events.iter().all(|event| event.frame == Some(0)),
+            "expected fallback frame of 0"
+        );
+    }
 }
 
 fn describe_hook_kind(kind: HookKind) -> &'static str {
@@ -1216,12 +1246,18 @@ fn build_hotspot_event_log(events: &[String]) -> HotspotEventLog {
 
     let mut filtered: Vec<HotspotEventLogEntry> = Vec::new();
     let mut last_frame: Option<u32> = None;
+    let mut pending_without_frame: Vec<usize> = Vec::new();
     let mut last_emitted: Option<String> = None;
 
     for (index, entry) in events.iter().enumerate() {
         let line = entry.trim();
         if let Some(frame) = parse_movement_frame(line) {
             last_frame = Some(frame);
+            for pending_index in pending_without_frame.drain(..) {
+                if let Some(slot) = filtered.get_mut(pending_index) {
+                    slot.frame = Some(frame);
+                }
+            }
             continue;
         }
 
@@ -1233,12 +1269,27 @@ fn build_hotspot_event_log(events: &[String]) -> HotspotEventLog {
             continue;
         }
 
-        filtered.push(HotspotEventLogEntry {
+        let entry = HotspotEventLogEntry {
             sequence: index as u32,
             frame: last_frame,
             label: line.to_string(),
-        });
+        };
+        let needs_backfill = entry.frame.is_none();
+        filtered.push(entry);
+        if needs_backfill {
+            pending_without_frame.push(filtered.len() - 1);
+        }
         last_emitted = Some(line.to_string());
+    }
+
+    if !pending_without_frame.is_empty() {
+        if let Some(frame) = last_frame.or(Some(0)) {
+            for index in pending_without_frame {
+                if let Some(slot) = filtered.get_mut(index) {
+                    slot.frame = Some(frame);
+                }
+            }
+        }
     }
 
     HotspotEventLog { events: filtered }

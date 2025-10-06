@@ -253,7 +253,8 @@ fn manny_office_runtime_regression() -> Result<()> {
         "timeline manifest diverged from baseline"
     );
 
-    let expected_event_log = read_event_log(workspace_root.join("tools/tests/hotspot_events.json"))?;
+    let expected_event_log =
+        read_event_log(workspace_root.join("tools/tests/hotspot_events.json"))?;
     let actual_event_log = read_event_log(&event_log_path)?;
 
     assert_eq!(
