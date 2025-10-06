@@ -127,7 +127,6 @@ struct Args {
     /// Path to write codec3 depth stats JSON (requires --run-lua)
     #[arg(long)]
     depth_stats_json: Option<PathBuf>,
-
     /// Run a Manny hotspot demo after boot (requires --run-lua)
     #[arg(long, value_name = "SLUG")]
     hotspot_demo: Option<String>,
@@ -192,7 +191,6 @@ fn main() -> Result<()> {
             .lab_root
             .clone()
             .unwrap_or_else(|| PathBuf::from("dev-install"));
-
         run_boot_sequence(
             &args.data_root,
             args.lab_root.as_deref(),

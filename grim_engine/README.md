@@ -52,6 +52,12 @@ state we need to validate the first playable milestone.
   --depth-stats-json tools/tests/manny_office_depth_stats.json` whenever the
   intended walk path, audio sequence, or depth metrics change (call out the
   rationale when updating the snapshots).
+- `cargo test -p grim_engine -- hotspot_demo_logs_hotspot_markers` exercises
+  the computer hotspot demo and asserts the Lua host emits the expected
+  approach/start/end markers. Run
+  `cargo run -p grim_engine -- --run-lua --hotspot-demo computer \
+  --audio-log-json hotspot_audio.json` to inspect the captured audio/events
+  manually.
 
 ## Extending the Crate
 - When adding Lua bindings, mirror ScummVM's semantics and document any gaps so

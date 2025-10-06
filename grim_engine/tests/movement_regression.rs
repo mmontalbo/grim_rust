@@ -54,7 +54,10 @@ fn movement_demo_matches_fixture() -> Result<()> {
         .context("executing grim_engine movement demo")?;
 
     assert!(status.success(), "grim_engine exited with {status:?}");
-    assert!(log_path.is_file(), "grim_engine did not produce a movement log");
+    assert!(
+        log_path.is_file(),
+        "grim_engine did not produce a movement log"
+    );
 
     let expected = read_samples(manifest_dir.join("tests/fixtures/movement_demo_log.json"))?;
     let actual = read_samples(&log_path)?;

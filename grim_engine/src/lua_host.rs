@@ -3701,7 +3701,6 @@ fn complete_computer_hotspot_manually(
         .log_event("hotspot.demo.fallback computer".to_string());
     Ok(())
 }
-
 fn capture_movement_sample(
     ctx: &EngineContext,
     actor_handle: u32,
