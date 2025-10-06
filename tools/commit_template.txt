@@ -1,0 +1,10 @@
+<area>: <short change summary>
+
+Why:
+- Intent behind the change
+
+What:
+- path/to/file: brief description of the edit
+
+# Replace the placeholder bullets with concrete notes before saving.
+# Keep the blank line between the subject line and the Why section.

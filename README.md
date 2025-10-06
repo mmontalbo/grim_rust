@@ -36,5 +36,8 @@ flow and prototype modern tooling around it.
   completed workstream and nudging the “Active Threads” / “Next Steps”) so the
   next contributor sees the new priority without having to chase context in the
   commit log.
+- If the commit subject/Why/What spacing trips you up, run
+  `git config commit.template tools/commit_template.txt` once—the template
+  pre-populates the blank line and bullet blocks so you only fill in the text.
 - Component-specific workflows and deep dives live in each crate's README; start
   there when modifying a particular subsystem.
