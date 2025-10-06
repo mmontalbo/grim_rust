@@ -21,3 +21,4 @@ serde_json = "1"
 bytemuck = { version = "1.14", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 font8x8 = "0.3"
+glam = "0.27"

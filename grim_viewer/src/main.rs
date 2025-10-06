@@ -18,7 +18,9 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytemuck::{Pod, Zeroable, cast_slice};
 use clap::Parser;
 use font8x8::legacy::BASIC_LEGACY;
-use grim_formats::{BmFile, DepthStats, decode_bm, decode_bm_with_seed};
+use glam::{Mat3, Mat4, Vec3, Vec4};
+use grim_formats::set::Setup;
+use grim_formats::{BmFile, DepthStats, SetFile, decode_bm, decode_bm_with_seed};
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use pollster::FutureExt;
 #[cfg(feature = "audio")]
@@ -577,11 +579,11 @@ impl MovementScrubber {
         }
 
         lines.push(truncate_line(
-            "  Map: rectangles show Manny/top-down bounds; aqua tracks the current frame.",
+            "  Overlay: markers render in plate space using the active camera transform.",
             MAX_LINE,
         ));
         lines.push(truncate_line(
-            "  Legend: teal spawn, violet path, orange finish, gold head target highlight.",
+            "  Legend: teal spawn, violet path, orange finish, aqua current frame, gold head target highlight.",
             MAX_LINE,
         ));
         lines.push("  Controls: [ ] step, { } jump".to_string());
@@ -1367,8 +1369,9 @@ fn main() -> Result<()> {
 
     let scene_data = match args.timeline.as_ref() {
         Some(path) => {
-            let mut scene = load_scene_from_timeline(path)
-                .with_context(|| format!("loading timeline manifest {}", path.display()))?;
+            let mut scene =
+                load_scene_from_timeline(path, &args.manifest, Some(asset_name.as_str()))
+                    .with_context(|| format!("loading timeline manifest {}", path.display()))?;
             if let Some(trace) = movement_trace.take() {
                 scene.attach_movement_trace(trace);
             }
@@ -1400,8 +1403,19 @@ fn main() -> Result<()> {
         for entity in &scene.entities {
             println!("  - {}", entity.describe());
         }
+        if let Some(setup) = scene.active_setup() {
+            println!("Active camera setup: {}", setup);
+            if scene.camera.is_some() {
+                println!(
+                    "Markers overlay renders Manny/head targets in plate space using this camera."
+                );
+            }
+        }
         if !scene.entities.is_empty() {
             println!("\nUse ←/→ to cycle entity focus while the viewer is running.");
+            println!(
+                "Entity focus drives the highlighted marker, timeline overlay, and console dump for the active actor/object."
+            );
             println!(
                 "Markers overlay: green/blue squares mark entities; red highlights the current selection."
             );
@@ -1617,6 +1631,96 @@ struct ViewerScene {
     timeline: Option<TimelineSummary>,
     movement: Option<MovementTrace>,
     hotspot_events: Vec<HotspotEvent>,
+    camera: Option<CameraParameters>,
+    active_setup: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CameraParameters {
+    name: String,
+    position: [f32; 3],
+    interest: [f32; 3],
+    roll_degrees: f32,
+    fov_degrees: f32,
+    near_clip: f32,
+    far_clip: f32,
+}
+
+impl CameraParameters {
+    fn from_setup(name: &str, setup: &Setup) -> Option<Self> {
+        let position = setup.position.as_ref()?;
+        let interest = setup.interest.as_ref()?;
+        let roll_degrees = setup.roll.unwrap_or(0.0);
+        let fov_degrees = setup.fov?;
+        let near_clip = setup.near_clip?;
+        let far_clip = setup.far_clip?;
+
+        Some(Self {
+            name: name.to_string(),
+            position: [position.x, position.y, position.z],
+            interest: [interest.x, interest.y, interest.z],
+            roll_degrees,
+            fov_degrees,
+            near_clip,
+            far_clip,
+        })
+    }
+
+    fn projector(&self, aspect_ratio: f32) -> Option<CameraProjector> {
+        if !aspect_ratio.is_finite() || aspect_ratio <= 0.0 {
+            return None;
+        }
+
+        let eye = Vec3::from_array(self.position);
+        let target = Vec3::from_array(self.interest);
+        let mut forward = target - eye;
+        if forward.length_squared() <= f32::EPSILON {
+            return None;
+        }
+        forward = forward.normalize();
+
+        let mut up = Vec3::Z;
+        let roll_radians = self.roll_degrees.to_radians();
+        if roll_radians.abs() > f32::EPSILON {
+            let rotation = Mat3::from_axis_angle(forward, roll_radians);
+            up = rotation * up;
+        }
+
+        if up.length_squared() <= f32::EPSILON {
+            up = Vec3::Y;
+        }
+
+        let view = Mat4::look_at_rh(eye, target, up.normalize());
+        let projection = Mat4::perspective_rh(
+            self.fov_degrees.to_radians(),
+            aspect_ratio,
+            self.near_clip.max(1e-4),
+            self.far_clip.max(self.near_clip + 1.0),
+        );
+
+        Some(CameraProjector {
+            view_projection: projection * view,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CameraProjector {
+    view_projection: Mat4,
+}
+
+impl CameraProjector {
+    fn project(&self, position: [f32; 3]) -> Option<[f32; 2]> {
+        let clip = self.view_projection * Vec4::new(position[0], position[1], position[2], 1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        if !ndc.x.is_finite() || !ndc.y.is_finite() {
+            return None;
+        }
+        Some([ndc.x, ndc.y])
+    }
 }
 
 impl ViewerScene {
@@ -1639,6 +1743,16 @@ impl ViewerScene {
 
     fn hotspot_events(&self) -> &[HotspotEvent] {
         &self.hotspot_events
+    }
+
+    fn camera_projector(&self, aspect_ratio: f32) -> Option<CameraProjector> {
+        self.camera
+            .as_ref()
+            .and_then(|camera| camera.projector(aspect_ratio))
+    }
+
+    fn active_setup(&self) -> Option<&str> {
+        self.active_setup.as_deref()
     }
 }
 
@@ -2070,16 +2184,70 @@ const MARKER_VERTICES: [MarkerVertex; 6] = [
     },
 ];
 
-fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
+enum MarkerProjection<'a> {
+    Perspective(&'a CameraProjector),
+    TopDown {
+        horizontal_axis: usize,
+        vertical_axis: usize,
+        horizontal_min: f32,
+        vertical_min: f32,
+        horizontal_span: f32,
+        vertical_span: f32,
+    },
+}
+
+impl<'a> MarkerProjection<'a> {
+    fn project(&self, position: [f32; 3]) -> Option<[f32; 2]> {
+        match self {
+            MarkerProjection::Perspective(projector) => projector.project(position),
+            MarkerProjection::TopDown {
+                horizontal_axis,
+                vertical_axis,
+                horizontal_min,
+                vertical_min,
+                horizontal_span,
+                vertical_span,
+            } => {
+                let norm_h = (position[*horizontal_axis] - *horizontal_min) / *horizontal_span;
+                let norm_v = (position[*vertical_axis] - *vertical_min) / *vertical_span;
+                if !norm_h.is_finite() || !norm_v.is_finite() {
+                    return None;
+                }
+                const MAP_MARGIN: f32 = 0.08;
+                let clamp_h = norm_h.clamp(0.0, 1.0);
+                let clamp_v = norm_v.clamp(0.0, 1.0);
+                let scaled_h = MAP_MARGIN + clamp_h * (1.0 - 2.0 * MAP_MARGIN);
+                let scaled_v = MAP_MARGIN + clamp_v * (1.0 - 2.0 * MAP_MARGIN);
+                let ndc_x = scaled_h * 2.0 - 1.0;
+                let ndc_y = 1.0 - scaled_v * 2.0;
+                Some([ndc_x, ndc_y])
+            }
+        }
+    }
+}
+
+fn load_scene_from_timeline(
+    path: &Path,
+    manifest_path: &Path,
+    active_asset: Option<&str>,
+) -> Result<ViewerScene> {
     let data = std::fs::read(path)
         .with_context(|| format!("reading timeline manifest {}", path.display()))?;
     let manifest: Value = serde_json::from_slice(&data)
         .with_context(|| format!("parsing timeline manifest {}", path.display()))?;
 
+    let set_file_name = manifest
+        .get("engine_state")
+        .and_then(|state| state.get("set"))
+        .and_then(|set| set.get("set_file"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+
     let timeline_summary = build_timeline_summary(&manifest)?;
     let hook_lookup = HookLookup::new(timeline_summary.as_ref());
 
     let mut builders: BTreeMap<SceneEntityKey, SceneEntityBuilder> = BTreeMap::new();
+    let mut setup_hint: Option<String> = None;
 
     if let Some(engine_state) = manifest.get("engine_state") {
         if let Some(actor_map) = engine_state
@@ -2123,7 +2291,7 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
 
                 let entry = builders
                     .entry(SceneEntityKey::new(kind, name.clone()))
-                    .or_insert_with(|| SceneEntityBuilder::new(kind, name));
+                    .or_insert_with(|| SceneEntityBuilder::new(kind, name.clone()));
 
                 let method = event.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let args: Vec<String> = event
@@ -2137,6 +2305,16 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
                     })
                     .unwrap_or_default();
                 let trigger = event.get("triggered_by").and_then(parse_hook_reference);
+
+                if subsystem.eq_ignore_ascii_case("Objects")
+                    && name.eq_ignore_ascii_case("mo")
+                    && method.eq_ignore_ascii_case("add_object_state")
+                {
+                    if let Some(first) = args.first() {
+                        setup_hint = Some(first.clone());
+                    }
+                }
+
                 entry.apply_event(method, &args, trigger, &hook_lookup);
             }
         }
@@ -2160,13 +2338,99 @@ fn load_scene_from_timeline(path: &Path) -> Result<ViewerScene> {
         }
     }
 
-    Ok(ViewerScene {
+    let mut scene = ViewerScene {
         entities,
         position_bounds: bounds,
         timeline: timeline_summary,
         movement: None,
         hotspot_events: Vec::new(),
-    })
+        camera: None,
+        active_setup: setup_hint.clone(),
+    };
+
+    if let Some(set_file) = set_file_name.as_deref() {
+        match recover_camera_from_set(manifest_path, set_file, setup_hint.as_deref(), active_asset)
+        {
+            Ok(Some(camera)) => {
+                scene.active_setup = Some(camera.name.clone());
+                scene.camera = Some(camera);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!(
+                    "[grim_viewer] warning: unable to recover camera from {}: {err}",
+                    set_file
+                );
+            }
+        }
+    }
+
+    Ok(scene)
+}
+
+fn recover_camera_from_set(
+    manifest_path: &Path,
+    set_file_name: &str,
+    setup_hint: Option<&str>,
+    active_asset: Option<&str>,
+) -> Result<Option<CameraParameters>> {
+    let (_, set_bytes, _) = load_asset_bytes(manifest_path, set_file_name)
+        .with_context(|| format!("loading set file {}", set_file_name))?;
+    let set = SetFile::parse(&set_bytes)
+        .with_context(|| format!("parsing set file {}", set_file_name))?;
+
+    let mut selected_setup: Option<&Setup> = None;
+    if let Some(hint) = setup_hint {
+        selected_setup = set
+            .setups
+            .iter()
+            .find(|setup| setup.name.eq_ignore_ascii_case(hint));
+    }
+
+    if selected_setup.is_none() {
+        if let Some(asset) = active_asset {
+            selected_setup = set.setups.iter().find(|setup| {
+                setup
+                    .background
+                    .as_ref()
+                    .map(|bg| bg.eq_ignore_ascii_case(asset))
+                    .unwrap_or(false)
+                    || setup
+                        .zbuffer
+                        .as_ref()
+                        .map(|zb| zb.eq_ignore_ascii_case(asset))
+                        .unwrap_or(false)
+            });
+
+            if selected_setup.is_none() {
+                let lower = asset.to_ascii_lowercase();
+                selected_setup = set.setups.iter().find(|setup| {
+                    setup
+                        .background
+                        .as_ref()
+                        .map(|bg| bg.to_ascii_lowercase() == lower)
+                        .unwrap_or(false)
+                        || setup
+                            .zbuffer
+                            .as_ref()
+                            .map(|zb| zb.to_ascii_lowercase() == lower)
+                            .unwrap_or(false)
+                });
+            }
+        }
+    }
+
+    if selected_setup.is_none() {
+        selected_setup = set.setups.first();
+    }
+
+    if let Some(setup) = selected_setup {
+        if let Some(camera) = CameraParameters::from_setup(&setup.name, setup) {
+            return Ok(Some(camera));
+        }
+    }
+
+    Ok(None)
 }
 
 fn load_movement_trace(path: &Path) -> Result<MovementTrace> {
@@ -2666,6 +2930,7 @@ struct ViewerState {
     scene: Option<Arc<ViewerScene>>,
     selected_entity: Option<usize>,
     scrubber: Option<MovementScrubber>,
+    camera_projector: Option<CameraProjector>,
     marker_pipeline: wgpu::RenderPipeline,
     marker_vertex_buffer: wgpu::Buffer,
     marker_instance_buffer: wgpu::Buffer,
@@ -2767,6 +3032,28 @@ impl ViewerState {
         };
         let texture_width = preview.width;
         let texture_height = preview.height;
+        let texture_aspect = (texture_width.max(1) as f32) / (texture_height.max(1) as f32);
+        let camera_projector = scene
+            .as_ref()
+            .and_then(|scene| scene.camera_projector(texture_aspect));
+        if let Some(scene_ref) = scene.as_ref() {
+            if let Some(setup) = scene_ref.active_setup() {
+                println!("[grim_viewer] active camera setup: {}", setup);
+            }
+            if let Some(camera) = scene_ref.camera.as_ref() {
+                println!(
+                    "  camera eye ({:.3}, {:.3}, {:.3}) interest ({:.3}, {:.3}, {:.3}) fov {:.2} roll {:.2}",
+                    camera.position[0],
+                    camera.position[1],
+                    camera.position[2],
+                    camera.interest[0],
+                    camera.interest[1],
+                    camera.interest[2],
+                    camera.fov_degrees,
+                    camera.roll_degrees
+                );
+            }
+        }
         let texture_extent = wgpu::Extent3d {
             width: texture_width,
             height: texture_height,
@@ -3104,6 +3391,7 @@ impl ViewerState {
             scene: scene.clone(),
             selected_entity,
             scrubber,
+            camera_projector,
             marker_pipeline,
             marker_vertex_buffer,
             marker_instance_buffer,
@@ -3423,17 +3711,44 @@ impl ViewerState {
             None => return instances,
         };
 
-        let bounds = match scene.position_bounds.as_ref() {
-            Some(bounds) => bounds,
-            None => return instances,
+        let projection = if let Some(projector) = self.camera_projector.as_ref() {
+            MarkerProjection::Perspective(projector)
+        } else {
+            let bounds = match scene.position_bounds.as_ref() {
+                Some(bounds) => bounds,
+                None => return instances,
+            };
+            let (horizontal_axis, vertical_axis) = bounds.projection_axes();
+            let horizontal_min = bounds.min[horizontal_axis];
+            let vertical_min = bounds.min[vertical_axis];
+            let horizontal_span = (bounds.max[horizontal_axis] - horizontal_min).max(0.001);
+            let vertical_span = (bounds.max[vertical_axis] - vertical_min).max(0.001);
+            MarkerProjection::TopDown {
+                horizontal_axis,
+                vertical_axis,
+                horizontal_min,
+                vertical_min,
+                horizontal_span,
+                vertical_span,
+            }
         };
 
-        let (horizontal_axis, vertical_axis) = bounds.projection_axes();
-        let horizontal_min = bounds.min[horizontal_axis];
-        let vertical_min = bounds.min[vertical_axis];
-        let horizontal_span = (bounds.max[horizontal_axis] - horizontal_min).max(0.001);
-        let vertical_span = (bounds.max[vertical_axis] - vertical_min).max(0.001);
         let selected = self.selected_entity;
+
+        let mut push_marker = |position: [f32; 3], size: f32, color: [f32; 3], highlight: f32| {
+            if let Some([ndc_x, ndc_y]) = projection.project(position) {
+                if !ndc_x.is_finite() || !ndc_y.is_finite() {
+                    return;
+                }
+                instances.push(MarkerInstance {
+                    translate: [ndc_x, ndc_y],
+                    size,
+                    highlight,
+                    color,
+                    _padding: 0.0,
+                });
+            }
+        };
 
         if let Some(trace) = scene.movement_trace() {
             if !trace.samples.is_empty() {
@@ -3445,29 +3760,6 @@ impl ViewerState {
                 let path_size = 0.032;
                 let start_size = 0.044;
                 let end_size = 0.045;
-
-                let mut push_marker =
-                    |position: [f32; 3], size: f32, color: [f32; 3], highlight: f32| {
-                        let norm_h = (position[horizontal_axis] - horizontal_min) / horizontal_span;
-                        let norm_v = (position[vertical_axis] - vertical_min) / vertical_span;
-                        if !norm_h.is_finite() || !norm_v.is_finite() {
-                            return;
-                        }
-                        const MAP_MARGIN: f32 = 0.08;
-                        let clamp_h = norm_h.clamp(0.0, 1.0);
-                        let clamp_v = norm_v.clamp(0.0, 1.0);
-                        let scaled_h = MAP_MARGIN + clamp_h * (1.0 - 2.0 * MAP_MARGIN);
-                        let scaled_v = MAP_MARGIN + clamp_v * (1.0 - 2.0 * MAP_MARGIN);
-                        let ndc_x = scaled_h * 2.0 - 1.0;
-                        let ndc_y = 1.0 - scaled_v * 2.0;
-                        instances.push(MarkerInstance {
-                            translate: [ndc_x, ndc_y],
-                            size,
-                            highlight,
-                            color,
-                            _padding: 0.0,
-                        });
-                    };
 
                 let (scrub_position, highlight_event_scene_index) = match self.scrubber.as_ref() {
                     Some(scrubber) => (
@@ -3526,11 +3818,6 @@ impl ViewerState {
                 None => continue,
             };
 
-            let norm_h = (position[horizontal_axis] - horizontal_min) / horizontal_span;
-            let norm_v = (position[vertical_axis] - vertical_min) / vertical_span;
-            let ndc_x = norm_h.clamp(0.0, 1.0) * 2.0 - 1.0;
-            let ndc_y = 1.0 - norm_v.clamp(0.0, 1.0) * 2.0;
-
             let is_selected = matches!(selected, Some(sel) if sel == idx);
             let base_size = match entity.kind {
                 SceneEntityKind::Actor => 0.06,
@@ -3551,14 +3838,8 @@ impl ViewerState {
                     SceneEntityKind::InterestActor => [0.85, 0.7, 0.25],
                 }
             };
-
-            instances.push(MarkerInstance {
-                translate: [ndc_x, ndc_y],
-                size,
-                highlight: if is_selected { 1.0 } else { 0.0 },
-                color,
-                _padding: 0.0,
-            });
+            let highlight = if is_selected { 1.0 } else { 0.0 };
+            push_marker(position, size, color, highlight);
         }
 
         instances

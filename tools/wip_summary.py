@@ -28,7 +28,7 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Recover the Manny office camera transform and project Manny/head-target markers into plate space so the scrubber overlay reflects the true perspective instead of the abstract minimap.",
+                "Validate the camera-projected overlay against the Manny computer regression capture and refresh docs/artefacts so the perspective view becomes the default debugging path.",
                 "Prototype a dedicated minimap panel in the bottom-right quadrant that renders a true top-down 2D view of Manny's office to complement the perspective overlay during debugging.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
@@ -63,7 +63,7 @@ WIP_DATA: Dict[str, Any] = {
             "slug": "hotspot_overlay",
             "title": "Hotspot overlay integration",
             "description": "Surface hotspot traces in viewer",
-            "prompt": "Objective: build on the movement overlay by wiring hotspot/timeline selections into grim_viewer so geometry/head-targeting debugging stays aligned with the runtime captures. With movement/head markers now matching the regression frames, layer in playback controls and per-event focus so scrubbing the desk interaction stays synced across tooling.",
+            "prompt": "Objective: build on the movement overlay by wiring hotspot/timeline selections into grim_viewer so geometry/head-targeting debugging stays aligned with the runtime captures. With movement/head markers now matching the regression frames via the recovered camera projection, layer in playback controls and per-event focus so scrubbing the desk interaction stays synced across tooling.",
         },
         {
             "slug": "codec3_regression",
