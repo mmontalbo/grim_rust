@@ -28,14 +28,13 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Current Focus",
             "body": [
                 "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth) current so cargo test -p grim_engine -- runtime_regression remains green.",
-                "Surface overlay selection data during hotspot playback to assert geometry + hook sequencing in one pass.",
+                "Thread the hotspot event log into runtime_regression so scripting diffs raise alarms alongside movement/audio checks.",
                 "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
             ],
         },
         {
             "title": "Upcoming Targets",
             "body": [
-                "Thread the hotspot event log into runtime_regression so scripting diffs raise alarms alongside movement/audio checks.",
                 "Capture a reproducible boot→hotspot script that bundles movement, audio, timeline, and depth artefacts for sharing.",
                 "Document the --depth-stats-json workflow and capture the runtime event log as a structured artefact for future overlays.",
             ],

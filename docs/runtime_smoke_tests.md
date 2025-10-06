@@ -60,9 +60,10 @@ want to share them with the regression harness.
   in lockstep with the hotspot artefacts so the viewer overlay reflects the
   same snapshot.
 - **Hotspot event log (`hotspot_events.json`)** – selected runtime events
-  (hotspot markers, Manny head-target updates, ignore-box toggles, dialogue
-  prompts) annotated with the last seen movement frame. `grim_viewer` overlays
-  these markers on the movement trace to highlight geometry interactions.
+  (hotspot markers, set selections, Manny head-target updates, ignore-box
+  toggles, dialogue prompts) annotated with the last seen movement frame.
+  `grim_viewer` overlays these markers on the movement trace to highlight
+  geometry interactions.
 - **Stdout transcript** – includes `dialog.begin manny /moma112/` style markers
   and any geometry/debug events the Lua host recorded. Redirect it to a file if
   you need to diff runs across branches.

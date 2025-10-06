@@ -28,8 +28,9 @@ timeline markers, and track audio cues during development.
   launches the interactive viewer and loads the default plate.
 - `--timeline` overlays boot metadata exported by the engine host, while
   `--audio-log` streams cue updates captured during a Lua run.
-- `--event-log` layers hotspot/head-target markers recorded by the runtime
-  onto the movement trace so geometry issues stay visible alongside the walk path.
+- `--event-log` layers hotspot/head-target markers and set selection traces
+  recorded by the runtime onto the movement trace so geometry issues stay
+  visible alongside the walk path.
 - `--headless --verify-render` performs the offscreen render diff, useful in CI
   or quick sanity checks before editing shader code.
 

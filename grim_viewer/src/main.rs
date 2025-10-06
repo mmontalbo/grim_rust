@@ -212,7 +212,12 @@ struct HotspotEvent {
 
 impl HotspotEvent {
     fn kind(&self) -> HotspotEventKind {
-        if self.label.starts_with("hotspot.") {
+        if self.label.starts_with("set.setup.")
+            || self.label.starts_with("set.switch")
+            || self.label.starts_with("actor.select")
+        {
+            HotspotEventKind::Selection
+        } else if self.label.starts_with("hotspot.") {
             HotspotEventKind::Hotspot
         } else if self.label.starts_with("actor.manny.head_target") {
             HotspotEventKind::HeadTarget
@@ -235,6 +240,7 @@ enum HotspotEventKind {
     IgnoreBoxes,
     Chore,
     Dialog,
+    Selection,
     Other,
 }
 
@@ -245,6 +251,7 @@ fn event_marker_style(kind: HotspotEventKind) -> (f32, [f32; 3], f32) {
         HotspotEventKind::IgnoreBoxes => (0.045, [0.95, 0.45, 0.35], 0.35),
         HotspotEventKind::Chore => (0.042, [0.6, 0.4, 0.95], 0.25),
         HotspotEventKind::Dialog => (0.042, [0.95, 0.65, 0.75], 0.3),
+        HotspotEventKind::Selection => (0.044, [0.45, 0.95, 0.55], 0.32),
         HotspotEventKind::Other => (0.04, [0.78, 0.78, 0.78], 0.2),
     }
 }
@@ -710,7 +717,12 @@ fn timeline_overlay_lines(
                 .frame
                 .map(|value| format!("{value:03}"))
                 .unwrap_or_else(|| String::from("--"));
-            let line = format!("  [{frame}] {}", event.label);
+            let prefix = if matches!(event.kind(), HotspotEventKind::Selection) {
+                "(sel) "
+            } else {
+                ""
+            };
+            let line = format!("  [{frame}] {prefix}{}", event.label);
             lines.push(truncate_line(&line, MAX_LINE));
         }
         if events.len() > MAX_EVENTS {
@@ -1052,7 +1064,9 @@ fn main() -> Result<()> {
             if let Some((min_yaw, max_yaw)) = trace.yaw_range() {
                 println!("  yaw range: {:.3} – {:.3}", min_yaw, max_yaw);
             }
-            println!("  Overlay markers: teal = spawn, violet = path, orange = hotspot finish.");
+            println!(
+                "  Overlay markers: teal = spawn, violet = path, orange = hotspot finish, lime = selection."
+            );
         }
         let event_preview = scene.hotspot_events();
         if !event_preview.is_empty() {
