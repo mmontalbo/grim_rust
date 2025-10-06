@@ -30,6 +30,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Current Focus",
             "body": [
                 "Shake down the new minimap panel in the bottom-right quadrant: validate Manny's path and hotspot markers stay registered against the baseline capture while scrubbing.",
+                "Introduce a lightweight Rust-side layout helper (or egui overlay) so viewer panels can be positioned declaratively without leaving the existing wgpu stack.",
                 "Rev the Manny baseline overlays once the minimap orientation is locked so the perspective and top-down views use the same regression artefacts.",
                 "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
@@ -38,6 +39,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Upcoming Targets",
             "body": [
                 "Add a minimap toggle and quick legend in grim_viewer once playback validation passes so the panel remains useful without overwhelming the first-playable workflow.",
+                "Spot-check the minimap axis heuristic in other Manny office captures and document the Rust layout abstraction so future overlays reuse it instead of ad-hoc NDC math.",
                 "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth, event log) current so cargo test -p grim_engine -- runtime_regression remains green; hotspot events now backfill the opening frames and approach markers anchor to the first movement frame, so refresh the full capture set together when behaviour shifts.",
                 "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
             ],

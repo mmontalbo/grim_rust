@@ -19,7 +19,7 @@ import shutil
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT_DIR / "artifacts" / "manny_office_assets.json"
-DEFAULT_ASSET = "mo_tube_balloon.zbm"
+DEFAULT_ASSET = "mo_0_ddtws.bm"
 DEFAULT_TIMELINE = ROOT_DIR / "tools" / "tests" / "manny_office_timeline.json"
 DEFAULT_MOVEMENT_LOG = ROOT_DIR / "tools" / "tests" / "movement_log.json"
 DEFAULT_EVENT_LOG = ROOT_DIR / "tools" / "tests" / "hotspot_events.json"
@@ -36,7 +36,7 @@ def main() -> None:
     common.add_argument(
         "--asset",
         default=DEFAULT_ASSET,
-        help="Bitmap asset to load (default: mo_tube_balloon.zbm)",
+        help="Bitmap asset to load (default: mo_0_ddtws.bm)",
     )
     common.add_argument(
         "--timeline",

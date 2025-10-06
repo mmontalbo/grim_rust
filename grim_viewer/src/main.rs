@@ -50,7 +50,7 @@ struct Args {
     manifest: PathBuf,
 
     /// Asset to load from the LAB archives for inspection
-    #[arg(long, default_value = "mo_tube_balloon.zbm")]
+    #[arg(long, default_value = "mo_0_ddtws.bm")]
     asset: String,
 
     /// Optional boot timeline manifest produced by grim_engine --timeline-json
@@ -2104,6 +2104,51 @@ impl SceneBounds {
         self.update(other.max);
     }
 
+    fn top_down_axes(&self) -> (usize, usize) {
+        let spans = [
+            (self.max[0] - self.min[0]).abs(),
+            (self.max[1] - self.min[1]).abs(),
+            (self.max[2] - self.min[2]).abs(),
+        ];
+
+        let span_x = spans[0];
+        let span_y = spans[1];
+        let span_z = spans[2];
+        const EPSILON: f32 = 1e-3;
+
+        let has_x = span_x > EPSILON;
+        let has_z = span_z > EPSILON;
+
+        if has_x && has_z {
+            if span_x >= span_z {
+                return (0, 2);
+            }
+            return (2, 0);
+        }
+
+        if has_x {
+            if span_z > EPSILON {
+                return (0, 2);
+            }
+            if span_y > EPSILON {
+                return (0, 1);
+            }
+            return (0, 2);
+        }
+
+        if has_z {
+            if span_x > EPSILON {
+                return (2, 0);
+            }
+            if span_y > EPSILON {
+                return (2, 1);
+            }
+            return (2, 0);
+        }
+
+        self.projection_axes()
+    }
+
     fn projection_axes(&self) -> (usize, usize) {
         let spans = [
             (self.max[0] - self.min[0]).abs(),
@@ -2156,6 +2201,27 @@ mod bounds_tests {
         let (horizontal, vertical) = bounds.projection_axes();
         assert_eq!(horizontal, 1);
         assert_ne!(vertical, horizontal);
+    }
+
+    #[test]
+    fn top_down_axes_prefer_ground_plane() {
+        let bounds = SceneBounds {
+            min: [-12.0, -3.0, -1.5],
+            max: [18.0, 7.0, 2.0],
+        };
+        let (horizontal, vertical) = bounds.top_down_axes();
+        assert_eq!(horizontal, 0);
+        assert_eq!(vertical, 2);
+    }
+
+    #[test]
+    fn top_down_axes_fall_back_when_flat() {
+        let bounds = SceneBounds {
+            min: [0.0, -1.0, 0.0],
+            max: [0.0, 3.0, 0.0],
+        };
+        let (horizontal, vertical) = bounds.top_down_axes();
+        assert_ne!(horizontal, vertical);
     }
 }
 
@@ -2814,6 +2880,7 @@ impl TextOverlay {
         let mut pixels = vec![0u8; (config.width * config.height * 4) as usize];
         Self::fill_background(&mut pixels);
 
+        let upload = prepare_rgba_upload(config.width, config.height, &pixels)?;
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &texture,
@@ -2821,10 +2888,10 @@ impl TextOverlay {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &pixels,
+            upload.pixels(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * config.width),
+                bytes_per_row: Some(upload.bytes_per_row()),
                 rows_per_image: Some(config.height),
             },
             extent,
@@ -2984,6 +3051,16 @@ impl TextOverlay {
         if !self.dirty {
             return;
         }
+        let upload = match prepare_rgba_upload(self.width, self.height, &self.pixels) {
+            Ok(upload) => upload,
+            Err(err) => {
+                eprintln!(
+                    "[grim_viewer] warning: overlay upload failed ({}x{}): {err}",
+                    self.width, self.height
+                );
+                return;
+            }
+        };
         let extent = wgpu::Extent3d {
             width: self.width,
             height: self.height,
@@ -2996,10 +3073,10 @@ impl TextOverlay {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &self.pixels,
+            upload.pixels(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * self.width),
+                bytes_per_row: Some(upload.bytes_per_row()),
                 rows_per_image: Some(self.height),
             },
             extent,
@@ -3187,6 +3264,7 @@ impl ViewerState {
             texture_height,
             asset_bytes.len()
         );
+        println!("Preview RGBA buffer len {}", preview.data.len());
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("asset-texture"),
@@ -3198,6 +3276,7 @@ impl ViewerState {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let upload = prepare_rgba_upload(texture_width, texture_height, &preview.data)?;
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &texture,
@@ -3205,10 +3284,10 @@ impl ViewerState {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &preview.data,
+            upload.pixels(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * texture_width),
+                bytes_per_row: Some(upload.bytes_per_row()),
                 rows_per_image: Some(texture_height),
             },
             texture_extent,
@@ -3879,7 +3958,7 @@ impl ViewerState {
                 Some(bounds) => bounds,
                 None => return instances,
             };
-            let (horizontal_axis, vertical_axis) = bounds.projection_axes();
+            let (horizontal_axis, vertical_axis) = bounds.top_down_axes();
             let horizontal_min = bounds.min[horizontal_axis];
             let vertical_min = bounds.min[vertical_axis];
             let horizontal_span = (bounds.max[horizontal_axis] - horizontal_min).max(0.001);
@@ -4011,7 +4090,7 @@ impl ViewerState {
         let bounds = scene.position_bounds.as_ref()?;
         let layout = self.minimap_layout()?;
 
-        let (horizontal_axis, vertical_axis) = bounds.projection_axes();
+        let (horizontal_axis, vertical_axis) = bounds.top_down_axes();
         let horizontal_min = bounds.min[horizontal_axis];
         let vertical_min = bounds.min[vertical_axis];
         let horizontal_span = (bounds.max[horizontal_axis] - horizontal_min).max(0.001);
@@ -4028,10 +4107,9 @@ impl ViewerState {
         };
 
         let mut instances = Vec::new();
-        let panel_size = layout.panel_width();
         instances.push(MarkerInstance {
             translate: layout.center,
-            size: panel_size,
+            size: layout.panel_width(),
             highlight: 0.0,
             color: [0.07, 0.08, 0.12],
             _padding: 0.0,
@@ -4100,14 +4178,19 @@ impl ViewerState {
                         Some(pos) => pos,
                         None => continue,
                     };
-                    let (marker_size, mut marker_color, mut marker_highlight) =
+                    let (mut marker_size, mut marker_color, mut marker_highlight) =
                         event_marker_style(event.kind());
-                    let marker_size = scale_size(marker_size);
                     if Some(idx) == highlight_event_scene_index {
                         marker_highlight = marker_highlight.max(0.9);
                         marker_color = [0.98, 0.93, 0.32];
+                        marker_size *= 1.08;
                     }
-                    push_marker(position, marker_size, marker_color, marker_highlight);
+                    push_marker(
+                        position,
+                        scale_size(marker_size),
+                        marker_color,
+                        marker_highlight,
+                    );
                 }
 
                 if let Some(position) = scrub_position {
@@ -4200,16 +4283,17 @@ fn decode_asset_texture(
         .frames
         .first()
         .ok_or_else(|| anyhow!("BM surface has no frames"))?;
-
     let mut depth_stats: Option<DepthStats> = None;
     let mut used_color_seed = false;
-    let rgba = if metadata.format == 5 {
+    let mut seed_dimensions: Option<(u32, u32)> = None;
+    let mut rgba = if metadata.format == 5 {
         let stats = frame.depth_stats(&metadata)?;
         depth_stats = Some(stats);
         if let Some(seed) = seed_bitmap {
             if let Some(base_frame) = seed.frames.first() {
                 let base_metadata = seed.metadata();
                 used_color_seed = true;
+                seed_dimensions = Some((base_metadata.width, base_metadata.height));
                 base_frame.as_rgba8888(&base_metadata)?
             } else {
                 frame.as_rgba8888(&metadata)?
@@ -4222,6 +4306,12 @@ fn decode_asset_texture(
     };
 
     let depth_preview = metadata.format == 5 && !used_color_seed;
+
+    let expected_len = (frame.width * frame.height * 4) as usize;
+    if rgba.len() != expected_len {
+        let (src_w, src_h) = seed_dimensions.unwrap_or((frame.width, frame.height));
+        rgba = resample_rgba_nearest(&rgba, src_w, src_h, frame.width, frame.height);
+    }
 
     if metadata.format == 5 {
         match (used_color_seed, seed_bitmap.is_some()) {
@@ -4278,6 +4368,89 @@ fn diff_mismatch_ratio(diff: &TextureDiffSummary) -> f32 {
     } else {
         diff.mismatched_pixels as f32 / diff.total_pixels as f32
     }
+}
+
+fn resample_rgba_nearest(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Vec<u8> {
+    if src_width == 0 || src_height == 0 || dst_width == 0 || dst_height == 0 {
+        return vec![0u8; (dst_width * dst_height * 4) as usize];
+    }
+    let mut dst = vec![0u8; (dst_width * dst_height * 4) as usize];
+    for dy in 0..dst_height as usize {
+        let sy = ((dy as u64 * src_height as u64) / dst_height as u64) as u32;
+        let sy = sy.min(src_height.saturating_sub(1));
+        for dx in 0..dst_width as usize {
+            let sx = ((dx as u64 * src_width as u64) / dst_width as u64) as u32;
+            let sx = sx.min(src_width.saturating_sub(1));
+            let src_idx = ((sy * src_width + sx) * 4) as usize;
+            let dst_idx = ((dy as u32 * dst_width + dx as u32) * 4) as usize;
+            dst[dst_idx..dst_idx + 4].copy_from_slice(
+                src.get(src_idx..src_idx + 4)
+                    .unwrap_or(&[0u8, 0u8, 0u8, 0xFF]),
+            );
+        }
+    }
+    dst
+}
+
+struct TextureUpload<'a> {
+    data: Cow<'a, [u8]>,
+    bytes_per_row: u32,
+}
+
+impl<'a> TextureUpload<'a> {
+    fn pixels(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn bytes_per_row(&self) -> u32 {
+        self.bytes_per_row
+    }
+}
+
+fn prepare_rgba_upload<'a>(width: u32, height: u32, data: &'a [u8]) -> Result<TextureUpload<'a>> {
+    ensure!(width > 0 && height > 0, "texture has no dimensions");
+    let row_bytes = 4usize * width as usize;
+    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    ensure!(
+        data.len() >= row_bytes * height as usize,
+        "texture buffer ({}) smaller than {}x{} RGBA ({})",
+        data.len(),
+        width,
+        height,
+        row_bytes * height as usize
+    );
+
+    if row_bytes % alignment == 0 && data.len() == row_bytes * height as usize {
+        return Ok(TextureUpload {
+            data: Cow::Borrowed(data),
+            bytes_per_row: row_bytes as u32,
+        });
+    }
+
+    let padded_row_bytes = ((row_bytes + alignment - 1) / alignment) * alignment;
+    let mut buffer = vec![0u8; padded_row_bytes * height as usize];
+    for row in 0..height as usize {
+        let src_offset = row * row_bytes;
+        if src_offset >= data.len() {
+            break;
+        }
+        let remaining = data.len() - src_offset;
+        let to_copy = remaining.min(row_bytes);
+        let dst_offset = row * padded_row_bytes;
+        buffer[dst_offset..dst_offset + to_copy]
+            .copy_from_slice(&data[src_offset..src_offset + to_copy]);
+    }
+
+    Ok(TextureUpload {
+        data: Cow::Owned(buffer),
+        bytes_per_row: padded_row_bytes as u32,
+    })
 }
 
 fn validate_render_diff(diff: &TextureDiffSummary, threshold: f32) -> Result<()> {
@@ -4450,6 +4623,7 @@ fn render_texture_offscreen(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    let upload = prepare_rgba_upload(preview.width, preview.height, &preview.data)?;
     queue.write_texture(
         wgpu::ImageCopyTexture {
             texture: &asset_texture,
@@ -4457,10 +4631,10 @@ fn render_texture_offscreen(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &preview.data,
+        upload.pixels(),
         wgpu::ImageDataLayout {
             offset: 0,
-            bytes_per_row: Some(4 * preview.width),
+            bytes_per_row: Some(upload.bytes_per_row()),
             rows_per_image: Some(preview.height),
         },
         texture_extent,
