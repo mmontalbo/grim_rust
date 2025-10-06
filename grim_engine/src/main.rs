@@ -28,7 +28,7 @@ use assets::MANNY_OFFICE_ASSETS;
 use audio_bridge::RecordingAudioCallback;
 use geometry_diff::run_geometry_diff;
 use lab_collection::{collect_assets, AssetMetadata, AssetReport, LabCollection};
-use lua_host::run_boot_sequence;
+use lua_host::{run_boot_sequence, MovementOptions};
 use scheduler::{MovieQueue, ScriptScheduler};
 use state::{
     EngineState, HookApplication, HookReference, MovieEvent, ScriptEvent, SetState,
@@ -113,6 +113,14 @@ struct Args {
     /// Path to write the audio event log emitted by the Lua runtime (requires --run-lua)
     #[arg(long)]
     audio_log_json: Option<PathBuf>,
+
+    /// Run the built-in Manny movement demo after boot (requires --run-lua)
+    #[arg(long)]
+    movement_demo: bool,
+
+    /// Path to write the movement trajectory log as JSON (with --movement-demo)
+    #[arg(long)]
+    movement_log_json: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -149,12 +157,25 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|recorder| recorder.clone() as Rc<dyn lua_host::AudioCallback>);
 
+        if args.movement_log_json.is_some() && !args.movement_demo {
+            eprintln!(
+                "[grim_engine] warning: --movement-log-json is ignored without --movement-demo"
+            );
+        }
+
+        let movement = if args.movement_demo {
+            Some(MovementOptions::demo(args.movement_log_json.clone()))
+        } else {
+            None
+        };
+
         run_boot_sequence(
             &args.data_root,
             args.lab_root.as_deref(),
             args.verbose,
             args.lua_geometry_json.as_deref(),
             audio_callback,
+            movement,
         )?;
 
         if let (Some(path), Some(recorder)) = (args.audio_log_json.as_ref(), audio_recorder) {
@@ -221,6 +242,7 @@ fn main() -> Result<()> {
             args.lab_root.as_deref(),
             args.verbose,
             Some(snapshot_path.as_path()),
+            None,
             None,
         )?;
 
@@ -829,6 +851,7 @@ mod tests {
             Some(lab_root.as_path()),
             false,
             Some(snapshot_file.path()),
+            None,
             None,
         )?;
 

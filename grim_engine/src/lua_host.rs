@@ -19,6 +19,7 @@ use mlua::{
     Error as LuaError, Function, Lua, LuaOptions, MultiValue, RegistryKey, Result as LuaResult,
     StdLib, Table, Thread, ThreadStatus, Value, Variadic,
 };
+use serde::Serialize;
 
 /// Minimal adapter for routing audio events to interested observers.
 pub trait AudioCallback {
@@ -309,6 +310,82 @@ const MANNY_OFFICE_SEED_ROT: Vec3 = Vec3 {
     y: 222.210_007,
     z: 0.0,
 };
+
+const WALK_SPEED_SCALE: f32 = 0.009_999_999_78;
+
+#[derive(Clone)]
+pub struct MovementPlan {
+    segments: Vec<MovementSegment>,
+}
+
+#[derive(Clone)]
+struct MovementSegment {
+    frames: u32,
+    vector: Vec3,
+}
+
+impl MovementPlan {
+    pub fn demo() -> Self {
+        Self {
+            segments: vec![
+                MovementSegment {
+                    frames: 36,
+                    vector: Vec3 {
+                        x: 0.0,
+                        y: 2.0,
+                        z: 0.0,
+                    },
+                },
+                MovementSegment {
+                    frames: 24,
+                    vector: Vec3 {
+                        x: 2.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                },
+                MovementSegment {
+                    frames: 24,
+                    vector: Vec3 {
+                        x: -2.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                },
+                MovementSegment {
+                    frames: 18,
+                    vector: Vec3 {
+                        x: 0.0,
+                        y: -2.0,
+                        z: 0.0,
+                    },
+                },
+            ],
+        }
+    }
+}
+
+pub struct MovementOptions {
+    plan: MovementPlan,
+    log_path: Option<PathBuf>,
+}
+
+impl MovementOptions {
+    pub fn demo(log_path: Option<PathBuf>) -> Self {
+        Self {
+            plan: MovementPlan::demo(),
+            log_path,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MovementSample {
+    frame: u32,
+    position: [f32; 3],
+    yaw: Option<f32>,
+    sector: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 struct SectorHit {
@@ -1704,6 +1781,80 @@ impl EngineContext {
         ));
     }
 
+    fn walk_actor_vector(
+        &mut self,
+        handle: u32,
+        delta: Vec3,
+        adjust_y: Option<f32>,
+        heading_offset: Option<f32>,
+    ) -> bool {
+        let Some(actor_id) = self.actor_handles.get(&handle).cloned() else {
+            self.log_event(format!("walk.delta unknown_handle #{handle}"));
+            return false;
+        };
+        let (label, current_set, current_position) = {
+            let snapshot = self.actors.get(&actor_id).cloned().unwrap_or_else(|| {
+                let mut actor = ActorSnapshot::default();
+                actor.name = actor_id.clone();
+                actor
+            });
+            (
+                snapshot.name,
+                snapshot
+                    .current_set
+                    .or_else(|| self.current_set.as_ref().map(|set| set.set_file.clone())),
+                snapshot.position.unwrap_or(MANNY_OFFICE_SEED_POS),
+            )
+        };
+
+        self.log_event(format!(
+            "walk.vector {} {:.4},{:.4}",
+            label, delta.x, delta.y
+        ));
+
+        let mut next = Vec3 {
+            x: current_position.x + delta.x,
+            y: current_position.y + delta.y,
+            z: current_position.z + delta.z,
+        };
+        if let Some(offset) = adjust_y {
+            next.y += offset;
+        }
+
+        if let Some(ref set_file) = current_set {
+            if self.set_geometry.contains_key(set_file)
+                && !self.point_in_active_walk(set_file, (next.x, next.y))
+            {
+                self.log_event(format!(
+                    "walk.delta blocked {} {:.3},{:.3}",
+                    label, next.x, next.y
+                ));
+                return false;
+            }
+        }
+
+        self.set_actor_position(&actor_id, &label, next);
+
+        if delta.x.abs() + delta.y.abs() > f32::EPSILON {
+            let yaw = compute_walk_yaw(delta, heading_offset);
+            self.set_actor_rotation(
+                &actor_id,
+                &label,
+                Vec3 {
+                    x: 0.0,
+                    y: yaw,
+                    z: 0.0,
+                },
+            );
+        }
+
+        if let Some(hit) = self.geometry_sector_hit(&actor_id, "walk") {
+            self.record_sector_hit(&actor_id, &label, hit);
+        }
+
+        true
+    }
+
     fn set_voice_effect(&mut self, effect: &str) {
         self.voice_effect = Some(effect.to_string());
         self.log_event(format!("prefs.voice_effect {}", effect));
@@ -2380,6 +2531,22 @@ impl EngineContext {
             .and_then(|actor| actor.rotation)
     }
 
+    fn point_in_active_walk(&self, set_file: &str, point: (f32, f32)) -> bool {
+        if let Some(geometry) = self.set_geometry.get(set_file) {
+            for sector in geometry
+                .sectors
+                .iter()
+                .filter(|sector| matches!(sector.kind, SetSectorKind::Walk))
+            {
+                if sector.contains(point) && self.is_sector_active(set_file, &sector.name) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        true
+    }
+
     fn actor_snapshot(&self, actor_id: &str) -> Option<&ActorSnapshot> {
         self.actors
             .get(actor_id)
@@ -2900,6 +3067,7 @@ pub fn run_boot_sequence(
     verbose: bool,
     geometry_json: Option<&Path>,
     audio_callback: Option<Rc<dyn AudioCallback>>,
+    movement: Option<MovementOptions>,
 ) -> Result<()> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
@@ -2947,6 +3115,10 @@ pub fn run_boot_sequence(
     call_boot(&lua, context.clone())?;
     drive_active_scripts(&lua, context.clone(), 8, 32)?;
 
+    if let Some(options) = movement.as_ref() {
+        simulate_movement(&lua, context.clone(), options)?;
+    }
+
     let snapshot = context.borrow();
     dump_runtime_summary(&snapshot);
     if let Some(path) = geometry_json {
@@ -2958,6 +3130,162 @@ pub fn run_boot_sequence(
         println!("Saved Lua geometry snapshot to {}", path.display());
     }
     Ok(())
+}
+
+fn simulate_movement(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+    options: &MovementOptions,
+) -> Result<()> {
+    use anyhow::anyhow;
+
+    let globals = lua.globals();
+    let walk_vector: Table = globals
+        .get("WalkVector")
+        .context("WalkVector table missing for movement simulation")?;
+
+    let (actor_handle, actor_id) = {
+        let guard = context.borrow();
+        let snapshot = match guard
+            .actors
+            .get("manny")
+            .or_else(|| guard.actors.get("Manny"))
+        {
+            Some(actor) => actor,
+            None => return Ok(()),
+        };
+        if snapshot.handle == 0 {
+            return Ok(());
+        }
+        let id = guard
+            .actor_handles
+            .get(&snapshot.handle)
+            .cloned()
+            .unwrap_or_else(|| snapshot.name.to_ascii_lowercase());
+        (snapshot.handle, id)
+    };
+
+    let mut frame: u32 = 0;
+    let mut samples: Vec<MovementSample> = Vec::new();
+
+    if let Ok(reset_controls) = globals.get::<_, Function>("ResetMarioControls") {
+        let _: () = reset_controls.call(())?;
+    }
+    globals.set("MarioControl", true)?;
+    if let Ok(system_table) = globals.get::<_, Table>("system") {
+        let axis_stub = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        system_table.set("axisHandler", axis_stub)?;
+    }
+    if let (Ok(single_start), Ok(walk_manny)) = (
+        globals.get::<_, Function>("single_start_script"),
+        globals.get::<_, Value>("WalkManny"),
+    ) {
+        let _: () = single_start.call((walk_manny,))?;
+    }
+
+    for segment in &options.plan.segments {
+        for _ in 0..segment.frames {
+            frame += 1;
+            walk_vector.set("x", segment.vector.x)?;
+            walk_vector.set("y", segment.vector.y)?;
+            walk_vector.set("z", segment.vector.z)?;
+            drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
+
+            if segment.vector.x.abs() + segment.vector.y.abs() + segment.vector.z.abs()
+                > f32::EPSILON
+            {
+                let delta = Vec3 {
+                    x: segment.vector.x * WALK_SPEED_SCALE,
+                    y: segment.vector.y * WALK_SPEED_SCALE,
+                    z: segment.vector.z * WALK_SPEED_SCALE,
+                };
+                {
+                    let mut guard = context.borrow_mut();
+                    guard.walk_actor_vector(actor_handle, delta, None, None);
+                }
+            }
+
+            let sample_opt = {
+                let guard = context.borrow();
+                capture_movement_sample(&guard, actor_handle, &actor_id, frame)
+            };
+            if let Some(sample) = sample_opt {
+                {
+                    let mut guard = context.borrow_mut();
+                    guard.log_event(format!(
+                        "movement.frame {} {:.3},{:.3}",
+                        frame, sample.position[0], sample.position[1]
+                    ));
+                }
+                samples.push(sample);
+            }
+        }
+    }
+
+    walk_vector.set("x", 0.0)?;
+    walk_vector.set("y", 0.0)?;
+    walk_vector.set("z", 0.0)?;
+
+    for _ in 0..12 {
+        frame += 1;
+        drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
+        {
+            let mut guard = context.borrow_mut();
+            guard.walk_actor_vector(
+                actor_handle,
+                Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                None,
+                None,
+            );
+        }
+        let sample_opt = {
+            let guard = context.borrow();
+            capture_movement_sample(&guard, actor_handle, &actor_id, frame)
+        };
+        if let Some(sample) = sample_opt {
+            {
+                let mut guard = context.borrow_mut();
+                guard.log_event(format!(
+                    "movement.frame {} {:.3},{:.3}",
+                    frame, sample.position[0], sample.position[1]
+                ));
+            }
+            samples.push(sample);
+        }
+    }
+
+    if let Some(path) = options.log_path.as_ref() {
+        let json =
+            serde_json::to_string_pretty(&samples).context("serializing movement log to JSON")?;
+        fs::write(path, json)
+            .with_context(|| format!("writing movement log to {}", path.display()))?;
+        println!("Saved movement log to {}", path.display());
+    }
+
+    Ok(())
+}
+
+fn capture_movement_sample(
+    ctx: &EngineContext,
+    actor_handle: u32,
+    actor_id: &str,
+    frame: u32,
+) -> Option<MovementSample> {
+    let position = ctx.actor_position_by_handle(actor_handle)?;
+    let yaw = ctx.actor_rotation_by_handle(actor_handle).map(|rot| rot.y);
+    let sector = ctx
+        .geometry_sector_hit(actor_id, "walk")
+        .map(|hit| hit.name);
+    Some(MovementSample {
+        frame,
+        position: [position.x, position.y, position.z],
+        yaw,
+        sector,
+    })
 }
 
 fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
@@ -3471,6 +3799,14 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     globals.set("enable_joystick_controls", noop.clone())?;
     globals.set("enable_mouse_controls", noop.clone())?;
     globals.set(
+        "GetControlState",
+        lua.create_function(|_, _: Variadic<Value>| Ok(false))?,
+    )?;
+    globals.set(
+        "get_generic_control_state",
+        lua.create_function(|_, _: Variadic<Value>| Ok(false))?,
+    )?;
+    globals.set(
         "AreAchievementsInstalled",
         lua.create_function(|_, ()| Ok(1))?,
     )?;
@@ -3828,6 +4164,54 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
             }
             visible_ctx.borrow_mut().record_visible_objects(&handles);
             Ok(table)
+        })?,
+    )?;
+    let walk_vector_context = context.clone();
+    globals.set(
+        "WalkActorVector",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut values = args.into_iter();
+
+            let actor_handle = values
+                .next()
+                .and_then(|value| value_to_actor_handle(&value))
+                .unwrap_or(0);
+            // camera handle is ignored in the prototype but advance the iterator
+            let _ = values.next();
+
+            let dx = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let dy = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let dz = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let adjust_y = values.next().and_then(|value| value_to_f32(&value));
+            // maintained heading flag (ignored)
+            let _ = values.next();
+            let heading_offset = values.next().and_then(|value| value_to_f32(&value));
+
+            if actor_handle == 0 {
+                return Ok(());
+            }
+
+            let mut ctx = walk_vector_context.borrow_mut();
+            ctx.walk_actor_vector(
+                actor_handle,
+                Vec3 {
+                    x: dx,
+                    y: dy,
+                    z: dz,
+                },
+                adjust_y,
+                heading_offset,
+            );
+            Ok(())
         })?,
     )?;
     let sleep_context = context.clone();
@@ -4199,6 +4583,9 @@ fn install_runtime_tables(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
     let system = lua.create_table()?;
     system.set("setTable", lua.create_table()?)?;
     system.set("setCount", 0)?;
+    system.set("frameTime", 0.016_666_668)?;
+    let axis_handler = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+    system.set("axisHandler", axis_handler)?;
     globals.set("system", system.clone())?;
 
     let system_key = lua.create_registry_value(system.clone())?;
@@ -5209,6 +5596,19 @@ fn value_slice_to_vec3(values: &[Value]) -> Option<Vec3> {
         return Some(Vec3 { x, y, z });
     }
     None
+}
+
+fn compute_walk_yaw(delta: Vec3, heading_offset: Option<f32>) -> f32 {
+    let mut yaw = (-delta.x).atan2(delta.y).to_degrees();
+    if let Some(offset) = heading_offset {
+        yaw += offset;
+    }
+    yaw = yaw.rem_euclid(360.0);
+    if yaw < 0.0 {
+        yaw + 360.0
+    } else {
+        yaw
+    }
 }
 
 fn value_to_f32(value: &Value) -> Option<f32> {
