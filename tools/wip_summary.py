@@ -27,15 +27,15 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth, event log) current so cargo test -p grim_engine -- runtime_regression remains green; hotspot events now backfill the opening frames and approach markers anchor to the first movement frame, so refresh the full capture set together when behaviour shifts.",
-                "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
+                "Finish hotspot overlay playback in grim_viewer so Manny's movement/head-target markers line up with the updated regression frames and we can debug the desk interaction live.",
+                "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
             ],
         },
         {
             "title": "Upcoming Targets",
             "body": [
-                "Finish hotspot overlay playback in grim_viewer so movement, selection, and dialogue markers stay aligned end-to-end.",
-                "Run the Manny computer loop via grim_engine/grim_viewer to confirm load→navigate→interact is ship-ready (call out blockers if any).",
+                "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth, event log) current so cargo test -p grim_engine -- runtime_regression remains green; hotspot events now backfill the opening frames and approach markers anchor to the first movement frame, so refresh the full capture set together when behaviour shifts.",
+                "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
             ],
         },
         {
