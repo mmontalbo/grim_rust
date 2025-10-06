@@ -25,6 +25,9 @@ timeline markers, and track audio cues during development.
   the minimap and perspective view stay in sync at a glance.
 - Watches live audio logs (when provided) to ensure cues fire when Manny uses
   the pneumatic tube, desk, or other milestone interactions.
+- Prunes the Manny office entity list down to Manny plus the desk/tube props; the
+  expectations live in `grim_viewer/src/main.rs` under `entity_filter_tests`, so extend
+  those when the allowlist changes.
 
 ## Typical Usage
 - `python tools/grim_viewer.py run` launches the viewer preloaded with the Manny
