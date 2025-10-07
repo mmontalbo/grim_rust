@@ -20,6 +20,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Getting Started",
             "body": [
                 "Familiarise yourself with README.md and the Current Focus items, then drive the next task to a committable state (tests/docs updated, WIP refreshed, commit created).",
+                "Treat commits as the definition of "done" for a work cycle—merge-ready changes should be committed before you step away.",
                 "Regenerate this summary with python tools/wip_summary.py whenever priorities shift so the team stays aligned.",
                 "Use python tools/grim_viewer.py to load the Manny baseline overlays (add -- --headless on machines without a windowing environment).",
                 "The Manny office regression artefacts we reference live under tools/tests/ (movement_log.json, hotspot_events.json, etc.); skim them the first time so you know what the viewer overlays are visualising.",
@@ -33,6 +34,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Verify Manny’s office loads and plays through (walk path + computer interaction) with modular viewer overlays, updating geometry snapshots or assets if markers drift.",
                 "Feed the latest Lua geometry snapshot through the scene builder so Manny/desk/tube anchors remain aligned in both runtime and viewer contexts.",
                 "Document any workflow quirks in docs/grim_viewer_modules.md so the path to first-playable remains clear for Milestone 1.",
+                "Flag the recent viewer/scene module split when sharing context so contributors land changes in the right files.",
             ],
         },
         {
