@@ -525,6 +525,36 @@ mod movement_tests {
         assert!((trace.bounds.min[0] - 0.0).abs() < 1e-6);
         assert!((trace.bounds.max[1] - 1.0).abs() < 1e-6);
     }
+
+    #[test]
+    fn movement_trace_finds_nearest_positions() {
+        let samples = vec![
+            MovementSample {
+                frame: 1,
+                position: [0.0, 0.0, 0.0],
+                yaw: None,
+                sector: None,
+            },
+            MovementSample {
+                frame: 4,
+                position: [4.0, 0.0, 0.0],
+                yaw: None,
+                sector: None,
+            },
+            MovementSample {
+                frame: 7,
+                position: [7.0, 0.0, 0.0],
+                yaw: None,
+                sector: None,
+            },
+        ];
+
+        let trace = MovementTrace::from_samples(samples).expect("trace");
+
+        assert_eq!(trace.nearest_position(1), Some([0.0, 0.0, 0.0]));
+        assert_eq!(trace.nearest_position(5), Some([4.0, 0.0, 0.0]));
+        assert_eq!(trace.nearest_position(8), Some([7.0, 0.0, 0.0]));
+    }
 }
 
 #[cfg(test)]
@@ -1801,6 +1831,58 @@ mod movement_log_io_tests {
         let error = load_movement_trace(temp.path()).expect_err("expected parse failure");
         let message = format!("{error}");
         assert!(message.contains("parsing movement log"));
+    }
+}
+
+#[cfg(test)]
+mod hotspot_log_tests {
+    use super::*;
+
+    fn hotspot_fixture_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/tests/hotspot_events.json")
+    }
+
+    #[test]
+    fn load_hotspot_event_log_matches_fixture_snapshot() {
+        let events =
+            load_hotspot_event_log(&hotspot_fixture_path()).expect("load hotspot event fixture");
+
+        assert_eq!(events.len(), 38);
+        assert_eq!(events[0].label, "actor.select manny");
+        assert_eq!(events[0].kind(), HotspotEventKind::Selection);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.label == "hotspot.demo.start computer")
+        );
+
+        let mut selections = 0usize;
+        let mut hotspots = 0usize;
+        let mut head_targets = 0usize;
+        let mut ignore_boxes = 0usize;
+        let mut chores = 0usize;
+        let mut dialogs = 0usize;
+        let mut other = 0usize;
+
+        for event in &events {
+            match event.kind() {
+                HotspotEventKind::Selection => selections += 1,
+                HotspotEventKind::Hotspot => hotspots += 1,
+                HotspotEventKind::HeadTarget => head_targets += 1,
+                HotspotEventKind::IgnoreBoxes => ignore_boxes += 1,
+                HotspotEventKind::Chore => chores += 1,
+                HotspotEventKind::Dialog => dialogs += 1,
+                HotspotEventKind::Other => other += 1,
+            }
+        }
+
+        assert_eq!(selections, 8);
+        assert_eq!(hotspots, 4);
+        assert_eq!(head_targets, 4);
+        assert_eq!(ignore_boxes, 2);
+        assert_eq!(chores, 3);
+        assert_eq!(dialogs, 8);
+        assert_eq!(other, 9);
     }
 }
 

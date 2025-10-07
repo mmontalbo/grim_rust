@@ -466,7 +466,8 @@ pub fn preview_color(bytes: &[u8]) -> wgpu::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grim_formats::decode_bm;
+    use grim_formats::{decode_bm, decode_bm_with_seed};
+    use serde::Deserialize;
     use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
@@ -619,5 +620,88 @@ mod tests {
             depth_preview.width * depth_preview.height
         );
         assert!(!depth_preview.depth_preview);
+    }
+
+    #[test]
+    fn dump_texture_to_png_matches_manny_depth_fixture() {
+        #[derive(Deserialize)]
+        struct DepthFixture {
+            asset: String,
+            dimensions: [u32; 2],
+            checksum_fnv1a: u64,
+            depth: DepthSection,
+        }
+
+        #[derive(Deserialize)]
+        struct DepthSection {
+            min: u16,
+            max: u16,
+            zero_pixels: usize,
+            nonzero_pixels: usize,
+        }
+
+        fn fixture_path(name: &str) -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tools/tests")
+                .join(name)
+        }
+
+        let fixture_bytes =
+            fs::read(fixture_path("manny_office_depth_stats.json")).expect("read depth fixture");
+        let fixture: DepthFixture =
+            serde_json::from_slice(&fixture_bytes).expect("parse depth fixture");
+        assert!(
+            fixture.checksum_fnv1a > 0,
+            "fixture checksum should be present"
+        );
+
+        let depth_asset_path = asset_path(&fixture.asset);
+        let depth_bytes = fs::read(&depth_asset_path).expect("read depth asset");
+        let base_asset_name = fixture
+            .asset
+            .strip_suffix(".zbm")
+            .map(|name| format!("{name}.bm"))
+            .expect("depth asset suffix");
+        let base_bytes = fs::read(asset_path(&base_asset_name)).expect("read base asset");
+        let seed_bitmap = decode_bm(&base_bytes).expect("decode base bm");
+
+        let preview = decode_asset_texture(&fixture.asset, &depth_bytes, Some(&seed_bitmap))
+            .expect("decode depth asset");
+
+        assert_eq!(preview.width, fixture.dimensions[0]);
+        assert_eq!(preview.height, fixture.dimensions[1]);
+        assert_eq!(preview.frame_count, 1);
+        let stats = preview.depth_stats.expect("depth stats present");
+        assert_eq!(stats.min, fixture.depth.min);
+        assert_eq!(stats.max, fixture.depth.max);
+        assert_eq!(stats.zero_pixels, fixture.depth.zero_pixels);
+        assert_eq!(stats.nonzero_pixels, fixture.depth.nonzero_pixels);
+
+        let seed_frame = seed_bitmap
+            .frames
+            .first()
+            .expect("base bitmap frame available");
+        let depth_bm = decode_bm_with_seed(&depth_bytes, Some(seed_frame.data.as_slice()))
+            .expect("decode depth bm with seed");
+        let depth_frame = depth_bm.frames.first().expect("depth frame available");
+        let raw_stats = depth_frame
+            .depth_stats(&depth_bm.metadata())
+            .expect("raw depth stats");
+        assert_eq!(raw_stats.min, fixture.depth.min);
+        assert_eq!(raw_stats.max, fixture.depth.max);
+        assert_eq!(raw_stats.zero_pixels, fixture.depth.zero_pixels);
+        assert_eq!(raw_stats.nonzero_pixels, fixture.depth.nonzero_pixels);
+
+        let temp = tempdir().expect("temp dir");
+        let png_path = temp.path().join("depth_preview.png");
+        let export_stats = dump_texture_to_png(&preview, &png_path).expect("export depth preview");
+        assert_eq!(
+            export_stats.total_pixels,
+            preview.width * preview.height,
+            "TextureStats total pixels mismatch"
+        );
+
+        let png_bytes = fs::read(&png_path).expect("read exported png");
+        assert!(!png_bytes.is_empty(), "exported PNG should not be empty");
     }
 }
