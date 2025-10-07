@@ -11,9 +11,9 @@ timeline markers, and track audio cues during development.
 - **Telemetry overlays:** Projects boot timeline hooks, audio logs, and
   interaction states onto the scene to highlight why Manny can or cannot
   interact with a hotspot.
-- **Regression guard:** Supports headless render verification, giving us a quick
-  diff between decoded pixels and the GPU pipeline before we ship changes to the
-  renderer.
+- **Regression guard:** Keeps the Manny baseline overlays, audio, and geometry in
+  one place so we can spot first-playable regressions without replaying the
+  retail build.
 
 ## Manny's Office Focus
 - Defaults to the Manny office manifest exported from the engine host, keeping
@@ -30,7 +30,7 @@ timeline markers, and track audio cues during development.
   those when the allowlist changes.
 
 ## Typical Usage
-- `python tools/grim_viewer.py run` launches the viewer preloaded with the Manny
+- `python tools/grim_viewer.py` launches the viewer preloaded with the Manny
   computer baseline (timeline, movement, hotspot markers). The recovered camera
   projects the overlay directly onto the plate, so the default view now matches
   the in-game perspective.
@@ -38,8 +38,8 @@ timeline markers, and track audio cues during development.
   still works for custom runs; pass `--timeline`, `--movement-log`, and
   `--event-log` explicitly when you want the overlay in other scenes.
 - `--audio-log` streams cue updates captured during a Lua run.
-- `--headless --verify-render` performs the offscreen render diff, useful in CI
-  or quick sanity checks before editing shader code.
+- Append `-- --headless` to run the viewer without opening a window (useful for
+  scripted captures or remote machines).
 
 ## Layout Presets
 - `grim_viewer` accepts `--layout-preset <file>` to size HUD panels with the
@@ -48,7 +48,7 @@ timeline markers, and track audio cues during development.
   to hide a panel without editing Rust.
 - The Manny baseline preset lives at
   `grim_viewer/presets/manny_office_layout.json`. The helper script
-  `python tools/grim_viewer.py run` automatically forwards it, so day-to-day
+  `python tools/grim_viewer.py` automatically forwards it, so day-to-day
   launches always share the same declarative layout.
 - The preset keeps the timeline and scrubber panes 640px wide so the 78-column
   overlays (timeline summary + movement scrubber legend) render without clipping;

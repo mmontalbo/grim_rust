@@ -112,8 +112,8 @@ want to share them with the regression harness.
 - **Stdout transcript** – includes `dialog.begin manny /moma112/` style markers
   and any geometry/debug events the Lua host recorded. Redirect it to a file if
   you need to diff runs across branches.
-- Launch the viewer with `python tools/grim_viewer.py run` once the artefacts
-  are refreshed. The script now feeds in the Manny timeline, movement trace, and
+- Launch the viewer with `python tools/grim_viewer.py` once the artefacts are
+  refreshed. The script now feeds in the Manny timeline, movement trace, and
   hotspot log by default, so the markers render in the recovered camera's
   perspective. Add `-- --headless` when you just want the textual summary
   without opening a window.

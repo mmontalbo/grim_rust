@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helper to run grim_viewer interactively or in headless verification mode.
+"""Helper to run grim_viewer interactively or headless.
 
 This script revives the spirit of the retired `grim_mod` launcher so automated
 processes (or remote teammates) can spin up the viewer without juggling cargo
@@ -27,7 +27,6 @@ DEFAULT_LAYOUT_PRESET = ROOT_DIR / "grim_viewer" / "presets" / "manny_office_lay
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--manifest",
@@ -55,20 +54,9 @@ def main() -> None:
         help="Hotspot event log JSON to overlay (pass 'none' to disable)",
     )
     common.add_argument(
-        "--render-diff-threshold",
-        type=float,
-        default=0.01,
-        help="Max allowed render diff mismatch before failure (default: 0.01)",
-    )
-    common.add_argument(
         "--dump-frame",
         default=None,
         help="Optional PNG path to save the decoded bitmap",
-    )
-    common.add_argument(
-        "--dump-render",
-        default=None,
-        help="Optional PNG path to save the offscreen render output",
     )
     common.add_argument(
         "--release",
@@ -93,25 +81,8 @@ def main() -> None:
         help="Extra environment variables (may be repeated)",
     )
 
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    verify = sub.add_parser(
-        "verify",
-        parents=[common],
-        help="Run headless render verification and exit",
-    )
-    verify.add_argument(
-        "viewer_args",
-        nargs=argparse.REMAINDER,
-        help="Additional viewer CLI flags after '--'",
-    )
-
-    run = sub.add_parser(
-        "run",
-        parents=[common],
-        help="Launch the viewer window (pass -- --headless to skip display)",
-    )
-    run.add_argument(
+    parser = argparse.ArgumentParser(description=__doc__, parents=[common])
+    parser.add_argument(
         "viewer_args",
         nargs=argparse.REMAINDER,
         help="Additional viewer CLI flags after '--'",
@@ -120,45 +91,10 @@ def main() -> None:
     args = parser.parse_args()
 
     extra = normalize_tail(args.viewer_args)
-    if args.command == "verify":
-        viewer_cmd = build_verify_args(args, extra)
-    elif args.command == "run":
-        viewer_cmd = build_run_args(args, extra)
-    else:
-        raise RuntimeError(f"Unhandled command: {args.command}")
+    viewer_cmd = build_run_args(args, extra)
 
     exit_code = exec_viewer(args, viewer_cmd)
     sys.exit(exit_code)
-
-
-def build_verify_args(args, extra: Sequence[str]) -> List[str]:
-    viewer_args = [
-        "--manifest",
-        args.manifest,
-        "--asset",
-        args.asset,
-        "--render-diff-threshold",
-        str(args.render_diff_threshold),
-        "--headless",
-        "--verify-render",
-    ]
-    timeline = normalize_optional_path(args.timeline)
-    movement = normalize_optional_path(args.movement_log)
-    event_log = normalize_optional_path(args.event_log)
-
-    if timeline:
-        viewer_args.extend(["--timeline", timeline])
-    if args.dump_frame:
-        viewer_args.extend(["--dump-frame", args.dump_frame])
-    if args.dump_render:
-        viewer_args.extend(["--dump-render", args.dump_render])
-    if movement:
-        viewer_args.extend(["--movement-log", movement])
-    if event_log:
-        viewer_args.extend(["--event-log", event_log])
-    ensure_layout_preset(viewer_args, extra)
-    viewer_args.extend(extra)
-    return viewer_args
 
 
 def build_run_args(args, extra: Sequence[str]) -> List[str]:
@@ -167,8 +103,6 @@ def build_run_args(args, extra: Sequence[str]) -> List[str]:
         args.manifest,
         "--asset",
         args.asset,
-        "--render-diff-threshold",
-        str(args.render_diff_threshold),
     ]
     timeline = normalize_optional_path(args.timeline)
     movement = normalize_optional_path(args.movement_log)
@@ -178,8 +112,6 @@ def build_run_args(args, extra: Sequence[str]) -> List[str]:
         viewer_args.extend(["--timeline", timeline])
     if args.dump_frame:
         viewer_args.extend(["--dump-frame", args.dump_frame])
-    if args.dump_render:
-        viewer_args.extend(["--dump-render", args.dump_render])
     if movement:
         viewer_args.extend(["--movement-log", movement])
     if event_log:
