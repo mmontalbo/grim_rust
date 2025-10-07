@@ -5,6 +5,8 @@
 //! camera recovery helpers that keep `viewer::markers` aligned with the decoded
 //! bitmap.
 
+mod manny;
+
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
@@ -98,37 +100,67 @@ include!("movement.rs");
 
 include!("viewer_scene.rs");
 
-pub fn load_scene_from_timeline(
-    path: &Path,
-    manifest_path: &Path,
-    active_asset: Option<&str>,
-    geometry: Option<&LuaGeometrySnapshot>,
-) -> Result<ViewerScene> {
-    let data = std::fs::read(path)
-        .with_context(|| format!("reading timeline manifest {}", path.display()))?;
+fn read_timeline_manifest(path: &Path) -> Result<Value> {
+    let data =
+        fs::read(path).with_context(|| format!("reading timeline manifest {}", path.display()))?;
     let manifest: Value = serde_json::from_slice(&data)
         .with_context(|| format!("parsing timeline manifest {}", path.display()))?;
+    Ok(manifest)
+}
 
-    let set_info = manifest
-        .get("engine_state")
-        .and_then(|state| state.get("set"));
+/// Minimal metadata about the active set extracted from the timeline manifest.
+#[derive(Debug, Default, Clone)]
+struct SetContext {
+    file_name: Option<String>,
+    variable_name: Option<String>,
+    display_name: Option<String>,
+}
 
-    let set_file_name = set_info
-        .and_then(|set| set.get("set_file"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string());
-    let set_variable_name = set_info
-        .and_then(|set| set.get("variable_name"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string());
-    let set_display_name = set_info
-        .and_then(|set| set.get("display_name"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string());
+impl SetContext {
+    /// Pull set identifiers (file name, variable name, display label) out of
+    /// the timeline JSON so downstream helpers can specialise behaviour (e.g.,
+    /// Manny office pruning).
+    fn from_manifest(manifest: &Value) -> Self {
+        let set_info = manifest
+            .get("engine_state")
+            .and_then(|state| state.get("set"));
 
-    let timeline_summary = build_timeline_summary(&manifest)?;
-    let hook_lookup = HookLookup::new(timeline_summary.as_ref());
+        Self {
+            file_name: set_info
+                .and_then(|set| set.get("set_file"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            variable_name: set_info
+                .and_then(|set| set.get("variable_name"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            display_name: set_info
+                .and_then(|set| set.get("display_name"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        }
+    }
 
+    fn file_name(&self) -> Option<&str> {
+        self.file_name.as_deref()
+    }
+
+    fn variable_name(&self) -> Option<&str> {
+        self.variable_name.as_deref()
+    }
+
+    fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+}
+
+/// Construct `SceneEntity` values from the timeline manifest. Returns both the
+/// entities and any detected Manny office setup hint so camera recovery can be
+/// biased towards the active object state.
+fn build_scene_entities(
+    manifest: &Value,
+    hook_lookup: &HookLookup,
+) -> (Vec<SceneEntity>, Option<String>) {
     let mut builders: BTreeMap<SceneEntityKey, SceneEntityBuilder> = BTreeMap::new();
     let mut setup_hint: Option<String> = None;
 
@@ -147,7 +179,7 @@ pub fn load_scene_from_timeline(
                 let entry = builders
                     .entry(SceneEntityKey::new(SceneEntityKind::Actor, name.clone()))
                     .or_insert_with(|| SceneEntityBuilder::new(SceneEntityKind::Actor, name));
-                entry.apply_actor_snapshot(value, &hook_lookup);
+                entry.apply_actor_snapshot(value, hook_lookup);
             }
         }
 
@@ -198,7 +230,7 @@ pub fn load_scene_from_timeline(
                     }
                 }
 
-                entry.apply_event(method, &args, trigger, &hook_lookup);
+                entry.apply_event(method, &args, trigger, hook_lookup);
             }
         }
     }
@@ -209,23 +241,15 @@ pub fn load_scene_from_timeline(
         .collect();
     entities.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
 
-    entities = prune_entities_for_set(
-        entities,
-        set_variable_name.as_deref(),
-        set_display_name.as_deref(),
-    );
+    (entities, setup_hint)
+}
 
-    if let Some(snapshot) = geometry {
-        apply_geometry_overrides(
-            &mut entities,
-            snapshot,
-            set_variable_name.as_deref(),
-            set_display_name.as_deref(),
-        );
-    }
-
+/// Derive world-space bounds across all entities, used for minimap axes and to
+/// incorporate movement traces.
+fn compute_entity_bounds(entities: &[SceneEntity]) -> Option<SceneBounds> {
     let mut bounds = None;
-    for entity in &entities {
+
+    for entity in entities {
         if let Some(position) = entity.position {
             bounds
                 .get_or_insert(SceneBounds {
@@ -235,6 +259,43 @@ pub fn load_scene_from_timeline(
                 .update(position);
         }
     }
+
+    bounds
+}
+
+/// Assemble a `ViewerScene` from the timeline manifest exported by the engine.
+/// Attaches optional geometry snapshots and returns a camera recovered from the
+/// set file when possible.
+pub fn load_scene_from_timeline(
+    path: &Path,
+    manifest_path: &Path,
+    active_asset: Option<&str>,
+    geometry: Option<&LuaGeometrySnapshot>,
+) -> Result<ViewerScene> {
+    let manifest = read_timeline_manifest(path)?;
+    let set_context = SetContext::from_manifest(&manifest);
+
+    let timeline_summary = build_timeline_summary(&manifest)?;
+    let hook_lookup = HookLookup::new(timeline_summary.as_ref());
+
+    let (mut entities, setup_hint) = build_scene_entities(&manifest, &hook_lookup);
+
+    entities = manny::prune_entities_for_set(
+        entities,
+        set_context.variable_name(),
+        set_context.display_name(),
+    );
+
+    if let Some(snapshot) = geometry {
+        manny::apply_geometry_overrides(
+            &mut entities,
+            snapshot,
+            set_context.variable_name(),
+            set_context.display_name(),
+        );
+    }
+
+    let bounds = compute_entity_bounds(&entities);
 
     let mut scene = ViewerScene {
         entities,
@@ -246,7 +307,7 @@ pub fn load_scene_from_timeline(
         active_setup: setup_hint.clone(),
     };
 
-    if let Some(set_file) = set_file_name.as_deref() {
+    if let Some(set_file) = set_context.file_name() {
         match recover_camera_from_set(manifest_path, set_file, setup_hint.as_deref(), active_asset)
         {
             Ok(Some(camera)) => {
@@ -267,7 +328,7 @@ pub fn load_scene_from_timeline(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct GeometryPose {
+pub(super) struct GeometryPose {
     position: [f32; 3],
     rotation: Option<[f32; 3]>,
 }
@@ -327,87 +388,6 @@ pub fn load_lua_geometry_snapshot(path: &Path) -> Result<LuaGeometrySnapshot> {
     let snapshot: LuaGeometrySnapshot = serde_json::from_slice(&data)
         .with_context(|| format!("parsing Lua geometry snapshot {}", path.display()))?;
     Ok(snapshot)
-}
-
-fn apply_geometry_overrides(
-    entities: &mut [SceneEntity],
-    geometry: &LuaGeometrySnapshot,
-    set_variable_name: Option<&str>,
-    set_display_name: Option<&str>,
-) {
-    if !is_manny_office(set_variable_name, set_display_name) {
-        return;
-    }
-    apply_manny_office_geometry(entities, geometry, set_variable_name);
-}
-
-fn apply_manny_office_geometry(
-    entities: &mut [SceneEntity],
-    geometry: &LuaGeometrySnapshot,
-    set_variable_name: Option<&str>,
-) {
-    let prefix = set_variable_name.unwrap_or("mo");
-    let prefix_lower = prefix.to_ascii_lowercase();
-
-    let mut overrides: Vec<(String, GeometryPose)> = Vec::new();
-
-    if let Some(pose) = geometry.actor_pose("manny") {
-        overrides.push(("manny".to_string(), pose));
-    }
-
-    if let Some(pose) = geometry.object_pose_by_string_name("computer") {
-        overrides.push((format!("{prefix_lower}.computer"), pose));
-    }
-
-    if let Some(pose) = geometry.object_pose_by_string_name("tube") {
-        overrides.push((format!("{prefix_lower}.tube"), pose));
-    }
-
-    if let Some(pose) = geometry.actor_pose("motx083tube") {
-        overrides.push((format!("{prefix_lower}.tube.interest_actor"), pose));
-    }
-
-    if let Some(pose) = geometry.object_pose_by_string_name("deck of playing cards") {
-        overrides.push((format!("{prefix_lower}.cards"), pose));
-    }
-
-    if let Some(pose) = geometry.actor_pose("motx094deck_of_playing_cards") {
-        overrides.push((format!("{prefix_lower}.cards.interest_actor"), pose));
-    }
-
-    for (name, pose) in overrides {
-        if let Some(entity) = entities
-            .iter_mut()
-            .find(|entity| entity.name.eq_ignore_ascii_case(&name))
-        {
-            entity.position = Some(pose.position);
-            if let Some(rotation) = pose.rotation {
-                entity.rotation = Some(rotation);
-            }
-        }
-    }
-}
-
-impl LuaGeometrySnapshot {
-    fn actor_pose(&self, key: &str) -> Option<GeometryPose> {
-        self.actors
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(key))
-            .and_then(|(_, actor)| actor.pose())
-    }
-
-    fn object_pose_by_string_name(&self, name: &str) -> Option<GeometryPose> {
-        self.objects
-            .iter()
-            .find(|object| {
-                object
-                    .string_name
-                    .as_deref()
-                    .map(|value| value.eq_ignore_ascii_case(name))
-                    .unwrap_or(false)
-            })
-            .and_then(|object| object.pose())
-    }
 }
 
 fn recover_camera_from_set(

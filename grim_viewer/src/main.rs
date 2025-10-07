@@ -26,8 +26,9 @@ use cli::{Args, load_layout_preset};
 use env_logger;
 use pollster::FutureExt;
 use scene::{
-    load_hotspot_event_log, load_lua_geometry_snapshot, load_movement_trace,
-    load_scene_from_timeline, print_movement_trace_summary, print_scene_summary,
+    HotspotEvent, LuaGeometrySnapshot, MovementTrace, ViewerScene, load_hotspot_event_log,
+    load_lua_geometry_snapshot, load_movement_trace, load_scene_from_timeline,
+    print_movement_trace_summary, print_scene_summary,
 };
 use texture::{decode_asset_texture, dump_texture_to_png, load_asset_bytes, load_zbm_seed};
 use viewer::ViewerState;
@@ -39,6 +40,91 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::WindowBuilder,
 };
+
+/// Optional scene attachments loaded from CLI arguments. Keeps manifest parsing
+/// in one place so `main` can focus on wiring `ViewerState`.
+struct SceneFixtures {
+    geometry: Option<LuaGeometrySnapshot>,
+    movement: Option<MovementTrace>,
+    hotspots: Option<Vec<HotspotEvent>>,
+}
+
+impl SceneFixtures {
+    /// Load optional geometry, movement, and hotspot fixtures from CLI flags,
+    /// preserving the per-file `with_context` error messages expected by the
+    /// user-facing CLI.
+    fn load(args: &Args) -> Result<Self> {
+        let geometry = args
+            .lua_geometry_json
+            .as_ref()
+            .map(|path| {
+                load_lua_geometry_snapshot(path)
+                    .with_context(|| format!("loading Lua geometry snapshot {}", path.display()))
+            })
+            .transpose()?;
+
+        let movement = args
+            .movement_log
+            .as_ref()
+            .map(|path| {
+                load_movement_trace(path)
+                    .with_context(|| format!("loading movement log {}", path.display()))
+            })
+            .transpose()?;
+
+        let hotspots = args
+            .event_log
+            .as_ref()
+            .map(|path| {
+                load_hotspot_event_log(path)
+                    .with_context(|| format!("loading hotspot event log {}", path.display()))
+            })
+            .transpose()?;
+
+        Ok(Self {
+            geometry,
+            movement,
+            hotspots,
+        })
+    }
+
+    /// Geometry snapshot used to align Manny/desk/tube markers can be provided
+    /// independent of a timeline; we only inspect it when a timeline is loaded.
+    fn geometry(&self) -> Option<&LuaGeometrySnapshot> {
+        self.geometry.as_ref()
+    }
+
+    /// Attach movement and hotspot fixtures to the constructed scene. Consumes
+    /// the stored data so follow-up summaries know whether attachments occurred.
+    fn attach_to_scene(&mut self, scene: &mut ViewerScene) {
+        if let Some(trace) = self.movement.take() {
+            scene.attach_movement_trace(trace);
+        }
+        if let Some(events) = self.hotspots.take() {
+            scene.attach_hotspot_events(events);
+        }
+    }
+
+    /// Indicates whether hotspot events were provided without a timeline. The
+    /// CLI surfaces a hint in that scenario so users rerun with `--timeline`.
+    fn has_unattached_hotspots(&self) -> bool {
+        self.hotspots.is_some()
+    }
+
+    /// Give back movement traces when no timeline was requested so we can still
+    /// print command-line summaries for the operator.
+    fn take_movement(&mut self) -> Option<MovementTrace> {
+        self.movement.take()
+    }
+}
+
+/// Describes whether the viewer should render interactively or exit after
+/// headless processing. Derived from CLI arguments so call sites can pattern
+/// match instead of juggling booleans.
+enum RunMode {
+    Interactive,
+    Headless,
+}
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -132,28 +218,11 @@ fn main() -> Result<()> {
         );
     }
 
-    let geometry_snapshot = match args.lua_geometry_json.as_ref() {
-        Some(path) => Some(
-            load_lua_geometry_snapshot(path)
-                .with_context(|| format!("loading Lua geometry snapshot {}", path.display()))?,
-        ),
-        None => None,
-    };
-
-    let mut movement_trace = match args.movement_log.as_ref() {
-        Some(path) => Some(
-            load_movement_trace(path)
-                .with_context(|| format!("loading movement log {}", path.display()))?,
-        ),
-        None => None,
-    };
-
-    let mut hotspot_events = match args.event_log.as_ref() {
-        Some(path) => Some(
-            load_hotspot_event_log(path)
-                .with_context(|| format!("loading hotspot event log {}", path.display()))?,
-        ),
-        None => None,
+    let mut fixtures = SceneFixtures::load(&args)?;
+    let run_mode = if args.headless {
+        RunMode::Headless
+    } else {
+        RunMode::Interactive
     };
 
     let scene_data = match args.timeline.as_ref() {
@@ -162,21 +231,16 @@ fn main() -> Result<()> {
                 path,
                 &args.manifest,
                 Some(asset_name.as_str()),
-                geometry_snapshot.as_ref(),
+                fixtures.geometry(),
             )
             .with_context(|| format!("loading timeline manifest {}", path.display()))?;
-            if let Some(trace) = movement_trace.take() {
-                scene.attach_movement_trace(trace);
-            }
-            if let Some(events) = hotspot_events.take() {
-                scene.attach_hotspot_events(events);
-            }
+            fixtures.attach_to_scene(&mut scene);
             Some(scene)
         }
         None => None,
     };
 
-    if hotspot_events.is_some() {
+    if fixtures.has_unattached_hotspots() {
         println!(
             "Hotspot event log loaded without timeline overlay; run with --timeline to visualise markers."
         );
@@ -186,7 +250,7 @@ fn main() -> Result<()> {
         print_scene_summary(scene);
     }
 
-    if let Some(trace) = movement_trace.take() {
+    if let Some(trace) = fixtures.take_movement() {
         println!(
             "Movement trace loaded without timeline overlay; pass --timeline alongside --movement-log to sync markers."
         );
@@ -195,7 +259,7 @@ fn main() -> Result<()> {
 
     let audio_log_path = args.audio_log.clone();
 
-    if args.headless {
+    if matches!(run_mode, RunMode::Headless) {
         // Propagate any decoding failure before exiting early.
         decode_result?;
         if let Some(path) = audio_log_path.as_ref() {

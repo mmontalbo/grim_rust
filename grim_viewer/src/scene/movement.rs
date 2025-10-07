@@ -1,6 +1,7 @@
 /// Ordered samples describing Manny's captured positions; drives both minimap
 /// markers and the scrubber overlay. Derived stats (distance, yaw range,
 /// dominant sectors) spare the renderer from recomputing analytics every frame.
+#[derive(Debug)]
 pub struct MovementTrace {
     pub samples: Vec<MovementSample>,
     pub first_frame: u32,

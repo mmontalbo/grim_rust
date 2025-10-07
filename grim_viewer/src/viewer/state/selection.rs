@@ -12,7 +12,7 @@ pub(super) fn next_entity(state: &mut ViewerState) {
         };
         state.selected_entity = Some(next);
         print_selected_entity(state);
-        overlay_updates::refresh_timeline_overlay(state);
+        overlay_updates::refresh_scene_overlays(state);
     }
 }
 
@@ -27,7 +27,7 @@ pub(super) fn previous_entity(state: &mut ViewerState) {
         };
         state.selected_entity = Some(prev);
         print_selected_entity(state);
-        overlay_updates::refresh_timeline_overlay(state);
+        overlay_updates::refresh_scene_overlays(state);
     }
 }
 
@@ -98,8 +98,8 @@ pub(super) fn print_selected_entity(state: &ViewerState) {
 fn scrub_step(state: &mut ViewerState, delta: i32) {
     if let Some(scrubber) = state.scrubber.as_mut() {
         let changed = scrubber.step(delta);
-        if state.scrubber_overlay.is_some() {
-            overlay_updates::refresh_scrubber_overlay(state);
+        if state.scrubber_overlay.is_some() || state.timeline_overlay.is_some() {
+            overlay_updates::refresh_scene_overlays(state);
         }
         if changed {
             state.window().request_redraw();
@@ -110,8 +110,8 @@ fn scrub_step(state: &mut ViewerState, delta: i32) {
 fn scrub_jump_to_head_target(state: &mut ViewerState, direction: i32) {
     if let Some(scrubber) = state.scrubber.as_mut() {
         let changed = scrubber.jump_to_head_target(direction);
-        if state.scrubber_overlay.is_some() {
-            overlay_updates::refresh_scrubber_overlay(state);
+        if state.scrubber_overlay.is_some() || state.timeline_overlay.is_some() {
+            overlay_updates::refresh_scene_overlays(state);
         }
         if changed {
             state.window().request_redraw();

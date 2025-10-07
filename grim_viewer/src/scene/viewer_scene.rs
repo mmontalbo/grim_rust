@@ -435,167 +435,28 @@ pub struct SceneEntity {
 
 impl SceneEntity {
     pub fn describe(&self) -> String {
-        let mut method_list = self.methods.clone();
-        method_list.sort();
-        let methods_label = if method_list.is_empty() {
-            Cow::Borrowed("no recorded methods")
-        } else {
-            let preview_len = method_list.len().min(5);
-            let mut label = method_list[..preview_len].join(", ");
-            if method_list.len() > preview_len {
-                label.push_str(&format!(", +{} more", method_list.len() - preview_len));
-            }
-            Cow::Owned(label)
-        };
-
+        let methods_label = self.methods_preview();
         let header = format!("[{}] {}", self.kind.label(), self.name);
         match &self.created_by {
             Some(source) => format!("{header} ({methods}) <= {source}", methods = methods_label),
             None => format!("{header} ({methods})", methods = methods_label),
         }
     }
-}
 
-fn prune_entities_for_set(
-    entities: Vec<SceneEntity>,
-    set_variable_name: Option<&str>,
-    set_display_name: Option<&str>,
-) -> Vec<SceneEntity> {
-    if is_manny_office(set_variable_name, set_display_name) {
-        return prune_manny_office_entities(entities, set_variable_name);
-    }
-    entities
-}
-
-fn is_manny_office(set_variable_name: Option<&str>, set_display_name: Option<&str>) -> bool {
-    set_variable_name
-        .map(|value| value.eq_ignore_ascii_case("mo"))
-        .unwrap_or(false)
-        || set_display_name
-            .map(|value| value.eq_ignore_ascii_case("Manny's Office"))
-            .unwrap_or(false)
-}
-
-fn manny_office_entity_names(set_prefix: &str) -> Vec<String> {
-    let prefix = if set_prefix.is_empty() {
-        "mo"
-    } else {
-        set_prefix
-    };
-    let mut names = vec!["manny".to_string()];
-    for suffix in [
-        "cards",
-        "cards.interest_actor",
-        "computer",
-        "tube",
-        "tube.interest_actor",
-    ] {
-        names.push(format!("{prefix}.{suffix}"));
-    }
-    names
-}
-
-fn prune_manny_office_entities(
-    entities: Vec<SceneEntity>,
-    set_variable_name: Option<&str>,
-) -> Vec<SceneEntity> {
-    let set_prefix = set_variable_name.unwrap_or("mo");
-    let allowed = manny_office_entity_names(set_prefix);
-
-    entities
-        .into_iter()
-        .filter(|entity| {
-            allowed
-                .iter()
-                .any(|allowed| entity.name.eq_ignore_ascii_case(allowed))
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod entity_filter_tests {
-    use super::*;
-    use std::collections::BTreeSet;
-
-    fn make_entity(kind: SceneEntityKind, name: &str) -> SceneEntity {
-        SceneEntityBuilder::new(kind, name.to_string()).build()
-    }
-
-    #[test]
-    fn manny_office_allowlist_matches_trimmed_entities() {
-        let expected = vec![
-            "manny".to_string(),
-            "mo.cards".to_string(),
-            "mo.cards.interest_actor".to_string(),
-            "mo.computer".to_string(),
-            "mo.tube".to_string(),
-            "mo.tube.interest_actor".to_string(),
-        ];
-        assert_eq!(manny_office_entity_names("mo"), expected);
-        assert_eq!(manny_office_entity_names(""), expected);
-
-        let mut with_custom_prefix = expected.clone();
-        for name in with_custom_prefix.iter_mut().skip(1) {
-            *name = name.replace("mo", "custom");
+    /// Human-friendly list of methods the entity invoked. Limits the output so
+    /// debug prints stay concise in the CLI.
+    fn methods_preview(&self) -> Cow<'_, str> {
+        if self.methods.is_empty() {
+            return Cow::Borrowed("no recorded methods");
         }
-        assert_eq!(
-            manny_office_entity_names("custom"),
-            with_custom_prefix,
-            "allowlist should respect provided prefix"
-        );
-    }
-
-    #[test]
-    fn prune_entities_for_manny_office_keeps_core_entities() {
-        let entities = vec![
-            make_entity(SceneEntityKind::Actor, "Actor"),
-            make_entity(SceneEntityKind::Actor, "meche"),
-            make_entity(SceneEntityKind::Actor, "mo"),
-            make_entity(SceneEntityKind::Object, "loading_menu"),
-            make_entity(SceneEntityKind::Object, "manny"),
-            make_entity(SceneEntityKind::Object, "mo.cards"),
-            make_entity(SceneEntityKind::InterestActor, "mo.cards"),
-            make_entity(SceneEntityKind::InterestActor, "mo.cards.interest_actor"),
-            make_entity(SceneEntityKind::Object, "mo.computer"),
-            make_entity(SceneEntityKind::Object, "mo.tube"),
-            make_entity(SceneEntityKind::InterestActor, "mo.tube.interest_actor"),
-            make_entity(SceneEntityKind::Object, "canister_actor"),
-        ];
-
-        let pruned = prune_entities_for_set(entities, Some("mo"), Some("Manny's Office"));
-        let names: Vec<&str> = pruned.iter().map(|entity| entity.name.as_str()).collect();
-
-        assert_eq!(
-            names,
-            vec![
-                "manny",
-                "mo.cards",
-                "mo.cards",
-                "mo.cards.interest_actor",
-                "mo.computer",
-                "mo.tube",
-                "mo.tube.interest_actor",
-            ]
-        );
-
-        let unique: BTreeSet<&str> = names.iter().copied().collect();
-        let expected: BTreeSet<String> = manny_office_entity_names("mo").into_iter().collect();
-        let expected_refs: BTreeSet<&str> = expected.iter().map(|s| s.as_str()).collect();
-        assert_eq!(unique, expected_refs);
-    }
-
-    #[test]
-    fn prune_entities_leaves_other_sets_untouched() {
-        let entities = vec![
-            make_entity(SceneEntityKind::Actor, "Actor"),
-            make_entity(SceneEntityKind::Object, "gl.cards"),
-            make_entity(SceneEntityKind::InterestActor, "gl.cards"),
-        ];
-
-        let pruned = prune_entities_for_set(entities, Some("gl"), Some("Glottis' Garage"));
-        let names: Vec<&str> = pruned.iter().map(|entity| entity.name.as_str()).collect();
-
-        assert_eq!(names, vec!["Actor", "gl.cards", "gl.cards"]);
+        let mut method_list = self.methods.clone();
+        method_list.sort();
+        let preview_len = method_list.len().min(5);
+        let mut label = method_list[..preview_len].join(", ");
+        if method_list.len() > preview_len {
+            label.push_str(&format!(", +{} more", method_list.len() - preview_len));
+        }
+        Cow::Owned(label)
     }
 }
 
@@ -738,4 +599,3 @@ mod bounds_tests {
         assert_ne!(horizontal, vertical);
     }
 }
-

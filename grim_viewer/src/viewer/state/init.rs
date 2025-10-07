@@ -511,8 +511,7 @@ pub(super) async fn new(
 
     state.surface.configure(&state.device, &state.config);
     selection::print_selected_entity(&state);
-    overlay_updates::refresh_timeline_overlay(&mut state);
-    overlay_updates::refresh_scrubber_overlay(&mut state);
+    overlay_updates::refresh_scene_overlays(&mut state);
     layout::apply_panel_layouts(&mut state);
 
     Ok(state)
