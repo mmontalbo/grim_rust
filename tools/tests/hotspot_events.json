@@ -173,20 +173,30 @@
     {
       "sequence": 11435,
       "frame": 24,
-      "label": "actor.manny.ignore_boxes false"
+      "label": "dialog.end manny /moma113/"
     },
     {
       "sequence": 11436,
       "frame": 24,
+      "label": "dialog.wait Manny /moma113/"
+    },
+    {
+      "sequence": 11437,
+      "frame": 24,
+      "label": "actor.manny.ignore_boxes false"
+    },
+    {
+      "sequence": 11438,
+      "frame": 24,
       "label": "actor.manny.pop_costume ma_note_type.cos"
     },
     {
-      "sequence": 11439,
+      "sequence": 11441,
       "frame": 24,
       "label": "hotspot.demo.fallback computer"
     },
     {
-      "sequence": 11440,
+      "sequence": 11442,
       "frame": 24,
       "label": "hotspot.demo.end computer"
     }

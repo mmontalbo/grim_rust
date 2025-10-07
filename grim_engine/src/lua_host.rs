@@ -3702,6 +3702,8 @@ fn complete_computer_hotspot_manually(
     start_sfx.call::<_, Value>(("txtScrl2.WAV",))?;
     let _ = stop_sound.call::<_, ()>(("keyboard.imu",));
 
+    wait_for_message.call::<_, ()>((manny.clone(),))?;
+
     ignore_boxes.call::<_, ()>((manny.clone(), false))?;
     pop_costume.call::<_, ()>((manny.clone(),))?;
     set_pos.call::<_, ()>((manny.clone(), 0.5_f32, 1.975_f32, 0.0_f32))?;
@@ -9039,7 +9041,13 @@ fn format_music_detail(action: &str, cue: &str, params: &[String]) -> String {
 }
 
 fn describe_value(value: &Value) -> String {
-    value_to_string(value).unwrap_or_else(|| format!("<{value:?}>"))
+    if let Some(text) = value_to_string(value) {
+        return text;
+    }
+    match value {
+        Value::Function(func) => describe_function(func),
+        _ => format!("<{value:?}>"),
+    }
 }
 
 fn heading_between(from: Vec3, to: Vec3) -> f64 {
