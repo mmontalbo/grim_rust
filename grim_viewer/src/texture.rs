@@ -462,3 +462,162 @@ pub fn preview_color(bytes: &[u8]) -> wgpu::Color {
 
     wgpu::Color { r, g, b, a: 1.0 }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grim_formats::decode_bm;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn asset_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../artifacts/manny_assets")
+            .join(name)
+    }
+
+    #[test]
+    fn load_asset_bytes_accepts_relative_archive_paths() {
+        let temp = tempdir().expect("temp dir");
+        let manifest_path = temp.path().join("manifest.json");
+        let asset_path = asset_path("mo_tube_balloon.bm");
+        let local_asset = temp.path().join("mo_tube_balloon.bm");
+        fs::copy(&asset_path, &local_asset).expect("copy asset");
+        let size = fs::metadata(&local_asset).expect("metadata").len();
+
+        let manifest = json!({
+            "found": [
+                {
+                    "asset_name": "mo_tube_balloon.bm",
+                    "archive_path": "mo_tube_balloon.bm",
+                    "offset": 0,
+                    "size": size,
+                    "metadata": {
+                        "type": "bitmap",
+                        "codec": 3,
+                        "bits_per_pixel": 16,
+                        "frames": 1,
+                        "width": 497,
+                        "height": 132,
+                        "supported": true
+                    }
+                }
+            ]
+        });
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+
+        let (name, bytes, archive_path) =
+            load_asset_bytes(&manifest_path, "mo_tube_balloon.bm").expect("load asset bytes");
+
+        assert_eq!(name, "mo_tube_balloon.bm");
+        assert_eq!(bytes.len() as u64, size);
+        assert_eq!(archive_path, local_asset);
+    }
+
+    #[test]
+    fn load_zbm_seed_returns_base_bitmap() {
+        let temp = tempdir().expect("temp dir");
+        let manifest_path = temp.path().join("manifest.json");
+        let base_source = asset_path("mo_tube_balloon.bm");
+        let depth_source = asset_path("mo_tube_balloon.zbm");
+        let base_copy = temp.path().join("mo_tube_balloon.bm");
+        let depth_copy = temp.path().join("mo_tube_balloon.zbm");
+        fs::copy(&base_source, &base_copy).expect("copy base asset");
+        fs::copy(&depth_source, &depth_copy).expect("copy depth asset");
+        let base_size = fs::metadata(&base_copy).expect("base metadata").len();
+        let depth_size = fs::metadata(&depth_copy).expect("depth metadata").len();
+
+        let manifest = json!({
+            "found": [
+                {
+                    "asset_name": "mo_tube_balloon.bm",
+                    "archive_path": "mo_tube_balloon.bm",
+                    "offset": 0,
+                    "size": base_size,
+                    "metadata": {
+                        "type": "bitmap",
+                        "codec": 3,
+                        "bits_per_pixel": 16,
+                        "frames": 1,
+                        "width": 497,
+                        "height": 132,
+                        "supported": true
+                    }
+                },
+                {
+                    "asset_name": "mo_tube_balloon.zbm",
+                    "archive_path": "mo_tube_balloon.zbm",
+                    "offset": 0,
+                    "size": depth_size,
+                    "metadata": {
+                        "type": "bitmap",
+                        "codec": 0,
+                        "bits_per_pixel": 16,
+                        "frames": 1,
+                        "width": 507,
+                        "height": 148,
+                        "supported": true
+                    }
+                }
+            ]
+        });
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+
+        let seed = load_zbm_seed(&manifest_path, "mo_tube_balloon.zbm")
+            .expect("seed lookup")
+            .expect("seed available");
+
+        let metadata = seed.metadata();
+        assert_eq!(metadata.width, 497);
+        assert_eq!(metadata.height, 132);
+        assert_eq!(metadata.image_count, 1);
+    }
+
+    #[test]
+    fn decode_asset_texture_decodes_color_and_depth_assets() {
+        let base_bytes = fs::read(asset_path("mo_tube_balloon.bm")).expect("read base asset");
+        let depth_bytes = fs::read(asset_path("mo_tube_balloon.zbm")).expect("read depth asset");
+
+        let color_preview =
+            decode_asset_texture("mo_tube_balloon.bm", &base_bytes, None).expect("color preview");
+
+        assert_eq!(color_preview.width, 497);
+        assert_eq!(color_preview.height, 132);
+        assert_eq!(color_preview.frame_count, 1);
+        assert_eq!(color_preview.codec, 3);
+        assert_eq!(color_preview.format, 1);
+        assert!(color_preview.depth_stats.is_none());
+        assert!(!color_preview.depth_preview);
+        assert_eq!(color_preview.data.len(), (497 * 132 * 4) as usize);
+
+        let seed_bitmap = decode_bm(&base_bytes).expect("decode base bm");
+        let depth_preview =
+            decode_asset_texture("mo_tube_balloon.zbm", &depth_bytes, Some(&seed_bitmap))
+                .expect("depth preview");
+
+        assert_eq!(depth_preview.width, 507);
+        assert_eq!(depth_preview.height, 148);
+        assert_eq!(depth_preview.frame_count, 1);
+        assert_eq!(depth_preview.codec, 0);
+        assert_eq!(depth_preview.format, 5);
+        assert_eq!(
+            depth_preview.data.len(),
+            (depth_preview.width * depth_preview.height * 4) as usize
+        );
+        let stats = depth_preview.depth_stats.expect("depth stats present");
+        assert_eq!(
+            stats.total_pixels() as u32,
+            depth_preview.width * depth_preview.height
+        );
+        assert!(!depth_preview.depth_preview);
+    }
+}

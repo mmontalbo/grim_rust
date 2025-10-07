@@ -301,20 +301,16 @@ mod minimap_layout_tests {
 
     #[test]
     fn minimap_layout_preserves_top_down_orientation() {
-        let layout = MinimapConstraints {
-            horizontal_axis: 0,
-            vertical_axis: 1,
-            horizontal_min: 0.0,
-            vertical_min: 0.0,
-            horizontal_span: 1.0,
-            vertical_span: 1.0,
-            minimap_rect: ViewportRect {
+        let layout = MinimapLayout::from_rect(
+            ViewportRect {
                 x: 0.1,
                 y: 0.1,
                 width: 0.4,
                 height: 0.4,
             },
-        };
+            PhysicalSize::new(800, 600),
+        )
+        .expect("minimap layout");
 
         let top_down = MarkerProjection::TopDown {
             horizontal_axis: 0,

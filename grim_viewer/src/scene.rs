@@ -1758,6 +1758,52 @@ pub fn load_movement_trace(path: &Path) -> Result<MovementTrace> {
         .with_context(|| format!("summarising movement trace from {}", path.display()))
 }
 
+#[cfg(test)]
+mod movement_log_io_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn movement_fixture_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/tests/movement_log.json")
+    }
+
+    #[test]
+    fn load_movement_trace_summarises_baseline_fixture() {
+        let trace = load_movement_trace(&movement_fixture_path()).expect("movement trace");
+
+        assert_eq!(trace.sample_count(), 114);
+        assert_eq!(trace.first_frame, 1);
+        assert_eq!(trace.last_frame, 114);
+        assert!((trace.total_distance - 1.1599987).abs() < 1e-6);
+
+        let yaw_range = trace.yaw_range().expect("yaw range");
+        assert!(yaw_range.0.abs() < 1e-6);
+        assert!((yaw_range.1 - 270.0).abs() < 1e-6);
+
+        let sectors = trace.dominant_sectors(3);
+        assert_eq!(sectors.len(), 3);
+        assert_eq!(sectors[0], ("floor_17", 42));
+        assert_eq!(sectors[1], ("floor_21", 25));
+        assert_eq!(sectors[2], ("floor_1734", 18));
+
+        assert!((trace.bounds.min[0] - 0.607).abs() < 1e-6);
+        assert!((trace.bounds.max[0] - 1.086_999_5).abs() < 1e-6);
+        assert!((trace.bounds.min[1] - 2.021).abs() < 1e-6);
+        assert!((trace.bounds.max[1] - 2.140_999_8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_movement_trace_surfaces_parse_errors() {
+        let mut temp = NamedTempFile::new().expect("temp file");
+        writeln!(temp, "this is not valid JSON").expect("write invalid content");
+
+        let error = load_movement_trace(temp.path()).expect_err("expected parse failure");
+        let message = format!("{error}");
+        assert!(message.contains("parsing movement log"));
+    }
+}
+
 pub fn load_hotspot_event_log(path: &Path) -> Result<Vec<HotspotEvent>> {
     let data =
         fs::read(path).with_context(|| format!("reading hotspot event log {}", path.display()))?;
