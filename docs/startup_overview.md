@@ -159,6 +159,13 @@ view of the boot stages so geometry probes and timeline metadata stay in lockste
 Running without the timeline manifest keeps the viewer in its previous
 marker-only mode.
 
+Headless checks need the Lua geometry snapshot so Manny/desk/tube anchors stay
+aligned with the minimap. Use `python tools/grim_viewer.py -- --headless
+--lua-geometry-json artifacts/run_cache/manny_geometry.json` to replay the
+Manny office baselines; the helper wires in the movement and hotspot fixtures by
+default and exits once the overlays stabilise. See `docs/grim_viewer_modules.md`
+for a module map and additional workflow notes.
+
 For a turnkey loop, run `tools/run_manny_boot.sh`. The helper first invokes
 `grim_engine --run-lua` with timeline and audio exports, then launches
 `grim_viewer` against the freshly generated manifests. Any additional arguments

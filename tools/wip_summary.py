@@ -29,21 +29,20 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Current Focus",
             "body": [
-                "Keep the Lua geometry snapshot wired into grim_viewer so Manny/desk/tube markers stay aligned with the runtime transforms instead of falling back to movement heuristics.",
-                "Spot-check camera and minimap marker alignment with the refreshed geometry by launching python tools/grim_viewer.py -- --headless when needed so projection drift is caught quickly.",
-                "Keep the refreshed markers-only baseline (manny_overlay_composite.png + manny_overlay_markers.json) authoritative so the regression harness mirrors runtime behaviour.",
-                "Lean on grim_viewer for rapid minimap tuning before investing in broader UI tooling; keep iteration tight on what the first-playable loop needs.",
-                "Document the E2E loop, focus pack hand-off, and overlay refresh steps alongside the tooling so the Milestone 1 review path stays obvious for every teammate.",
-                "Run the Manny computer loop end-to-end in grim_engine/grim_viewer, fixing load→navigate→interact blockers (pathing, dialogue triggers, audio) until the first-playable loop is reliable.",
+                "Add unit/snapshot tests for the new scene and texture helpers (movement parsing, asset decoding) so regressions are caught quickly.",
+                "Keep the Lua geometry snapshot flowing through the new scene module so Manny/desk/tube anchors stay in sync; re-run the Manny fixtures after edits to confirm markers align.",
+                "Verify baseline overlays still render with the modular viewer (movement/event logs, PNG/JSON) before closing the refactor.",
+                "Track remaining TODOs from the split (e.g. minimap polish, overlay tests) and schedule follow-up issues once the modular structure settles.",
+                "Keep docs/grim_viewer_modules.md and related tooling notes current as new overlays or CLI flags land so onboarding stays accurate.",
             ],
         },
         {
             "title": "Upcoming Targets",
             "body": [
-                "Propagate the manny_office_entity_names helper into capture/docs tooling so the trimmed Manny/desk/tube list stays authoritative outside grim_viewer.",
-                "Spot-check the minimap axis heuristic in other Manny office captures and document the Rust layout abstraction so future overlays reuse it instead of ad-hoc NDC math.",
-                "Keep the Manny computer hotspot regression artefacts (movement, audio, timeline, depth, event log) current so cargo test -p grim_engine -- runtime_regression remains green; hotspot events now backfill the opening frames and approach markers anchor to the first movement frame, so refresh the full capture set together when behaviour shifts.",
-                "Maintain codec3 colour/depth parity while we iterate on tooling so Manny's office rendering never regresses.",
+                "Prototype a --dump-layout flag or similar debug affordance now that viewer.rs is slimmer, aiding layout troubleshooting without reading code.",
+                "Automate baseline overlay comparisons (PNG/JSON diffs) so CI can spot projection drift without manual inspection.",
+                "Extend hotspot playback controls (scrubbing, event focus) so grim_viewer stays aligned with Manny's runtime captures.",
+                "Evaluate audio overlay logging with the modular viewer and decide where automated checks should live.",
             ],
         },
         {
