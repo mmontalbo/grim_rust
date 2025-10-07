@@ -1,3 +1,6 @@
+/// Snapshot of everything the viewer needs to draw overlays on a single
+/// background plate: entities from the timeline, optional movement/hotspot
+/// fixtures, and camera data recovered from the set file.
 pub struct ViewerScene {
     pub entities: Vec<SceneEntity>,
     pub position_bounds: Option<SceneBounds>,

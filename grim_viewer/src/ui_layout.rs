@@ -1,3 +1,8 @@
+//! Thin wrapper around the Taffy layout engine used to size the HUD panels and
+//! minimap. The viewer provides panel hints, and this module keeps track of the
+//! resulting rectangles whenever the window resizes so `viewer::state` can draw
+//! overlays without sprinkling layout math throughout the render code.
+
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};

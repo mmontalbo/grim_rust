@@ -1,3 +1,6 @@
+/// Ordered samples describing Manny's captured positions; drives both minimap
+/// markers and the scrubber overlay. Derived stats (distance, yaw range,
+/// dominant sectors) spare the renderer from recomputing analytics every frame.
 pub struct MovementTrace {
     pub samples: Vec<MovementSample>,
     pub first_frame: u32,
@@ -120,6 +123,10 @@ pub struct ScrubEvent {
 }
 
 #[derive(Debug, Clone)]
+/// Tracks which movement sample is in focus and which head-target marker to
+/// highlight; used by the viewer's scrubber overlay and `[`, `]`, `{`, `}`
+/// shortcuts. Maintains lightweight indices so overlay text and marker
+/// highlighting stay in lockstep with Manny's movement trace.
 pub struct MovementScrubber {
     current_sample: usize,
     sample_frames: Vec<u32>,

@@ -1,3 +1,9 @@
+//! CLI entrypoint for `grim_viewer`. Wires the manifest loaders from `scene`,
+//! prepares decoded bitmaps via `texture`, and drives `ViewerState` so the
+//! runtime overlays stay in sync with the optional timeline, movement, and
+//! audio fixtures. Also exposes headless and PNG-dump paths used by automation
+//! to validate decoded assets without opening a window.
+
 use std::sync::Arc;
 
 mod audio;

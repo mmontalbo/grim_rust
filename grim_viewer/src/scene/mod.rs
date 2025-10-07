@@ -1,3 +1,10 @@
+//! Builds the high-level `ViewerScene` overlay data from engine exports. This
+//! module bridges timeline manifests, movement traces, hotspot logs, and Lua
+//! geometry snapshots so the viewer can project Manny's runtime state onto a
+//! single background plate. It also houses the Manny-office pruning rules and
+//! camera recovery helpers that keep `viewer::markers` aligned with the decoded
+//! bitmap.
+
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},

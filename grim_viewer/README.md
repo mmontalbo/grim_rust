@@ -5,6 +5,27 @@ and milestone telemetry without launching the retail executable. It consumes the
 manifests emitted by `grim_engine` to render Manny's office plates, overlay boot
 timeline markers, and track audio cues during development.
 
+### How the pieces fit
+- **CLI bootstrap (`src/main.rs`, `src/cli.rs`):** Parses the manifest paths,
+  decodes the requested `.bm`/`.zbm` frame, and loads optional timeline,
+  movement, hotspot, audio, and geometry fixtures into memory.
+- **Scene builder (`src/scene`):** Normalises `grim_engine` exports into a
+  `ViewerScene` – actors/objects, timeline metadata, Manny's movement trace, and
+  color-coded hotspot events – so the renderer has one source of truth.
+- **Runtime state (`src/viewer/state`):** Owns the wgpu surface, uploads the
+  decoded frame, computes UI layout, and keeps overlays and selection state in
+  sync with the scene.
+- **Overlays and markers (`src/viewer/overlays.rs`, `src/viewer/markers.rs`):**
+  Project Manny, hotspot, and geometry markers into plate space using the
+  recovered camera, while text overlays narrate the current selection, movement
+  scrubber frame, and audio log status.
+- **Utility crates:** `texture.rs` handles codec3 decoding and PNG export,
+  `audio.rs` tails Lua audio logs, and `ui_layout.rs` describes the HUD layout
+  constraints used by the viewer.
+- **Deeper docs:** Each module owns its own README (`src/scene/README.md`,
+  `src/viewer/state/README.md`) that maps the JSON fixtures and render loops in
+  more detail for contributors touching those areas.
+
 ## Role in the Recreation
 - **Asset inspection:** Loads `.bm` color plates and `.zbm` depth buffers from
   the LAB archives so we can validate codec3 output and frame compositions.
@@ -65,9 +86,12 @@ timeline markers, and track audio cues during development.
   ```
 
 ## Extending the Crate
-- Use the types in `audio_log.rs` to normalize new event sources so overlays
-  stay consistent.
-- Keep UI prompts concise; the target audience is engineers verifying asset
-  correctness rather than end users.
-- When adding new overlays, gate them behind CLI flags so automated runs remain
-  deterministic.
+- **Scene data:** Extend `scene::ViewerScene` when the engine emits new
+  telemetry. Builders live next to the serde models so you can see how timeline
+  hooks map to overlay markers.
+- **Runtime overlays:** `viewer/state` owns layout and render order; add new
+  panels through `ui_layout.rs` so the Taffy layout stays declarative.
+- **Audio feeds:** Use `audio_log.rs` types to normalise new event sources so
+  the existing aggregation pipeline can surface them without bespoke UI.
+- **Automation:** Gate new overlays or expensive processing behind CLI flags so
+  scripted `--headless` runs and regression jobs remain deterministic.

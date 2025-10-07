@@ -1,3 +1,10 @@
+//! Central runtime state for the viewer. Owns the wgpu device/surface,
+//! maintains overlay text, minimap markers, and entity selection, and exposes
+//! small helpers that the event loop in `main.rs` drives. Submodules cover
+//! lifecycle slices: `init` for setup, `layout` for resize handling,
+//! `overlay_updates` for text refresh, `render` for draw passes, and
+//! `selection` for input routing.
+
 use std::sync::Arc;
 
 use super::overlays::TextOverlay;

@@ -21,6 +21,10 @@ use crate::texture::{
 };
 use crate::ui_layout::{MinimapConstraints, PanelSize, UiLayout};
 
+/// Bootstraps wgpu, uploads the decoded bitmap, prepares overlays, and
+/// computes an initial camera projection/minimap layout before handing back a
+/// ready-to-render `ViewerState`. This is where we establish render pipelines,
+/// bind groups, and marker buffers so frame rendering stays lightweight.
 pub(super) async fn new(
     window: Arc<Window>,
     asset_name: &str,
