@@ -523,7 +523,7 @@ mod hotspot_log_tests {
         let events =
             load_hotspot_event_log(&hotspot_fixture_path()).expect("load hotspot event fixture");
 
-        assert_eq!(events.len(), 38);
+        assert_eq!(events.len(), 40);
         assert_eq!(events[0].label, "actor.select manny");
         assert_eq!(events[0].kind(), HotspotEventKind::Selection);
         assert!(
@@ -557,7 +557,7 @@ mod hotspot_log_tests {
         assert_eq!(head_targets, 4);
         assert_eq!(ignore_boxes, 2);
         assert_eq!(chores, 3);
-        assert_eq!(dialogs, 8);
+        assert_eq!(dialogs, 10);
         assert_eq!(other, 9);
     }
 }

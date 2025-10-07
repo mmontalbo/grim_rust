@@ -348,13 +348,12 @@ fn main() -> Result<()> {
                         } => state.previous_entity(),
                         WindowEvent::KeyboardInput {
                             event:
-                                KeyEvent {
-                                    logical_key: Key::Character(key),
+                                key_event @ KeyEvent {
                                     state: ElementState::Pressed,
                                     ..
                                 },
                             ..
-                        } => state.handle_character_input(key.as_ref()),
+                        } => state.handle_key_event(&key_event),
                         WindowEvent::Resized(new_size) => state.resize(new_size),
                         WindowEvent::RedrawRequested => match state.render() {
                             Ok(_) => {}

@@ -1,5 +1,9 @@
 use super::ViewerState;
 use super::overlay_updates;
+use winit::{
+    event::KeyEvent,
+    keyboard::{Key, KeyCode, PhysicalKey},
+};
 
 pub(super) fn next_entity(state: &mut ViewerState) {
     if let Some(scene) = state.scene.as_ref() {
@@ -31,13 +35,47 @@ pub(super) fn previous_entity(state: &mut ViewerState) {
     }
 }
 
-pub(super) fn handle_character_input(state: &mut ViewerState, key: &str) {
-    match key {
-        "]" => scrub_step(state, 1),
-        "[" => scrub_step(state, -1),
-        "}" => scrub_jump_to_head_target(state, 1),
-        "{" => scrub_jump_to_head_target(state, -1),
-        _ => {}
+pub(super) fn handle_key_event(state: &mut ViewerState, event: &KeyEvent) {
+    if let Some(text) = event.text.as_deref() {
+        if apply_symbol(state, text) {
+            return;
+        }
+    }
+
+    if let Key::Character(symbol) = event.logical_key.as_ref() {
+        if apply_symbol(state, symbol) {
+            return;
+        }
+    }
+
+    if let PhysicalKey::Code(code) = event.physical_key {
+        match code {
+            KeyCode::BracketRight => scrub_step(state, 1),
+            KeyCode::BracketLeft => scrub_step(state, -1),
+            _ => {}
+        }
+    }
+}
+
+fn apply_symbol(state: &mut ViewerState, symbol: &str) -> bool {
+    match symbol {
+        "]" => {
+            scrub_step(state, 1);
+            true
+        }
+        "[" => {
+            scrub_step(state, -1);
+            true
+        }
+        "}" => {
+            scrub_jump_to_head_target(state, 1);
+            true
+        }
+        "{" => {
+            scrub_jump_to_head_target(state, -1);
+            true
+        }
+        _ => false,
     }
 }
 

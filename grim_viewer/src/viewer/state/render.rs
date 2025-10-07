@@ -338,8 +338,12 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
 
     if let Some(trace) = scene.movement_trace() {
         if !trace.samples.is_empty() {
-            desk_position = trace.samples.first().map(|sample| sample.position);
-            tube_hint_position = trace.samples.last().map(|sample| sample.position);
+            if desk_position.is_none() {
+                desk_position = trace.samples.first().map(|sample| sample.position);
+            }
+            if tube_hint_position.is_none() {
+                tube_hint_position = trace.samples.last().map(|sample| sample.position);
+            }
 
             if let Some(scrubber) = state.scrubber.as_ref() {
                 scrub_position = scrubber.current_position(trace);

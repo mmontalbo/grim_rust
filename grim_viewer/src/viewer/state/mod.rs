@@ -102,7 +102,7 @@ impl ViewerState {
         selection::previous_entity(self);
     }
 
-    pub fn handle_character_input(&mut self, key: &str) {
-        selection::handle_character_input(self, key);
+    pub fn handle_key_event(&mut self, event: &winit::event::KeyEvent) {
+        selection::handle_key_event(self, event);
     }
 }

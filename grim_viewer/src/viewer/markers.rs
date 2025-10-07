@@ -129,10 +129,11 @@ impl<'a> MarkerProjection<'a> {
                 const MAP_MARGIN: f32 = 0.08;
                 let clamp_h = norm_h.clamp(0.0, 1.0);
                 let clamp_v = norm_v.clamp(0.0, 1.0);
-                Some([
-                    clamp_h * (1.0 - MAP_MARGIN * 2.0) + MAP_MARGIN,
-                    1.0 - (clamp_v * (1.0 - MAP_MARGIN * 2.0) + MAP_MARGIN),
-                ])
+                let scaled_h = clamp_h * (1.0 - MAP_MARGIN * 2.0) + MAP_MARGIN;
+                let scaled_v = clamp_v * (1.0 - MAP_MARGIN * 2.0) + MAP_MARGIN;
+                let clip_x = scaled_h * 2.0 - 1.0;
+                let clip_y = (1.0 - scaled_v) * 2.0 - 1.0;
+                Some([clip_x, clip_y])
             }
             MarkerProjection::TopDownPanel {
                 horizontal_axis,
@@ -239,8 +240,8 @@ mod marker_projection_tests {
         };
 
         let outside = projection.project([25.0, 0.0, -17.0]).expect("projection");
-        assert!(outside[0] <= 1.0 && outside[0] >= 0.0);
-        assert!(outside[1] <= 1.0 && outside[1] >= 0.0);
+        assert!(outside[0].abs() <= 1.0);
+        assert!(outside[1].abs() <= 1.0);
     }
 }
 
