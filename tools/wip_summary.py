@@ -20,7 +20,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Getting Started",
             "body": [
                 "Familiarise yourself with README.md and the Current Focus items, then drive the next task to a committable state (tests/docs updated, WIP refreshed, commit created).",
-                "Treat commits as the definition of "done" for a work cycle—merge-ready changes should be committed before you step away.",
+                'Treat commits as the definition of "done" for a work cycle—merge-ready changes should be committed before you step away.',
                 "Regenerate this summary with python tools/wip_summary.py whenever priorities shift so the team stays aligned.",
                 "Use python tools/grim_viewer.py to load the Manny baseline overlays (add -- --headless on machines without a windowing environment).",
                 "The Manny office regression artefacts we reference live under tools/tests/ (movement_log.json, hotspot_events.json, etc.); skim them the first time so you know what the viewer overlays are visualising.",
@@ -32,6 +32,7 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Keep the Manny office regression fixtures (movement_log.json, hotspot_events.json, manny_office_depth_stats.json) in sync with intent; rerun the runtime harness whenever gameplay changes affect them.",
                 "Verify Manny’s office loads and plays through (walk path + computer interaction) with modular viewer overlays, updating geometry snapshots or assets if markers drift.",
+                "Only regenerate artifacts/run_cache/manny_geometry.json when Manny’s markers drift or scripts move set anchors; otherwise note the check-in that validated keeping the existing snapshot.",
                 "Feed the latest Lua geometry snapshot through the scene builder so Manny/desk/tube anchors remain aligned in both runtime and viewer contexts.",
                 "Document any workflow quirks in docs/grim_viewer_modules.md so the path to first-playable remains clear for Milestone 1.",
                 "Flag the recent viewer/scene module split when sharing context so contributors land changes in the right files.",
@@ -51,7 +52,20 @@ WIP_DATA: Dict[str, Any] = {
             ],
         },
     ],
-    "workstreams": [],
+    "workstreams": [
+        {
+            "slug": "manny-geometry-refresh",
+            "title": "Manny geometry + regression refresh",
+            "description": "Verify Manny’s office overlays stay locked to the baseline and refresh artefacts when they drift.",
+            "prompt": (
+                "Run python tools/grim_viewer.py -- --headless to check Manny/desk/tube alignment; "
+                "if markers drift, follow docs/runtime_smoke_tests.md to regenerate movement, hotspot, "
+                "audio, depth, and geometry artefacts together; rerun cargo test -p grim_engine -- "
+                "runtime_regression to confirm the refreshed baselines stay green; update "
+                "docs/grim_viewer_modules.md with any workflow notes discovered while refreshing."
+            ),
+        },
+    ],
 }
 
 
