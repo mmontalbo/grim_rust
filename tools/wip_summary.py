@@ -19,30 +19,20 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Getting Started",
             "body": [
-                "Familiarise yourself with README.md and the sections below, then pick up the next item in this summary and work it through to a committable state (tests/docs updated, WIP refreshed, commit created).",
-                "List all available workstreams with: python tools/wip_summary.py --json (or refer to the ## Workstreams section).",
-                "For a specific thread, run: python tools/wip_summary.py --workstream <slug> (for example --workstream codec3_regression).",
+                "Familiarise yourself with README.md and the Current Focus items, then drive the next task to a committable state (tests/docs updated, WIP refreshed, commit created).",
+                "Regenerate this summary with python tools/wip_summary.py whenever priorities shift so the team stays aligned.",
                 "Use python tools/grim_viewer.py to load the Manny baseline overlays (add -- --headless on machines without a windowing environment).",
                 "The Manny office regression artefacts we reference live under tools/tests/ (movement_log.json, hotspot_events.json, etc.); skim them the first time so you know what the viewer overlays are visualising.",
+                "Run cargo test -p grim_engine -- runtime_regression after asset or script changes that touch Manny's office to confirm the harness stays green.",
             ],
         },
         {
             "title": "Current Focus",
             "body": [
-                "Add unit/snapshot tests for the new scene and texture helpers (movement parsing, asset decoding) so regressions are caught quickly.",
-                "Keep the Lua geometry snapshot flowing through the new scene module so Manny/desk/tube anchors stay in sync; re-run the Manny fixtures after edits to confirm markers align.",
-                "Verify baseline overlays still render with the modular viewer (movement/event logs, PNG/JSON) before closing the refactor.",
-                "Track remaining TODOs from the split (e.g. minimap polish, overlay tests) and schedule follow-up issues once the modular structure settles.",
-                "Keep docs/grim_viewer_modules.md and related tooling notes current as new overlays or CLI flags land so onboarding stays accurate.",
-            ],
-        },
-        {
-            "title": "Upcoming Targets",
-            "body": [
-                "Prototype a --dump-layout flag or similar debug affordance now that viewer.rs is slimmer, aiding layout troubleshooting without reading code.",
-                "Automate baseline overlay comparisons (PNG/JSON diffs) so CI can spot projection drift without manual inspection.",
-                "Extend hotspot playback controls (scrubbing, event focus) so grim_viewer stays aligned with Manny's runtime captures.",
-                "Evaluate audio overlay logging with the modular viewer and decide where automated checks should live.",
+                "Keep the Manny office regression fixtures (movement_log.json, hotspot_events.json, manny_office_depth_stats.json) in sync with intent; rerun the runtime harness whenever gameplay changes affect them.",
+                "Verify Manny’s office loads and plays through (walk path + computer interaction) with modular viewer overlays, updating geometry snapshots or assets if markers drift.",
+                "Feed the latest Lua geometry snapshot through the scene builder so Manny/desk/tube anchors remain aligned in both runtime and viewer contexts.",
+                "Document any workflow quirks in docs/grim_viewer_modules.md so the path to first-playable remains clear for Milestone 1.",
             ],
         },
         {
@@ -58,26 +48,7 @@ WIP_DATA: Dict[str, Any] = {
             ],
         },
     ],
-    "workstreams": [
-        {
-            "slug": "runtime_regression",
-            "title": "Runtime regression harness",
-            "description": "Lock Manny hotspot + movement baselines",
-            "prompt": "Objective: keep the CLI hotspot demo capturing movement/audio/timeline/depth artefacts that mirror Manny's office. Regenerate artefacts when intent changes, update docs/tests, and ensure cargo test -p grim_engine -- runtime_regression remains green.",
-        },
-        {
-            "slug": "hotspot_overlay",
-            "title": "Hotspot overlay integration",
-            "description": "Surface hotspot traces in viewer",
-            "prompt": "Objective: build on the movement overlay by wiring hotspot/timeline selections into grim_viewer so geometry/head-targeting debugging stays aligned with the runtime captures. With movement/head markers now matching the regression frames via the recovered camera projection, layer in playback controls and per-event focus so scrubbing the desk interaction stays synced across tooling.",
-        },
-        {
-            "slug": "codec3_regression",
-            "title": "Codec3 regression",
-            "description": "Harden Manny office texture decode",
-            "prompt": "Objective: keep Manny's office rendering faithful by matching codec3 behaviour between colour .bm plates and .zbm depth maps. Ensure seeded windows mirror the original engine, expose depth ranges for validation, and land regression tests or tooling (prefer automated snapshots) that prevent the half-black regression from returning.",
-        },
-    ],
+    "workstreams": [],
 }
 
 
