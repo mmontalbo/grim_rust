@@ -40,6 +40,7 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Format commits as: <area>: <short change summary> on the first line, then blank line, followed by 'Why:' and 'What:' bullet blocks summarising intent and implementation.",
                 "Keep the bullet phrasing tight (hyphen bullets preferred) so reviewers see the rationale/changes without hunting through diffs.",
+                "Aim to keep each logical change under roughly 500 lines so reviews stay manageable; call out regenerated assets or automation when the diff must exceed that threshold.",
                 "Avoid blank lines between Why/What bullet entries so the commit template stays compact and scannable.",
                 "Example (with template configured): git commit -m 'grim_viewer: refresh overlay layout' -m $'Why:\\n- unblock minimap verification' -m $'What:\\n- grim_viewer/src/ui_layout.rs: add Taffy helper'",
                 "Use top-level directories for the <area> prefix (grim_engine, grim_viewer, grim_formats, grim_analysis, tools, docs, etc.) instead of generic labels like runtime; split work across commits when multiple components need separate context.",
