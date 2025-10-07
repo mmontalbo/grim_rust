@@ -24,6 +24,7 @@ DEFAULT_TIMELINE = ROOT_DIR / "tools" / "tests" / "manny_office_timeline.json"
 DEFAULT_MOVEMENT_LOG = ROOT_DIR / "tools" / "tests" / "movement_log.json"
 DEFAULT_EVENT_LOG = ROOT_DIR / "tools" / "tests" / "hotspot_events.json"
 DEFAULT_LAYOUT_PRESET = ROOT_DIR / "grim_viewer" / "presets" / "manny_office_layout.json"
+DEFAULT_GEOMETRY_SNAPSHOT = ROOT_DIR / "artifacts" / "run_cache" / "manny_geometry.json"
 
 
 def main() -> None:
@@ -52,6 +53,14 @@ def main() -> None:
         "--event-log",
         default=str(DEFAULT_EVENT_LOG),
         help="Hotspot event log JSON to overlay (pass 'none' to disable)",
+    )
+    common.add_argument(
+        "--lua-geometry-json",
+        default=None,
+        help=(
+            "Lua geometry snapshot JSON to align Manny/desk/tube markers "
+            "(default: autodetect artifacts/run_cache/manny_geometry.json)"
+        ),
     )
     common.add_argument(
         "--dump-frame",
@@ -107,6 +116,8 @@ def build_run_args(args, extra: Sequence[str]) -> List[str]:
     timeline = normalize_optional_path(args.timeline)
     movement = normalize_optional_path(args.movement_log)
     event_log = normalize_optional_path(args.event_log)
+    geometry = normalize_optional_path(args.lua_geometry_json)
+    geometry_specified = args.lua_geometry_json is not None
 
     if timeline:
         viewer_args.extend(["--timeline", timeline])
@@ -117,6 +128,7 @@ def build_run_args(args, extra: Sequence[str]) -> List[str]:
     if event_log:
         viewer_args.extend(["--event-log", event_log])
     ensure_layout_preset(viewer_args, extra)
+    ensure_geometry_snapshot(viewer_args, extra, geometry, geometry_specified)
     viewer_args.extend(extra)
     return viewer_args
 
@@ -164,6 +176,30 @@ def ensure_layout_preset(viewer_args: List[str], extra: Sequence[str]) -> None:
 def has_layout_flag(args: Sequence[str]) -> bool:
     for entry in args:
         if entry == "--layout-preset" or entry.startswith("--layout-preset="):
+            return True
+    return False
+
+
+def ensure_geometry_snapshot(
+    viewer_args: List[str],
+    extra: Sequence[str],
+    user_path: str | None,
+    user_specified: bool,
+) -> None:
+    if has_geometry_flag(viewer_args) or has_geometry_flag(extra):
+        return
+    if user_path:
+        viewer_args.extend(["--lua-geometry-json", user_path])
+        return
+    if user_specified:
+        return
+    if DEFAULT_GEOMETRY_SNAPSHOT.exists():
+        viewer_args.extend(["--lua-geometry-json", str(DEFAULT_GEOMETRY_SNAPSHOT)])
+
+
+def has_geometry_flag(args: Sequence[str]) -> bool:
+    for entry in args:
+        if entry == "--lua-geometry-json" or entry.startswith("--lua-geometry-json="):
             return True
     return False
 

@@ -20,14 +20,16 @@ First capture the boot timeline manifest so the overlay baseline stays current:
 cargo run -p grim_engine -- --timeline-json tools/tests/manny_office_timeline.json
 ```
 
-Then run the Lua runtime demo to record the hotspot artefacts:
+Then run the Lua runtime demo to record the hotspot artefacts and capture the
+Lua geometry snapshot that keeps the viewer overlays aligned:
 
 ```bash
 cargo run -p grim_engine -- --run-lua --hotspot-demo computer \
   --movement-demo --movement-log-json tools/tests/movement_log.json \
   --audio-log-json tools/tests/hotspot_audio.json \
   --depth-stats-json tools/tests/manny_office_depth_stats.json \
-  --event-log-json tools/tests/hotspot_events.json
+  --event-log-json tools/tests/hotspot_events.json \
+  --lua-geometry-json artifacts/run_cache/manny_geometry.json
 ```
 
 Key flags:
@@ -48,6 +50,10 @@ Key flags:
   movement overlay. Each entry carries the runtime sequence counter and, when
   available, the movement frame that triggered the event so geometry changes
   line up with Manny's position.
+- `--lua-geometry-json` writes the runtime geometry snapshot that the viewer
+  consumes to place Manny, the desk, and the tube anchors correctly. Keep the
+  output under `artifacts/run_cache/` so the helper script can forward it to the
+  viewer by path.
 
 The command prints a transcript to stdout that includes `hotspot.demo.start`/
 `hotspot.demo.end` markers alongside dialogue/cutscene logs. The JSON artefacts
@@ -113,10 +119,10 @@ want to share them with the regression harness.
   and any geometry/debug events the Lua host recorded. Redirect it to a file if
   you need to diff runs across branches.
 - Launch the viewer with `python tools/grim_viewer.py` once the artefacts are
-  refreshed. The script now feeds in the Manny timeline, movement trace, and
-  hotspot log by default, so the markers render in the recovered camera's
-  perspective. Add `-- --headless` when you just want the textual summary
-  without opening a window.
+  refreshed. The script now feeds in the Manny timeline, movement trace, hotspot
+  log, and auto-detects `artifacts/run_cache/manny_geometry.json` so the markers
+  render in the recovered camera's perspective. Add `-- --headless` when you
+  just want the textual summary without opening a window.
 
 ## Hooking into the regression harness
 

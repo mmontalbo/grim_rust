@@ -26,25 +26,33 @@ split without a desktop session.
    - `tools/tests/movement_log.json`
    - `tools/tests/hotspot_events.json`
    - `artifacts/run_cache/manny_geometry.json` (Lua geometry snapshot)
+   Refresh the list above together by running the runtime smoke-test command in
+   `docs/runtime_smoke_tests.md`; it now writes the geometry snapshot to
+   `artifacts/run_cache/manny_geometry.json` via `--lua-geometry-json` so the
+   helper can auto-detect it and keep the viewer aligned with the captured
+   hotspot artefacts.
 2. Run the viewer helper with the default overlays and geometry aligned:
 
    ```bash
-   python tools/grim_viewer.py -- \
-     --headless \
-     --lua-geometry-json artifacts/run_cache/manny_geometry.json
+   python tools/grim_viewer.py -- --headless
    ```
 
-   The helper injects the timeline, movement, and hotspot fixtures for you. The
+   The helper injects the timeline, movement, hotspot fixtures, and—when present
+   under `artifacts/run_cache/`—the Lua geometry snapshot for you. The
    console output should list the entities discovered in the timeline manifest,
    report the movement trace summary, and note the first hotspot events.
+   Scrubber hints such as `[`/`]` to step frames and `{`/`}` to jump between
+   head-target markers are echoed in the headless summary for quick reference.
 3. Tail an audio log at the same time by adding
    `--audio-log tools/tests/hotspot_audio.json`; headless mode will print cue
    updates until events stabilise.
 
 ## Geometry Snapshot Expectations
-- Always pass `--lua-geometry-json` when running the viewer against the Manny
-  baselines. Without the snapshot, Manny/desk/tube markers fall back to movement
-  heuristics and drift away from the minimap anchors.
+- Always pass `--lua-geometry-json` when running the viewer directly against the
+  Manny baselines. Without the snapshot, Manny/desk/tube markers fall back to
+  movement heuristics and drift away from the minimap anchors. The helper script
+  now auto-attaches `artifacts/run_cache/manny_geometry.json` when it exists, so
+  keep that file fresh via the runtime smoke test.
 - When you regenerate geometry (for example after tweaking entity placement in
   `grim_engine`), rerun the headless command above and confirm the marker legends
   still report Manny in the expected sectors. The overlay summary now calls out
