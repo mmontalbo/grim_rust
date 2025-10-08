@@ -285,7 +285,7 @@ impl TextOverlay {
         self.visible
     }
 
-    fn vertex_positions(rect: ViewportRect, window: PhysicalSize<u32>) -> [OverlayVertex; 6] {
+    fn vertex_positions(rect: ViewportRect, window: PhysicalSize<u32>) -> [OverlayVertex; 4] {
         let width = window.width.max(1) as f32;
         let height = window.height.max(1) as f32;
 
@@ -297,21 +297,19 @@ impl TextOverlay {
         [
             OverlayVertex {
                 position: [left, top],
+                uv: [0.0, 0.0],
             },
             OverlayVertex {
                 position: [right, top],
+                uv: [1.0, 0.0],
             },
             OverlayVertex {
                 position: [left, bottom],
-            },
-            OverlayVertex {
-                position: [left, bottom],
-            },
-            OverlayVertex {
-                position: [right, top],
+                uv: [0.0, 1.0],
             },
             OverlayVertex {
                 position: [right, bottom],
+                uv: [1.0, 1.0],
             },
         ]
     }
@@ -342,6 +340,7 @@ impl TextOverlay {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct OverlayVertex {
     position: [f32; 2],
+    uv: [f32; 2],
 }
 
 pub(super) fn audio_overlay_lines(status: &AudioStatus) -> Vec<String> {
