@@ -84,6 +84,20 @@ pub enum HotspotEventKind {
     Other,
 }
 
+impl HotspotEventKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            HotspotEventKind::Hotspot => "event.hotspot",
+            HotspotEventKind::HeadTarget => "event.head_target",
+            HotspotEventKind::IgnoreBoxes => "event.ignore_boxes",
+            HotspotEventKind::Chore => "event.chore",
+            HotspotEventKind::Dialog => "event.dialog",
+            HotspotEventKind::Selection => "event.selection",
+            HotspotEventKind::Other => "event.other",
+        }
+    }
+}
+
 pub fn event_marker_style(kind: HotspotEventKind) -> (f32, [f32; 3], f32) {
     match kind {
         HotspotEventKind::Hotspot => (0.05, [0.95, 0.85, 0.35], 0.4),

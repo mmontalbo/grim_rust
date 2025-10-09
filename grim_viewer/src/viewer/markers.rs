@@ -4,6 +4,8 @@ use winit::dpi::PhysicalSize;
 use crate::scene::{CameraProjector, SceneEntityKind};
 use crate::ui_layout::ViewportRect;
 
+use super::debug;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(super) struct MarkerVertex {
@@ -152,6 +154,37 @@ impl<'a> MarkerProjection<'a> {
                 layout.project(norm_h, norm_v)
             }
         }
+    }
+
+    pub fn project_marker(
+        &self,
+        label: Option<&str>,
+        position: [f32; 3],
+        mut size: f32,
+        mut color: [f32; 3],
+        mut highlight: f32,
+    ) -> Option<MarkerInstance> {
+        let [ndc_x, ndc_y] = self.project(position)?;
+        if !ndc_x.is_finite() || !ndc_y.is_finite() {
+            return None;
+        }
+
+        debug::config().apply_marker_overrides(
+            label,
+            position,
+            [ndc_x, ndc_y],
+            &mut size,
+            &mut color,
+            &mut highlight,
+        );
+
+        Some(MarkerInstance {
+            translate: [ndc_x, ndc_y],
+            size,
+            highlight,
+            color,
+            _padding: 0.0,
+        })
     }
 }
 

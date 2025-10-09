@@ -3,7 +3,7 @@ use super::ViewerState;
 use crate::audio::AudioStatus;
 
 pub(super) fn update_audio_overlay(state: &mut ViewerState, status: &AudioStatus) {
-    if let Some(overlay) = state.audio_overlay.as_mut() {
+    if let Some(overlay) = state.overlays.audio_mut() {
         let lines = audio_overlay_lines(status);
         overlay.set_lines(&lines);
     }
@@ -16,11 +16,11 @@ pub(super) fn refresh_scene_overlays(state: &mut ViewerState) {
         state.selected_entity,
     );
 
-    if let Some(overlay) = state.timeline_overlay.as_mut() {
+    if let Some(overlay) = state.overlays.timeline_mut() {
         overlay.set_lines(snapshot.timeline_lines());
     }
 
-    if let Some(overlay) = state.scrubber_overlay.as_mut() {
+    if let Some(overlay) = state.overlays.scrubber_mut() {
         overlay.set_lines(snapshot.scrubber_lines());
     }
 }

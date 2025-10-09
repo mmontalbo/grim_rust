@@ -8,6 +8,7 @@ use super::super::shaders::{
 use super::ViewerState;
 use super::layout;
 use super::overlay_updates;
+use super::panels::ViewerOverlays;
 use super::selection;
 use anyhow::{Context, Result};
 use bytemuck::cast_slice;
@@ -303,6 +304,8 @@ pub(super) async fn new(
     };
 
     let mut minimap_constraints = MinimapConstraints::default();
+    let overlays = ViewerOverlays::new(audio_overlay, timeline_overlay, scrubber_overlay);
+
     if let Some(preset) = minimap_preset {
         if let Some(min_side) = preset.min_side {
             minimap_constraints.min_side = min_side;
@@ -494,9 +497,7 @@ pub(super) async fn new(
         _texture: texture,
         _texture_view: texture_view,
         _sampler: sampler,
-        audio_overlay,
-        timeline_overlay,
-        scrubber_overlay,
+        overlays,
         background,
         scene: scene.clone(),
         selected_entity,

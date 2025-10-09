@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use super::overlays::TextOverlay;
 use crate::audio::AudioStatus;
 use crate::cli::LayoutPreset;
 use crate::scene::{CameraProjector, MovementScrubber, ViewerScene};
@@ -31,9 +30,7 @@ pub struct ViewerState {
     _texture: wgpu::Texture,
     _texture_view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
-    audio_overlay: Option<TextOverlay>,
-    timeline_overlay: Option<TextOverlay>,
-    scrubber_overlay: Option<TextOverlay>,
+    overlays: panels::ViewerOverlays,
     background: wgpu::Color,
     scene: Option<Arc<ViewerScene>>,
     selected_entity: Option<usize>,
@@ -49,6 +46,7 @@ pub struct ViewerState {
 mod init;
 mod layout;
 mod overlay_updates;
+mod panels;
 mod render;
 mod selection;
 

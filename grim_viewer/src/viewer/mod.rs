@@ -1,3 +1,4 @@
+mod debug;
 mod markers;
 mod overlays;
 mod shaders;

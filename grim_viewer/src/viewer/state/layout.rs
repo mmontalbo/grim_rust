@@ -21,22 +21,9 @@ pub(super) fn resize(state: &mut ViewerState, new_size: PhysicalSize<u32>) {
 }
 
 pub(super) fn apply_panel_layouts(state: &mut ViewerState) {
-    let window_size = state.size;
-    if let Some(overlay) = state.audio_overlay.as_mut() {
-        if let Some(rect) = state.ui_layout.panel_rect(PanelKind::Audio) {
-            overlay.update_layout(&state.device, window_size, rect);
-        }
-    }
-    if let Some(overlay) = state.timeline_overlay.as_mut() {
-        if let Some(rect) = state.ui_layout.panel_rect(PanelKind::Timeline) {
-            overlay.update_layout(&state.device, window_size, rect);
-        }
-    }
-    if let Some(overlay) = state.scrubber_overlay.as_mut() {
-        if let Some(rect) = state.ui_layout.panel_rect(PanelKind::Scrubber) {
-            overlay.update_layout(&state.device, window_size, rect);
-        }
-    }
+    state
+        .overlays
+        .apply_layouts(&state.device, &state.ui_layout, state.size);
 }
 
 pub(super) fn minimap_layout(state: &ViewerState) -> Option<MinimapLayout> {
