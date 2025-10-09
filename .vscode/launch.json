@@ -1,0 +1,349 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'grim_analysis'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=grim_analysis"
+                ],
+                "filter": {
+                    "name": "grim_analysis",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'grim_analysis'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=grim_analysis",
+                    "--package=grim_analysis"
+                ],
+                "filter": {
+                    "name": "grim_analysis",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'grim_analysis'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=grim_analysis",
+                    "--package=grim_analysis"
+                ],
+                "filter": {
+                    "name": "grim_analysis",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'grim_formats'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=grim_formats"
+                ],
+                "filter": {
+                    "name": "grim_formats",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'lab_dump'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=lab_dump",
+                    "--package=grim_formats"
+                ],
+                "filter": {
+                    "name": "lab_dump",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'lab_dump'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=lab_dump",
+                    "--package=grim_formats"
+                ],
+                "filter": {
+                    "name": "lab_dump",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'lab_extract'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=lab_extract",
+                    "--package=grim_formats"
+                ],
+                "filter": {
+                    "name": "lab_extract",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'lab_extract'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=lab_extract",
+                    "--package=grim_formats"
+                ],
+                "filter": {
+                    "name": "lab_extract",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'zbm_stats'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=zbm_stats",
+                    "--package=grim_formats"
+                ],
+                "filter": {
+                    "name": "zbm_stats",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'zbm_stats'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=zbm_stats",
+                    "--package=grim_formats"
+                ],
+                "filter": {
+                    "name": "zbm_stats",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'grim_engine'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=grim_engine",
+                    "--package=grim_engine"
+                ],
+                "filter": {
+                    "name": "grim_engine",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'grim_engine'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=grim_engine",
+                    "--package=grim_engine"
+                ],
+                "filter": {
+                    "name": "grim_engine",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'hotspot_demo'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=hotspot_demo",
+                    "--package=grim_engine"
+                ],
+                "filter": {
+                    "name": "hotspot_demo",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'movement_regression'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=movement_regression",
+                    "--package=grim_engine"
+                ],
+                "filter": {
+                    "name": "movement_regression",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'runtime_regression'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=runtime_regression",
+                    "--package=grim_engine"
+                ],
+                "filter": {
+                    "name": "runtime_regression",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'grim_viewer'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=grim_viewer",
+                    "--package=grim_viewer"
+                ],
+                "filter": {
+                    "name": "grim_viewer",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug grim_viewer (default assets)",
+            "cargo": {
+            "args": ["build", "--bin=grim_viewer", "--package=grim_viewer"],
+            "filter": { "name": "grim_viewer", "kind": "bin" }
+            },
+            "program": "${workspaceFolder}/target/debug/grim_viewer",
+            "args": [
+            "--manifest", "${workspaceFolder}/artifacts/manny_office_assets.json",
+            "--asset", "mo_0_ddtws.bm",
+            "--timeline", "${workspaceFolder}/tools/tests/manny_office_timeline.json",
+            "--movement-log", "${workspaceFolder}/tools/tests/movement_log.json",
+            "--event-log", "${workspaceFolder}/tools/tests/hotspot_events.json",
+            "--layout-preset", "${workspaceFolder}/grim_viewer/presets/manny_office_layout.json",
+            "--lua-geometry-json", "${workspaceFolder}/artifacts/run_cache/manny_geometry.json"
+            ],
+            "env": {
+                "GRIM_VIEWER_LOG_MARKERS": "0"
+            },
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'grim_viewer'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=grim_viewer",
+                    "--package=grim_viewer"
+                ],
+                "filter": {
+                    "name": "grim_viewer",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
