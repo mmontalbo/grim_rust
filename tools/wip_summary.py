@@ -29,7 +29,7 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Validate the latest geometry snapshot (artifacts/run_cache/manny_geometry.json) against movement_log.json to catch drift early.",
                 "Watch for hotspot.demo.fallback in hotspot_events.json and push Manny’s scripts so the computer interaction returns to suit without needing the fallback path.",
-                "Document any blocker uncovered in docs/grim_viewer_modules.md or README checkpoints so the next engineer can continue the loop quickly.",
+                "Spin up a dedicated minimap marker pipeline so HUD rendering cannot occlude the scene pass; keep layout docs updated with the split once it lands.",
             ],
         },
         {
