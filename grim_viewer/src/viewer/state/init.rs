@@ -129,6 +129,7 @@ pub(super) async fn new(
 
     let texture_width = preview_bundle.preview.width;
     let texture_height = preview_bundle.preview.height;
+    let texture_size = PhysicalSize::new(texture_width.max(1), texture_height.max(1));
     let texture_aspect = (texture_width.max(1) as f32) / (texture_height.max(1) as f32);
 
     println!(
@@ -193,6 +194,7 @@ pub(super) async fn new(
         size,
         wgpu,
         preview_bundle,
+        texture_size,
         scene,
         camera_projector,
         selected_entity,
@@ -533,6 +535,7 @@ fn assemble_viewer_state(
     size: PhysicalSize<u32>,
     wgpu: WgpuBootstrap,
     preview_bundle: PreviewBundle,
+    texture_size: PhysicalSize<u32>,
     scene: Option<Arc<ViewerScene>>,
     camera_projector: Option<CameraProjector>,
     selected_entity: Option<usize>,
@@ -591,6 +594,7 @@ fn assemble_viewer_state(
         _sampler: sampler,
         overlays,
         background: preview_bundle.background,
+        texture_size,
         scene,
         selected_entity,
         scrubber,

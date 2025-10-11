@@ -32,6 +32,7 @@ pub struct ViewerState {
     _sampler: wgpu::Sampler,
     overlays: panels::ViewerOverlays,
     background: wgpu::Color,
+    texture_size: PhysicalSize<u32>,
     scene: Option<Arc<ViewerScene>>,
     selected_entity: Option<usize>,
     scrubber: Option<MovementScrubber>,
