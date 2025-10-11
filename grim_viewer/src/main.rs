@@ -327,10 +327,10 @@ fn main() -> Result<()> {
 
     let margin = PANEL_MARGIN.ceil() as u32;
     let max_panel_width = left_panel_width.max(right_panel_width);
-    let required_bar = if max_panel_width > 0 {
-        margin * 2 + max_panel_width
+    let bar_width = if max_panel_width > 0 {
+        margin + max_panel_width
     } else {
-        margin * 2
+        margin
     };
 
     // Bring up the audio stack so the renderer can acquire an output stream later.
@@ -341,7 +341,7 @@ fn main() -> Result<()> {
         .map(|preview| {
             let base_width = preview.width.max(1);
             let base_height = preview.height.max(1);
-            let expanded_width = base_width.saturating_add(required_bar.saturating_mul(2));
+            let expanded_width = base_width.saturating_add(bar_width.saturating_mul(2));
             (expanded_width.max(base_width), base_height)
         })
         .unwrap_or((1280, 720));

@@ -50,7 +50,7 @@ fn draw_background(
         timestamp_writes: None,
         occlusion_query_set: None,
     });
-    let (vx, vy, vw, vh) = plate_viewport(state);
+    let (vx, vy, vw, vh) = layout::plate_viewport(state);
     rpass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
     rpass.set_pipeline(&state.pipeline);
     rpass.set_bind_group(0, &state.bind_group, &[]);
@@ -90,7 +90,7 @@ fn draw_scene_markers(
         timestamp_writes: None,
         occlusion_query_set: None,
     });
-    let (vx, vy, vw, vh) = plate_viewport(state);
+    let (vx, vy, vw, vh) = layout::plate_viewport(state);
     marker_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
     marker_pass.set_pipeline(&state.marker_pipeline);
     marker_pass.set_vertex_buffer(0, state.scene_marker_vertex_buffer.slice(..));
@@ -505,20 +505,6 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
     }
 
     Some(instances)
-}
-
-fn plate_viewport(state: &ViewerState) -> (f32, f32, f32, f32) {
-    let window_w = state.size.width as f32;
-    let window_h = state.size.height as f32;
-    let tex_w = state.texture_size.width as f32;
-    let tex_h = state.texture_size.height as f32;
-
-    let viewport_w = tex_w.min(window_w).max(1.0);
-    let viewport_h = tex_h.min(window_h).max(1.0);
-    let origin_x = ((window_w - viewport_w) * 0.5).max(0.0);
-    let origin_y = ((window_h - viewport_h) * 0.5).max(0.0);
-
-    (origin_x, origin_y, viewport_w, viewport_h)
 }
 
 fn ensure_scene_marker_capacity(state: &mut ViewerState, required: usize) {
