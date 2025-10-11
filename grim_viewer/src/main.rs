@@ -279,11 +279,25 @@ fn main() -> Result<()> {
     // Bring up the audio stack so the renderer can acquire an output stream later.
     init_audio()?;
 
+    let (initial_window_width, initial_window_height) = decode_result
+        .as_ref()
+        .map(|preview| {
+            let base_width = preview.width.max(1);
+            let base_height = preview.height.max(1);
+            // Reserve horizontal space (~5:3 ratio) so side debug UI can sit outside the plate.
+            let expanded_width = ((base_width as f32) * (5.0 / 3.0)).ceil() as u32;
+            (expanded_width.max(base_width), base_height)
+        })
+        .unwrap_or((1280, 720));
+
     let event_loop = EventLoop::new().context("creating winit event loop")?;
     let window = Arc::new(
         WindowBuilder::new()
             .with_title(format!("Grim Viewer - {}", asset_name))
-            .with_inner_size(PhysicalSize::new(1280, 720))
+            .with_inner_size(PhysicalSize::new(
+                initial_window_width,
+                initial_window_height,
+            ))
             .build(&event_loop)
             .context("creating viewer window")?,
     );
