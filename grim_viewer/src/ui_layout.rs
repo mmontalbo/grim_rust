@@ -145,17 +145,8 @@ impl UiLayout {
                     bottom: LengthPercentageAuto::Length(PANEL_MARGIN),
                 },
                 size: Size {
-                    width: Dimension::Percent(minimap.preferred_fraction),
-                    height: Dimension::Percent(minimap.preferred_fraction),
-                },
-                aspect_ratio: Some(1.0),
-                min_size: Size {
                     width: Dimension::Length(minimap.min_side),
                     height: Dimension::Length(minimap.min_side),
-                },
-                max_size: Size {
-                    width: Dimension::Percent(minimap.max_fraction),
-                    height: Dimension::Percent(minimap.max_fraction),
                 },
                 ..Default::default()
             })
