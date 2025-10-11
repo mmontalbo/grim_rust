@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use taffy::prelude::*;
 use winit::dpi::PhysicalSize;
 
-const PANEL_MARGIN: f32 = 16.0;
-const DEFAULT_MINIMAP_MIN_SIDE: f32 = 160.0;
+pub const PANEL_MARGIN: f32 = 16.0;
+pub const DEFAULT_MINIMAP_MIN_SIDE: f32 = 160.0;
 const DEFAULT_MINIMAP_PREFERRED_FRACTION: f32 = 0.3;
 const DEFAULT_MINIMAP_MAX_FRACTION: f32 = 0.5;
 

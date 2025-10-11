@@ -22,7 +22,7 @@ use audio::{
 };
 use audio_log::AudioAggregation;
 use clap::Parser;
-use cli::{Args, load_layout_preset};
+use cli::{Args, PanelPreset, load_layout_preset};
 use env_logger;
 use pollster::FutureExt;
 use scene::{
@@ -31,6 +31,7 @@ use scene::{
     print_movement_trace_summary, print_scene_summary,
 };
 use texture::{decode_asset_texture, dump_texture_to_png, load_asset_bytes, load_zbm_seed};
+use ui_layout::{DEFAULT_MINIMAP_MIN_SIDE, PANEL_MARGIN};
 use viewer::ViewerState;
 use wgpu::SurfaceError;
 use winit::{
@@ -270,11 +271,67 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let timeline_present = scene_data
+        .as_ref()
+        .and_then(|scene| scene.timeline.as_ref())
+        .is_some();
+
     let scene = scene_data.map(Arc::new);
 
     let audio_status_rx = audio_log_path
         .as_ref()
         .map(|path| spawn_audio_log_thread(AudioLogWatcher::new(path.clone())));
+
+    let audio_overlay_requested = audio_status_rx.is_some();
+
+    let layout_preset_ref = layout_preset.as_ref();
+    let panel_width = |preset: Option<&PanelPreset>, default: u32| -> u32 {
+        preset.and_then(|p| p.width).unwrap_or(default)
+    };
+
+    let audio_preset = layout_preset_ref.and_then(|preset| preset.audio.as_ref());
+    let scrubber_preset = layout_preset_ref.and_then(|preset| preset.scrubber.as_ref());
+    let timeline_preset = layout_preset_ref.and_then(|preset| preset.timeline.as_ref());
+    let minimap_preset = layout_preset_ref.and_then(|preset| preset.minimap.as_ref());
+
+    let audio_enabled =
+        audio_overlay_requested && audio_preset.map(PanelPreset::enabled).unwrap_or(true);
+    let audio_width = if audio_enabled {
+        panel_width(audio_preset, 520)
+    } else {
+        0
+    };
+
+    let scrubber_enabled = scrubber_preset.map(PanelPreset::enabled).unwrap_or(true);
+    let scrubber_width = if scrubber_enabled {
+        panel_width(scrubber_preset, 520)
+    } else {
+        0
+    };
+
+    let left_panel_width = audio_width.max(scrubber_width);
+
+    let timeline_enabled =
+        timeline_present && timeline_preset.map(PanelPreset::enabled).unwrap_or(true);
+    let timeline_width = if timeline_enabled {
+        panel_width(timeline_preset, 640)
+    } else {
+        0
+    };
+
+    let minimap_side = minimap_preset
+        .and_then(|preset| preset.min_side)
+        .unwrap_or(DEFAULT_MINIMAP_MIN_SIDE)
+        .ceil() as u32;
+    let right_panel_width = timeline_width.max(minimap_side);
+
+    let margin = PANEL_MARGIN.ceil() as u32;
+    let max_panel_width = left_panel_width.max(right_panel_width);
+    let required_bar = if max_panel_width > 0 {
+        margin * 2 + max_panel_width
+    } else {
+        margin * 2
+    };
 
     // Bring up the audio stack so the renderer can acquire an output stream later.
     init_audio()?;
@@ -284,8 +341,7 @@ fn main() -> Result<()> {
         .map(|preview| {
             let base_width = preview.width.max(1);
             let base_height = preview.height.max(1);
-            // Reserve horizontal space (~5:3 ratio) so side debug UI can sit outside the plate.
-            let expanded_width = ((base_width as f32) * (5.0 / 3.0)).ceil() as u32;
+            let expanded_width = base_width.saturating_add(required_bar.saturating_mul(2));
             (expanded_width.max(base_width), base_height)
         })
         .unwrap_or((1280, 720));
@@ -301,8 +357,6 @@ fn main() -> Result<()> {
             .build(&event_loop)
             .context("creating viewer window")?,
     );
-
-    let audio_overlay_requested = audio_status_rx.is_some();
 
     let mut state = ViewerState::new(
         window,
