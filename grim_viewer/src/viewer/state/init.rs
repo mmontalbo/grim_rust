@@ -13,14 +13,100 @@ use super::selection;
 use anyhow::{Context, Result};
 use bytemuck::cast_slice;
 use wgpu::util::DeviceExt;
-use winit::window::Window;
+use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::cli::{LayoutPreset, PanelPreset};
-use crate::scene::{MovementScrubber, ViewerScene};
+use crate::cli::{LayoutPreset, MinimapPreset, PanelPreset};
+use crate::scene::{CameraProjector, MovementScrubber, ViewerScene};
 use crate::texture::{
     PreviewTexture, generate_placeholder_texture, prepare_rgba_upload, preview_color,
 };
 use crate::ui_layout::{MinimapConstraints, PanelSize, UiLayout};
+
+/// Bundles the wgpu objects tied to the viewer window.
+struct WgpuBootstrap {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface_format: wgpu::TextureFormat,
+    present_mode: wgpu::PresentMode,
+    alpha_mode: wgpu::CompositeAlphaMode,
+}
+
+/// Holds the decoded preview texture (or fallback) and its clear color.
+struct PreviewBundle {
+    preview: PreviewTexture,
+    background: wgpu::Color,
+}
+
+/// GPU resources for the main texture and its bind group.
+struct TextureResources {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+}
+
+/// Render pipelines and buffers needed for the plate and markers.
+struct RenderResources {
+    quad_pipeline: wgpu::RenderPipeline,
+    marker_pipeline: wgpu::RenderPipeline,
+    minimap_pipeline: wgpu::RenderPipeline,
+    quad_vertex_buffer: wgpu::Buffer,
+    quad_index_buffer: wgpu::Buffer,
+    quad_index_count: u32,
+    scene_marker_vertex_buffer: wgpu::Buffer,
+    scene_marker_instance_buffer: wgpu::Buffer,
+    scene_marker_capacity: usize,
+    minimap_marker_vertex_buffer: wgpu::Buffer,
+    minimap_marker_instance_buffer: wgpu::Buffer,
+    minimap_marker_capacity: usize,
+}
+
+/// Overlay textures plus layout hints for the HUD panels.
+struct OverlaySetup {
+    overlays: ViewerOverlays,
+    audio_panel: Option<PanelSize>,
+    timeline_panel: Option<PanelSize>,
+    scrubber_panel: Option<PanelSize>,
+    minimap_constraints: MinimapConstraints,
+}
+
+/// Enumerates the on-screen overlays rendered into HUD panels.
+#[derive(Clone, Copy)]
+enum OverlayKind {
+    Audio,
+    Scrubber,
+    Timeline,
+}
+
+impl OverlayKind {
+    fn base_config(self) -> OverlayConfig {
+        match self {
+            OverlayKind::Audio => OverlayConfig {
+                width: 520,
+                height: 144,
+                padding_x: 8,
+                padding_y: 8,
+                label: "audio-overlay",
+            },
+            OverlayKind::Scrubber => OverlayConfig {
+                width: 520,
+                height: 176,
+                padding_x: 8,
+                padding_y: 8,
+                label: "scrubber-overlay",
+            },
+            OverlayKind::Timeline => OverlayConfig {
+                width: 640,
+                height: 224,
+                padding_x: 8,
+                padding_y: 8,
+                label: "timeline-overlay",
+            },
+        }
+    }
+}
 
 /// Bootstraps wgpu, uploads the decoded bitmap, prepares overlays, and
 /// computes an initial camera projection/minimap layout before handing back a
@@ -36,7 +122,96 @@ pub(super) async fn new(
     layout_preset: Option<LayoutPreset>,
 ) -> Result<ViewerState> {
     let size = window.inner_size();
+    let layout_preset = layout_preset.unwrap_or_default();
 
+    let wgpu = bootstrap_wgpu(window.clone()).await?;
+    let preview_bundle = resolve_preview(asset_name, &asset_bytes, decode_result);
+
+    let texture_width = preview_bundle.preview.width;
+    let texture_height = preview_bundle.preview.height;
+    let texture_aspect = (texture_width.max(1) as f32) / (texture_height.max(1) as f32);
+
+    println!(
+        "Preview texture sized {}x{} ({} bytes of source)",
+        texture_width,
+        texture_height,
+        asset_bytes.len()
+    );
+
+    let scene_ref = scene.as_deref();
+    let camera_projector = scene_ref.and_then(|scene| scene.camera_projector(texture_aspect));
+    // The camera projector, when present, feeds the perspective math for scene markers.
+    // Rendering falls back to a top-down projection in render.rs when this is None.
+    log_scene_camera(scene_ref);
+
+    let texture_resources =
+        create_texture_resources(&wgpu.device, &wgpu.queue, &preview_bundle.preview)?;
+
+    let scrubber = scene_ref.and_then(MovementScrubber::new);
+    let scrubber_available = scrubber.is_some();
+    let timeline_available = scene_ref
+        .and_then(|scene| scene.timeline.as_ref())
+        .is_some();
+
+    let overlay_setup = build_overlays(
+        &wgpu.device,
+        &wgpu.queue,
+        &texture_resources.bind_group_layout,
+        size,
+        &layout_preset,
+        enable_audio_overlay,
+        scrubber_available,
+        timeline_available,
+    )?;
+
+    let render_resources = create_render_resources(
+        &wgpu.device,
+        &texture_resources.bind_group_layout,
+        wgpu.surface_format,
+    );
+
+    let selected_entity = initial_selected_entity(scene_ref);
+
+    let OverlaySetup {
+        overlays,
+        audio_panel,
+        timeline_panel,
+        scrubber_panel,
+        minimap_constraints,
+    } = overlay_setup;
+
+    let ui_layout = UiLayout::new(
+        size,
+        audio_panel,
+        timeline_panel,
+        scrubber_panel,
+        minimap_constraints,
+    )?;
+
+    let mut state = assemble_viewer_state(
+        window,
+        size,
+        wgpu,
+        preview_bundle,
+        scene,
+        camera_projector,
+        selected_entity,
+        scrubber,
+        ui_layout,
+        overlays,
+        texture_resources,
+        render_resources,
+    );
+
+    state.surface.configure(&state.device, &state.config);
+    selection::print_selected_entity(&state);
+    overlay_updates::refresh_scene_overlays(&mut state);
+    layout::apply_panel_layouts(&mut state);
+
+    Ok(state)
+}
+
+async fn bootstrap_wgpu(window: Arc<Window>) -> Result<WgpuBootstrap> {
     let instance = wgpu::Instance::default();
     let surface = instance
         .create_surface(window.clone())
@@ -83,6 +258,21 @@ pub(super) async fn new(
         .copied()
         .unwrap_or(wgpu::CompositeAlphaMode::Opaque);
 
+    Ok(WgpuBootstrap {
+        surface,
+        device,
+        queue,
+        surface_format,
+        present_mode,
+        alpha_mode,
+    })
+}
+
+fn resolve_preview(
+    asset_name: &str,
+    asset_bytes: &[u8],
+    decode_result: Result<PreviewTexture>,
+) -> PreviewBundle {
     let (preview, background) = match decode_result {
         Ok(texture) => {
             println!(
@@ -110,47 +300,51 @@ pub(super) async fn new(
         }
         Err(err) => {
             eprintln!("[grim_viewer] falling back to placeholder texture: {err:?}");
-            let placeholder = generate_placeholder_texture(&asset_bytes, asset_name);
-            let color = preview_color(&asset_bytes);
+            // Substitute a deterministic placeholder so the viewer stays interactive after decode failures.
+            let placeholder = generate_placeholder_texture(asset_bytes, asset_name);
+            let color = preview_color(asset_bytes);
             (placeholder, color)
         }
     };
-    let texture_width = preview.width;
-    let texture_height = preview.height;
-    let texture_aspect = (texture_width.max(1) as f32) / (texture_height.max(1) as f32);
-    let camera_projector = scene
-        .as_ref()
-        .and_then(|scene| scene.camera_projector(texture_aspect));
-    if let Some(scene_ref) = scene.as_ref() {
-        if let Some(setup) = scene_ref.active_setup() {
-            println!("[grim_viewer] active camera setup: {}", setup);
-        }
-        if let Some(camera) = scene_ref.camera.as_ref() {
-            println!(
-                "  camera eye ({:.3}, {:.3}, {:.3}) interest ({:.3}, {:.3}, {:.3}) fov {:.2} roll {:.2}",
-                camera.position[0],
-                camera.position[1],
-                camera.position[2],
-                camera.interest[0],
-                camera.interest[1],
-                camera.interest[2],
-                camera.fov_degrees,
-                camera.roll_degrees
-            );
-        }
+    PreviewBundle {
+        preview,
+        background,
     }
-    let texture_extent = wgpu::Extent3d {
-        width: texture_width,
-        height: texture_height,
-        depth_or_array_layers: 1,
+}
+
+fn log_scene_camera(scene: Option<&ViewerScene>) {
+    let Some(scene) = scene else {
+        return;
     };
 
-    println!(
-        "Preview texture sized {}x{} ({} bytes of source)",
-        texture_width,
-        texture_height,
-        asset_bytes.len()
-    );
+    if let Some(setup) = scene.active_setup() {
+        println!("[grim_viewer] active camera setup: {}", setup);
+    }
+    if let Some(camera) = scene.camera.as_ref() {
+        println!(
+            "  camera eye ({:.3}, {:.3}, {:.3}) interest ({:.3}, {:.3}, {:.3}) fov {:.2} roll {:.2}",
+            camera.position[0],
+            camera.position[1],
+            camera.position[2],
+            camera.interest[0],
+            camera.interest[1],
+            camera.interest[2],
+            camera.fov_degrees,
+            camera.roll_degrees
+        );
+    }
+}
+
+fn create_texture_resources(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    preview: &PreviewTexture,
+) -> Result<TextureResources> {
+    let texture_extent = wgpu::Extent3d {
+        width: preview.width,
+        height: preview.height,
+        depth_or_array_layers: 1,
+    };
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("grim-viewer-texture"),
@@ -162,7 +356,7 @@ pub(super) async fn new(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("grim-viewer-sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -174,7 +368,7 @@ pub(super) async fn new(
         ..Default::default()
     });
 
-    let upload = prepare_rgba_upload(texture_width, texture_height, &preview.data)?;
+    let upload = prepare_rgba_upload(preview.width, preview.height, &preview.data)?;
     queue.write_texture(
         wgpu::ImageCopyTexture {
             texture: &texture,
@@ -186,7 +380,7 @@ pub(super) async fn new(
         wgpu::ImageDataLayout {
             offset: 0,
             bytes_per_row: Some(upload.bytes_per_row()),
-            rows_per_image: Some(texture_height),
+            rows_per_image: Some(preview.height),
         },
         texture_extent,
     );
@@ -219,7 +413,7 @@ pub(super) async fn new(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&texture_view),
+                resource: wgpu::BindingResource::TextureView(&view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -228,116 +422,214 @@ pub(super) async fn new(
         ],
     });
 
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("asset-shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
-    });
+    Ok(TextureResources {
+        texture,
+        view,
+        sampler,
+        bind_group_layout,
+        bind_group,
+    })
+}
 
-    let layout_preset = layout_preset.unwrap_or_default();
+fn build_overlays(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    window_size: PhysicalSize<u32>,
+    layout_preset: &LayoutPreset,
+    enable_audio_overlay: bool,
+    scrubber_available: bool,
+    timeline_available: bool,
+) -> Result<OverlaySetup> {
     let audio_preset = layout_preset.audio.as_ref();
     let scrubber_preset = layout_preset.scrubber.as_ref();
     let timeline_preset = layout_preset.timeline.as_ref();
-    let minimap_preset = layout_preset.minimap.as_ref();
 
     let audio_enabled =
         enable_audio_overlay && audio_preset.map(PanelPreset::enabled).unwrap_or(true);
-    let (audio_overlay, audio_panel) = if audio_enabled {
-        let config = OverlayConfig {
-            width: 520,
-            height: 144,
-            padding_x: 8,
-            padding_y: 8,
-            label: "audio-overlay",
-        }
-        .with_preset(audio_preset);
-        let panel = PanelSize::from(&config);
-        let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
-        (Some(overlay), Some(panel))
-    } else {
-        (None, None)
-    };
+    let (audio_overlay, audio_panel) = build_overlay(
+        device,
+        queue,
+        bind_group_layout,
+        window_size,
+        OverlayKind::Audio,
+        audio_preset,
+        audio_enabled,
+    )?;
 
-    let scrubber = scene
-        .as_ref()
-        .and_then(|scene| MovementScrubber::new(scene));
-
-    let scrubber_available = scrubber.is_some();
     let scrubber_enabled =
         scrubber_available && scrubber_preset.map(PanelPreset::enabled).unwrap_or(true);
-    let (scrubber_overlay, scrubber_panel) = if scrubber_enabled {
-        let config = OverlayConfig {
-            width: 520,
-            height: 176,
-            padding_x: 8,
-            padding_y: 8,
-            label: "scrubber-overlay",
-        }
-        .with_preset(scrubber_preset);
-        let panel = PanelSize::from(&config);
-        let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
-        (Some(overlay), Some(panel))
-    } else {
-        (None, None)
-    };
-
-    let timeline_available = scene
-        .as_ref()
-        .and_then(|scene| scene.timeline.as_ref())
-        .is_some();
+    let (scrubber_overlay, scrubber_panel) = build_overlay(
+        device,
+        queue,
+        bind_group_layout,
+        window_size,
+        OverlayKind::Scrubber,
+        scrubber_preset,
+        scrubber_enabled,
+    )?;
 
     let timeline_enabled =
         timeline_available && timeline_preset.map(PanelPreset::enabled).unwrap_or(true);
-    let (timeline_overlay, timeline_panel) = if timeline_enabled {
-        let config = OverlayConfig {
-            width: 640,
-            height: 224,
-            padding_x: 8,
-            padding_y: 8,
-            label: "timeline-overlay",
-        }
-        .with_preset(timeline_preset);
-        let panel = PanelSize::from(&config);
-        let overlay = TextOverlay::new(&device, &queue, &bind_group_layout, size, config)?;
-        (Some(overlay), Some(panel))
-    } else {
-        (None, None)
-    };
+    let (timeline_overlay, timeline_panel) = build_overlay(
+        device,
+        queue,
+        bind_group_layout,
+        window_size,
+        OverlayKind::Timeline,
+        timeline_preset,
+        timeline_enabled,
+    )?;
 
-    let mut minimap_constraints = MinimapConstraints::default();
     let overlays = ViewerOverlays::new(audio_overlay, timeline_overlay, scrubber_overlay);
+    let minimap_constraints = minimap_constraints_from_preset(layout_preset.minimap.as_ref());
 
-    if let Some(preset) = minimap_preset {
-        if let Some(min_side) = preset.min_side {
-            minimap_constraints.min_side = min_side;
-        }
-        if let Some(preferred_fraction) = preset.preferred_fraction {
-            minimap_constraints.preferred_fraction = preferred_fraction;
-        }
-        if let Some(max_fraction) = preset.max_fraction {
-            minimap_constraints.max_fraction = max_fraction;
-        }
-    }
-    let ui_layout = UiLayout::new(
-        size,
+    Ok(OverlaySetup {
+        overlays,
         audio_panel,
         timeline_panel,
         scrubber_panel,
         minimap_constraints,
-    )?;
+    })
+}
 
+fn minimap_constraints_from_preset(preset: Option<&MinimapPreset>) -> MinimapConstraints {
+    let mut constraints = MinimapConstraints::default();
+    if let Some(preset) = preset {
+        if let Some(min_side) = preset.min_side {
+            constraints.min_side = min_side;
+        }
+        if let Some(preferred_fraction) = preset.preferred_fraction {
+            constraints.preferred_fraction = preferred_fraction;
+        }
+        if let Some(max_fraction) = preset.max_fraction {
+            constraints.max_fraction = max_fraction;
+        }
+    }
+    constraints
+}
+
+fn build_overlay(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    window_size: PhysicalSize<u32>,
+    kind: OverlayKind,
+    preset: Option<&PanelPreset>,
+    enabled: bool,
+) -> Result<(Option<TextOverlay>, Option<PanelSize>)> {
+    if !enabled {
+        return Ok((None, None));
+    }
+
+    let config = kind.base_config().with_preset(preset);
+    let panel = PanelSize::from(&config);
+    let overlay = TextOverlay::new(device, queue, bind_group_layout, window_size, config)?;
+    Ok((Some(overlay), Some(panel)))
+}
+
+fn assemble_viewer_state(
+    window: Arc<Window>,
+    size: PhysicalSize<u32>,
+    wgpu: WgpuBootstrap,
+    preview_bundle: PreviewBundle,
+    scene: Option<Arc<ViewerScene>>,
+    camera_projector: Option<CameraProjector>,
+    selected_entity: Option<usize>,
+    scrubber: Option<MovementScrubber>,
+    ui_layout: UiLayout,
+    overlays: ViewerOverlays,
+    texture_resources: TextureResources,
+    render_resources: RenderResources,
+) -> ViewerState {
+    let TextureResources {
+        texture,
+        view,
+        sampler,
+        bind_group_layout: _,
+        bind_group,
+    } = texture_resources;
+
+    let RenderResources {
+        quad_pipeline,
+        marker_pipeline,
+        minimap_pipeline,
+        quad_vertex_buffer,
+        quad_index_buffer,
+        quad_index_count,
+        scene_marker_vertex_buffer,
+        scene_marker_instance_buffer,
+        scene_marker_capacity,
+        minimap_marker_vertex_buffer,
+        minimap_marker_instance_buffer,
+        minimap_marker_capacity,
+    } = render_resources;
+
+    ViewerState {
+        window,
+        surface: wgpu.surface,
+        device: wgpu.device,
+        queue: wgpu.queue,
+        config: wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu.surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu.present_mode,
+            alpha_mode: wgpu.alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 1,
+        },
+        size,
+        pipeline: quad_pipeline,
+        quad_vertex_buffer,
+        quad_index_buffer,
+        quad_index_count,
+        bind_group,
+        _texture: texture,
+        _texture_view: view,
+        _sampler: sampler,
+        overlays,
+        background: preview_bundle.background,
+        scene,
+        selected_entity,
+        scrubber,
+        camera_projector,
+        marker_pipeline,
+        minimap_pipeline,
+        scene_marker_vertex_buffer,
+        scene_marker_instance_buffer,
+        scene_marker_capacity,
+        minimap_marker_vertex_buffer,
+        minimap_marker_instance_buffer,
+        minimap_marker_capacity,
+        ui_layout,
+    }
+}
+
+fn create_render_resources(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    surface_format: wgpu::TextureFormat,
+) -> RenderResources {
     let quad_vertex_layout = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<QuadVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
     };
 
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("asset-shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
+    });
+
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("asset-pipeline-layout"),
-        bind_group_layouts: &[&bind_group_layout],
+        bind_group_layouts: &[bind_group_layout],
         push_constant_ranges: &[],
     });
 
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let quad_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("asset-pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
@@ -374,20 +666,83 @@ pub(super) async fn new(
     });
     let quad_index_count = QUAD_INDICES.len() as u32;
 
-    let marker_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("marker-vertex-buffer"),
+    let marker_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("marker-shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(MARKER_SHADER_SOURCE)),
+    });
+
+    let marker_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("marker-pipeline-layout"),
+        bind_group_layouts: &[],
+        push_constant_ranges: &[],
+    });
+
+    // Scene-marker and minimap pipelines share the WGSL shader but keep separate pipelines
+    // so the render pass can swap between camera-space markers and the 2D minimap.
+    let marker_pipeline = create_marker_pipeline(
+        device,
+        &marker_pipeline_layout,
+        &marker_shader,
+        surface_format,
+        "scene-marker-pipeline",
+    );
+    let minimap_pipeline = create_marker_pipeline(
+        device,
+        &marker_pipeline_layout,
+        &marker_shader,
+        surface_format,
+        "minimap-marker-pipeline",
+    );
+
+    let scene_marker_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("scene-marker-vertex-buffer"),
         contents: cast_slice(&MARKER_VERTICES),
         usage: wgpu::BufferUsages::VERTEX,
     });
+    let minimap_marker_vertex_buffer =
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("minimap-marker-vertex-buffer"),
+            contents: cast_slice(&MARKER_VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
     let initial_marker_capacity = 4usize;
-    let marker_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("marker-instance-buffer"),
+    let scene_marker_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("scene-marker-instance-buffer"),
+        size: (initial_marker_capacity * std::mem::size_of::<MarkerInstance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let minimap_marker_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("minimap-marker-instance-buffer"),
         size: (initial_marker_capacity * std::mem::size_of::<MarkerInstance>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
+    RenderResources {
+        quad_pipeline,
+        marker_pipeline,
+        minimap_pipeline,
+        quad_vertex_buffer,
+        quad_index_buffer,
+        quad_index_count,
+        scene_marker_vertex_buffer,
+        scene_marker_instance_buffer,
+        scene_marker_capacity: initial_marker_capacity,
+        minimap_marker_vertex_buffer,
+        minimap_marker_instance_buffer,
+        minimap_marker_capacity: initial_marker_capacity,
+    }
+}
+
+fn create_marker_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+    label: &'static str,
+) -> wgpu::RenderPipeline {
     let marker_vertex_layout = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<MarkerVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
@@ -421,28 +776,17 @@ pub(super) async fn new(
         ],
     };
 
-    let marker_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("marker-shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(MARKER_SHADER_SOURCE)),
-    });
-
-    let marker_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("marker-pipeline-layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[],
-    });
-
-    let marker_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("marker-pipeline"),
-        layout: Some(&marker_pipeline_layout),
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: &marker_shader,
+            module: shader,
             entry_point: "vs_main",
             buffers: &[marker_vertex_layout, marker_instance_layout],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &marker_shader,
+            module: shader,
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
@@ -455,65 +799,19 @@ pub(super) async fn new(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
-    });
+    })
+}
 
-    let selected_entity = scene.as_ref().and_then(|scene| {
-        if scene.entities.is_empty() {
-            None
-        } else {
-            Some(
-                scene
-                    .entities
-                    .iter()
-                    .enumerate()
-                    .find(|(_, e)| e.position.is_some())
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(0),
-            )
-        }
-    });
-
-    let mut state = ViewerState {
-        window,
-        surface,
-        device,
-        queue,
-        config: wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode,
-            alpha_mode,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 1,
-        },
-        size,
-        pipeline,
-        quad_vertex_buffer,
-        quad_index_buffer,
-        quad_index_count,
-        bind_group,
-        _texture: texture,
-        _texture_view: texture_view,
-        _sampler: sampler,
-        overlays,
-        background,
-        scene: scene.clone(),
-        selected_entity,
-        scrubber,
-        camera_projector,
-        marker_pipeline,
-        marker_vertex_buffer,
-        marker_instance_buffer,
-        marker_capacity: initial_marker_capacity,
-        ui_layout,
-    };
-
-    state.surface.configure(&state.device, &state.config);
-    selection::print_selected_entity(&state);
-    overlay_updates::refresh_scene_overlays(&mut state);
-    layout::apply_panel_layouts(&mut state);
-
-    Ok(state)
+fn initial_selected_entity(scene: Option<&ViewerScene>) -> Option<usize> {
+    let scene = scene?;
+    if scene.entities.is_empty() {
+        return None;
+    }
+    scene
+        .entities
+        .iter()
+        .enumerate()
+        .find(|(_, entity)| entity.position.is_some())
+        .map(|(idx, _)| idx)
+        .or(Some(0))
 }

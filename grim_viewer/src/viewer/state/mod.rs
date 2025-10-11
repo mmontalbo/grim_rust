@@ -37,9 +37,13 @@ pub struct ViewerState {
     scrubber: Option<MovementScrubber>,
     camera_projector: Option<CameraProjector>,
     marker_pipeline: wgpu::RenderPipeline,
-    marker_vertex_buffer: wgpu::Buffer,
-    marker_instance_buffer: wgpu::Buffer,
-    marker_capacity: usize,
+    minimap_pipeline: wgpu::RenderPipeline,
+    scene_marker_vertex_buffer: wgpu::Buffer,
+    scene_marker_instance_buffer: wgpu::Buffer,
+    scene_marker_capacity: usize,
+    minimap_marker_vertex_buffer: wgpu::Buffer,
+    minimap_marker_instance_buffer: wgpu::Buffer,
+    minimap_marker_capacity: usize,
     ui_layout: UiLayout,
 }
 

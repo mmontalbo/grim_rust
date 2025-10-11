@@ -67,9 +67,9 @@ fn draw_scene_markers(
         return;
     }
 
-    ensure_marker_capacity(state, marker_instances.len());
+    ensure_scene_marker_capacity(state, marker_instances.len());
     state.queue.write_buffer(
-        &state.marker_instance_buffer,
+        &state.scene_marker_instance_buffer,
         0,
         cast_slice(&marker_instances),
     );
@@ -89,9 +89,14 @@ fn draw_scene_markers(
         occlusion_query_set: None,
     });
     marker_pass.set_pipeline(&state.marker_pipeline);
-    marker_pass.set_vertex_buffer(0, state.marker_vertex_buffer.slice(..));
+    marker_pass.set_vertex_buffer(0, state.scene_marker_vertex_buffer.slice(..));
     let instance_byte_len = (marker_instances.len() * std::mem::size_of::<MarkerInstance>()) as u64;
-    marker_pass.set_vertex_buffer(1, state.marker_instance_buffer.slice(0..instance_byte_len));
+    marker_pass.set_vertex_buffer(
+        1,
+        state
+            .scene_marker_instance_buffer
+            .slice(0..instance_byte_len),
+    );
     marker_pass.draw(
         0..MARKER_VERTICES.len() as u32,
         0..marker_instances.len() as u32,
@@ -111,9 +116,9 @@ fn draw_minimap_markers(
         return;
     }
 
-    ensure_marker_capacity(state, minimap_instances.len());
+    ensure_minimap_marker_capacity(state, minimap_instances.len());
     state.queue.write_buffer(
-        &state.marker_instance_buffer,
+        &state.minimap_marker_instance_buffer,
         0,
         cast_slice(&minimap_instances),
     );
@@ -132,10 +137,15 @@ fn draw_minimap_markers(
         timestamp_writes: None,
         occlusion_query_set: None,
     });
-    minimap_pass.set_pipeline(&state.marker_pipeline);
-    minimap_pass.set_vertex_buffer(0, state.marker_vertex_buffer.slice(..));
+    minimap_pass.set_pipeline(&state.minimap_pipeline);
+    minimap_pass.set_vertex_buffer(0, state.minimap_marker_vertex_buffer.slice(..));
     let minimap_byte_len = (minimap_instances.len() * std::mem::size_of::<MarkerInstance>()) as u64;
-    minimap_pass.set_vertex_buffer(1, state.marker_instance_buffer.slice(0..minimap_byte_len));
+    minimap_pass.set_vertex_buffer(
+        1,
+        state
+            .minimap_marker_instance_buffer
+            .slice(0..minimap_byte_len),
+    );
     minimap_pass.draw(
         0..MARKER_VERTICES.len() as u32,
         0..minimap_instances.len() as u32,
@@ -493,18 +503,34 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
     Some(instances)
 }
 
-fn ensure_marker_capacity(state: &mut ViewerState, required: usize) {
-    if required <= state.marker_capacity {
+fn ensure_scene_marker_capacity(state: &mut ViewerState, required: usize) {
+    if required <= state.scene_marker_capacity {
         return;
     }
 
     let new_capacity = required.next_power_of_two().max(4);
     let new_size = (new_capacity * std::mem::size_of::<MarkerInstance>()) as u64;
-    state.marker_instance_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("marker-instance-buffer"),
+    state.scene_marker_instance_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("scene-marker-instance-buffer"),
         size: new_size,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    state.marker_capacity = new_capacity;
+    state.scene_marker_capacity = new_capacity;
+}
+
+fn ensure_minimap_marker_capacity(state: &mut ViewerState, required: usize) {
+    if required <= state.minimap_marker_capacity {
+        return;
+    }
+
+    let new_capacity = required.next_power_of_two().max(4);
+    let new_size = (new_capacity * std::mem::size_of::<MarkerInstance>()) as u64;
+    state.minimap_marker_instance_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("minimap-marker-instance-buffer"),
+        size: new_size,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    state.minimap_marker_capacity = new_capacity;
 }
