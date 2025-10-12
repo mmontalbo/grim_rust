@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable, cast_slice};
-use font8x8::legacy::BASIC_LEGACY;
+use font8x8::legacy::BASIC_MODERN;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
@@ -667,9 +667,9 @@ fn truncate_line(line: &str, limit: usize) -> String {
 
 fn glyph_for_char(ch: char) -> [u8; 8] {
     let index = ch as usize;
-    if index < BASIC_LEGACY.len() {
-        BASIC_LEGACY[index]
+    if index < BASIC_MODERN.len() {
+        BASIC_MODERN[index]
     } else {
-        BASIC_LEGACY[b'?' as usize]
+        BASIC_MODERN[b'?' as usize]
     }
 }
