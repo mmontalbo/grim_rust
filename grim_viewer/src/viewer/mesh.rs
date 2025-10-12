@@ -64,9 +64,17 @@ pub fn primitive(kind: PrimitiveKind) -> MeshPrimitive {
 }
 
 pub fn instance_transform(position: [f32; 3], scale: f32) -> [[f32; 4]; 4] {
+    instance_transform_oriented(position, scale, Quat::IDENTITY)
+}
+
+pub fn instance_transform_oriented(
+    position: [f32; 3],
+    scale: f32,
+    rotation: Quat,
+) -> [[f32; 4]; 4] {
     let translation = Vec3::from(position);
     let transform =
-        Mat4::from_scale_rotation_translation(Vec3::splat(scale), Quat::IDENTITY, translation);
+        Mat4::from_scale_rotation_translation(Vec3::splat(scale), rotation, translation);
     to_matrix_columns(transform)
 }
 

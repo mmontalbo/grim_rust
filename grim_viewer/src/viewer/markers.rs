@@ -64,8 +64,8 @@ pub(super) const TUBE_ANCHOR_PALETTE: MarkerPalette = MarkerPalette {
     icon: MarkerIcon::Sphere,
 };
 pub(super) const ENTITY_SELECTED_PALETTE: MarkerPalette = MarkerPalette {
-    color: [0.95, 0.35, 0.25],
-    highlight: 1.0,
+    color: [0.98, 0.86, 0.32],
+    highlight: 0.95,
     icon: MarkerIcon::Ring,
 };
 pub(super) const ENTITY_ACTOR_PALETTE: MarkerPalette = MarkerPalette {
@@ -117,6 +117,7 @@ pub(super) fn entity_palette(kind: SceneEntityKind, is_selected: bool) -> Marker
     }
 }
 
+#[allow(dead_code)]
 pub(super) enum MarkerProjection<'a> {
     Perspective(&'a CameraProjector),
     TopDown {

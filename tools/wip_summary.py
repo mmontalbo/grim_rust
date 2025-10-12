@@ -39,6 +39,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Iterate with python tools/grim_viewer.py -- --headless to quickly validate the new 3D marker pass alongside existing overlays.",
                 "Document decoded asset formats in docs/runtime_smoke_tests.md or a new decoder README so refresh steps stay reproducible.",
                 "After regenerating meshes or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
+                "With the flat scene markers retired, spot-check the gold selection pointer and minimap overlays so interactions stay readable.",
             ],
         },
     ],
@@ -49,7 +50,7 @@ WIP_DATA: Dict[str, Any] = {
             "description": "Give the viewer a depth-aware render path that can draw markers and meshes in world space.",
             "prompt": (
                 "Use the instanced primitive meshes to mirror Manny/desk/tube anchors and verify depth and lighting in grim_viewer. "
-                "Feed the new pass with shared camera matrices, then migrate entity markers to use the 3D infrastructure before swapping in decoded assets."
+                "Keep iterating on the gold selection pointer while we retire the flat overlay pass, then move toward swapping in decoded assets."
             ),
         },
         {

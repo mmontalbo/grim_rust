@@ -56,14 +56,10 @@ struct TextureResources {
 /// Render pipelines and buffers needed for the plate and markers.
 struct RenderResources {
     quad_pipeline: wgpu::RenderPipeline,
-    marker_pipeline: wgpu::RenderPipeline,
     minimap_pipeline: wgpu::RenderPipeline,
     quad_vertex_buffer: wgpu::Buffer,
     quad_index_buffer: wgpu::Buffer,
     quad_index_count: u32,
-    scene_marker_vertex_buffer: wgpu::Buffer,
-    scene_marker_instance_buffer: wgpu::Buffer,
-    scene_marker_capacity: usize,
     minimap_marker_vertex_buffer: wgpu::Buffer,
     minimap_marker_instance_buffer: wgpu::Buffer,
     minimap_marker_capacity: usize,
@@ -566,14 +562,10 @@ fn assemble_viewer_state(
 
     let RenderResources {
         quad_pipeline,
-        marker_pipeline,
         minimap_pipeline,
         quad_vertex_buffer,
         quad_index_buffer,
         quad_index_count,
-        scene_marker_vertex_buffer,
-        scene_marker_instance_buffer,
-        scene_marker_capacity,
         minimap_marker_vertex_buffer,
         minimap_marker_instance_buffer,
         minimap_marker_capacity,
@@ -610,11 +602,7 @@ fn assemble_viewer_state(
         selected_entity,
         scrubber,
         camera_projector,
-        marker_pipeline,
         minimap_pipeline,
-        scene_marker_vertex_buffer,
-        scene_marker_instance_buffer,
-        scene_marker_capacity,
         minimap_marker_vertex_buffer,
         minimap_marker_instance_buffer,
         minimap_marker_capacity,
@@ -865,15 +853,8 @@ fn create_render_resources(
         push_constant_ranges: &[],
     });
 
-    // Scene-marker and minimap pipelines share the WGSL shader but keep separate pipelines
-    // so the render pass can swap between camera-space markers and the 2D minimap.
-    let marker_pipeline = create_marker_pipeline(
-        device,
-        &marker_pipeline_layout,
-        &marker_shader,
-        surface_format,
-        "scene-marker-pipeline",
-    );
+    // The minimap pipeline reuses the shared marker shader with its own label so render
+    // passes can bind it independently from the plate pipeline.
     let minimap_pipeline = create_marker_pipeline(
         device,
         &marker_pipeline_layout,
@@ -882,11 +863,6 @@ fn create_render_resources(
         "minimap-marker-pipeline",
     );
 
-    let scene_marker_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("scene-marker-vertex-buffer"),
-        contents: cast_slice(&MARKER_VERTICES),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
     let minimap_marker_vertex_buffer =
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("minimap-marker-vertex-buffer"),
@@ -895,12 +871,6 @@ fn create_render_resources(
         });
 
     let initial_marker_capacity = 4usize;
-    let scene_marker_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("scene-marker-instance-buffer"),
-        size: (initial_marker_capacity * std::mem::size_of::<MarkerInstance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let minimap_marker_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("minimap-marker-instance-buffer"),
         size: (initial_marker_capacity * std::mem::size_of::<MarkerInstance>()) as u64,
@@ -910,14 +880,10 @@ fn create_render_resources(
 
     RenderResources {
         quad_pipeline,
-        marker_pipeline,
         minimap_pipeline,
         quad_vertex_buffer,
         quad_index_buffer,
         quad_index_count,
-        scene_marker_vertex_buffer,
-        scene_marker_instance_buffer,
-        scene_marker_capacity: initial_marker_capacity,
         minimap_marker_vertex_buffer,
         minimap_marker_instance_buffer,
         minimap_marker_capacity: initial_marker_capacity,

@@ -3,12 +3,15 @@ use super::super::markers::{
     MarkerProjection, TUBE_ANCHOR_PALETTE, entity_palette,
 };
 use super::super::mesh::{
-    MeshInstance, PrimitiveKind, bounds_scale, instance_transform, view_projection_uniform,
+    MeshInstance, PrimitiveKind, bounds_scale, instance_transform, instance_transform_oriented,
+    view_projection_uniform,
 };
 use super::super::overlays::TextOverlay;
 use super::ViewerState;
 use super::layout;
 use bytemuck::cast_slice;
+use glam::Quat;
+use std::f32::consts::PI;
 use wgpu::SurfaceError;
 
 use crate::scene::{HotspotEventKind, SceneEntityKind, event_marker_style};
@@ -18,6 +21,10 @@ const DESK_ANCHOR_SCALE: f32 = 1.20;
 const TUBE_ANCHOR_SCALE: f32 = 1.25;
 const ENTITY_SCALE_BASE: f32 = 0.80;
 const ENTITY_SCALE_SELECTED: f32 = 1.00;
+const SELECTION_POINTER_SCALE: f32 = 0.60;
+const SELECTION_POINTER_TIP_OFFSET: f32 = 0.30;
+const SELECTION_POINTER_COLOR: [f32; 3] = [0.98, 0.86, 0.32];
+const SELECTION_POINTER_HIGHLIGHT: f32 = 1.0;
 
 const SCALE_MIN: f32 = 0.045;
 const SCALE_MAX: f32 = 3.5;
@@ -42,7 +49,6 @@ pub(super) fn render(state: &mut ViewerState) -> Result<(), SurfaceError> {
 
     draw_background(state, &view, &mut encoder);
     draw_scene_meshes(state, &view, &mut encoder);
-    draw_scene_markers(state, &view, &mut encoder);
     draw_minimap_markers(state, &view, &mut encoder);
     draw_overlays(state, &view, &mut encoder);
 
@@ -178,54 +184,6 @@ fn draw_scene_meshes(
             cone_range.offset..(cone_range.offset + cone_range.count),
         );
     }
-}
-
-fn draw_scene_markers(
-    state: &mut ViewerState,
-    view: &wgpu::TextureView,
-    encoder: &mut wgpu::CommandEncoder,
-) {
-    let marker_instances = build_marker_instances(state);
-    if marker_instances.is_empty() {
-        return;
-    }
-
-    ensure_scene_marker_capacity(state, marker_instances.len());
-    state.queue.write_buffer(
-        &state.scene_marker_instance_buffer,
-        0,
-        cast_slice(&marker_instances),
-    );
-
-    let mut marker_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("marker-pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-    });
-    let (vx, vy, vw, vh) = layout::plate_viewport(state);
-    marker_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
-    marker_pass.set_pipeline(&state.marker_pipeline);
-    marker_pass.set_vertex_buffer(0, state.scene_marker_vertex_buffer.slice(..));
-    let instance_byte_len = (marker_instances.len() * std::mem::size_of::<MarkerInstance>()) as u64;
-    marker_pass.set_vertex_buffer(
-        1,
-        state
-            .scene_marker_instance_buffer
-            .slice(0..instance_byte_len),
-    );
-    marker_pass.draw(
-        0..MARKER_VERTICES.len() as u32,
-        0..marker_instances.len() as u32,
-    );
 }
 
 fn draw_minimap_markers(
@@ -446,19 +404,44 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
             continue;
         };
         let is_selected = state.selected_entity == Some(idx);
-        let palette = entity_palette(entity.kind, is_selected);
+        let base_palette = entity_palette(entity.kind, false);
         let mut scale = scale_for_factor(base_scale, ENTITY_SCALE_BASE);
         if is_selected {
             scale = scale_for_factor(base_scale, ENTITY_SCALE_SELECTED);
         }
-        let highlight = if is_selected { 1.0 } else { palette.highlight };
+        let highlight = if is_selected {
+            base_palette.highlight.max(0.9)
+        } else {
+            base_palette.highlight
+        };
         groups.push(
             mesh_kind_for_entity(entity.kind),
             MeshInstance {
                 model: instance_transform(position, scale),
-                color: palette_to_color(palette.color, highlight),
+                color: palette_to_color(base_palette.color, highlight),
             },
         );
+
+        if is_selected {
+            let pointer_scale = scale_for_factor(base_scale, SELECTION_POINTER_SCALE);
+            let tip_offset = pointer_scale * SELECTION_POINTER_TIP_OFFSET;
+            let pointer_position = [
+                position[0],
+                position[1] + pointer_scale * 0.5 + tip_offset,
+                position[2],
+            ];
+            groups.push(
+                PrimitiveKind::Cone,
+                MeshInstance {
+                    model: instance_transform_oriented(
+                        pointer_position,
+                        pointer_scale,
+                        Quat::from_rotation_x(PI),
+                    ),
+                    color: palette_to_color(SELECTION_POINTER_COLOR, SELECTION_POINTER_HIGHLIGHT),
+                },
+            );
+        }
     }
 
     Some(groups)
@@ -487,155 +470,6 @@ fn palette_to_color(color: [f32; 3], highlight: f32) -> [f32; 4] {
 /// Clamp the derived instance scale to keep proxies from dwarfing the plate.
 fn scale_for_factor(base: f32, factor: f32) -> f32 {
     (base * factor).clamp(SCALE_MIN, SCALE_MAX)
-}
-
-fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
-    let mut instances = Vec::new();
-
-    let scene = match state.scene.as_ref() {
-        Some(scene) => scene,
-        None => return instances,
-    };
-
-    let projection = if let Some(projector) = state.camera_projector.as_ref() {
-        MarkerProjection::Perspective(projector)
-    } else {
-        let bounds = match scene.position_bounds.as_ref() {
-            Some(bounds) => bounds,
-            None => return instances,
-        };
-        let (horizontal_axis, vertical_axis) = bounds.top_down_axes();
-        let horizontal_min = bounds.min[horizontal_axis];
-        let vertical_min = bounds.min[vertical_axis];
-        let horizontal_span = (bounds.max[horizontal_axis] - horizontal_min).max(0.001);
-        let vertical_span = (bounds.max[vertical_axis] - vertical_min).max(0.001);
-        MarkerProjection::TopDown {
-            horizontal_axis,
-            vertical_axis,
-            horizontal_min,
-            vertical_min,
-            horizontal_span,
-            vertical_span,
-        }
-    };
-
-    let selected = state.selected_entity;
-    let mut push_marker = |label: &str,
-                           position: [f32; 3],
-                           size: f32,
-                           color: [f32; 3],
-                           highlight: f32,
-                           icon: MarkerIcon| {
-        if let Some(instance) =
-            projection.project_marker(Some(label), position, size, color, highlight, icon)
-        {
-            instances.push(instance);
-        }
-    };
-
-    let mut scrub_position: Option<[f32; 3]> = None;
-    if let Some(scrubber) = state.scrubber.as_ref() {
-        if let Some(scene) = state.scene.as_ref() {
-            if let Some(trace) = scene.movement_trace() {
-                scrub_position = scrubber.current_position(trace);
-            }
-        }
-    }
-
-    if let Some(position) = scene.entity_position("manny") {
-        let palette = MANNY_ANCHOR_PALETTE;
-        push_marker(
-            "manny",
-            position,
-            0.1,
-            palette.color,
-            palette.highlight,
-            palette.icon,
-        );
-    }
-
-    if let Some(position) = scene.entity_position("mo.computer") {
-        let palette = DESK_ANCHOR_PALETTE;
-        push_marker(
-            "mo.computer",
-            position,
-            0.08,
-            palette.color,
-            palette.highlight,
-            palette.icon,
-        );
-    }
-
-    if let Some(position) = scene
-        .entity_position("mo.tube")
-        .or_else(|| scene.entity_position("mo.tube.interest_actor"))
-    {
-        let palette = TUBE_ANCHOR_PALETTE;
-        push_marker(
-            "mo.tube",
-            position,
-            0.09,
-            palette.color,
-            palette.highlight,
-            palette.icon,
-        );
-    }
-
-    for (idx, entity) in scene.entities.iter().enumerate() {
-        let position = match entity.position {
-            Some(pos) => pos,
-            None => continue,
-        };
-
-        let is_selected = matches!(selected, Some(sel) if sel == idx);
-        let base_size = match entity.kind {
-            SceneEntityKind::Actor => 0.06,
-            SceneEntityKind::Object => 0.05,
-            SceneEntityKind::InterestActor => 0.045,
-        };
-        let size = if is_selected {
-            base_size * 1.2
-        } else {
-            base_size
-        };
-        let palette = entity_palette(entity.kind, is_selected);
-        push_marker(
-            entity.name.as_str(),
-            position,
-            size,
-            palette.color,
-            palette.highlight,
-            palette.icon,
-        );
-    }
-
-    if let (Some(scrub_position), Some(scene)) = (scrub_position, state.scene.as_ref()) {
-        let palette = MANNY_ANCHOR_PALETTE;
-        push_marker(
-            "scrubber.manny",
-            scrub_position,
-            0.11,
-            palette.color,
-            palette.highlight.max(0.9),
-            palette.icon,
-        );
-        for (idx, event) in scene.hotspot_events().iter().enumerate() {
-            if matches!(event.kind(), HotspotEventKind::Selection) {
-                if Some(idx) == state.selected_entity {
-                    push_marker(
-                        "scrubber.selection",
-                        scrub_position,
-                        0.12,
-                        [0.98, 0.93, 0.32],
-                        0.95,
-                        MarkerIcon::Ring,
-                    );
-                }
-            }
-        }
-    }
-
-    instances
 }
 
 fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
@@ -840,22 +674,6 @@ fn event_marker_icon(kind: HotspotEventKind) -> MarkerIcon {
         HotspotEventKind::Selection => MarkerIcon::Ring,
         HotspotEventKind::Other => MarkerIcon::Accent,
     }
-}
-
-fn ensure_scene_marker_capacity(state: &mut ViewerState, required: usize) {
-    if required <= state.scene_marker_capacity {
-        return;
-    }
-
-    let new_capacity = required.next_power_of_two().max(4);
-    let new_size = (new_capacity * std::mem::size_of::<MarkerInstance>()) as u64;
-    state.scene_marker_instance_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("scene-marker-instance-buffer"),
-        size: new_size,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    state.scene_marker_capacity = new_capacity;
 }
 
 fn ensure_minimap_marker_capacity(state: &mut ViewerState, required: usize) {

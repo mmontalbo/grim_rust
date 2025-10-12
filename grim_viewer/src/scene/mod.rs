@@ -645,7 +645,7 @@ pub fn print_movement_trace_summary(trace: &MovementTrace) {
         println!("  yaw range: {:.3} – {:.3}", min_yaw, max_yaw);
     }
     println!(
-        "  Overlay markers: jade = desk anchor, violet = path, amber = tube anchor, teal = Manny, gold = highlighted hotspot, red = entity selection."
+        "  Overlay markers: jade = desk anchor, violet = path, amber = tube anchor, teal = Manny, gold = highlighted hotspot/selection."
     );
     println!("  Scrubber controls: '['/']' step Manny frames; '{{'/'}}' jump head-target markers.");
 }
