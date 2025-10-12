@@ -66,6 +66,9 @@ impl CameraParameters {
             up = Vec3::Y;
         }
 
+        let right = forward.cross(up).normalize();
+        let up = right.cross(forward).normalize();
+
         let view = Mat4::look_at_rh(eye, target, up.normalize());
         let projection = Mat4::perspective_rh(
             self.fov_degrees.to_radians(),
@@ -76,6 +79,11 @@ impl CameraParameters {
 
         Some(CameraProjector {
             view_projection: projection * view,
+            position: eye,
+            forward,
+            up,
+            right,
+            near: self.near_clip,
         })
     }
 }
@@ -83,6 +91,11 @@ impl CameraParameters {
 #[derive(Debug, Clone)]
 pub struct CameraProjector {
     view_projection: Mat4,
+    position: Vec3,
+    forward: Vec3,
+    up: Vec3,
+    right: Vec3,
+    near: f32,
 }
 
 impl CameraProjector {
@@ -105,6 +118,18 @@ impl CameraProjector {
 
     pub fn view_projection_matrix(&self) -> Mat4 {
         self.view_projection
+    }
+
+    pub fn position(&self) -> Vec3 {
+        self.position
+    }
+
+    pub fn basis(&self) -> (Vec3, Vec3, Vec3) {
+        (self.right, self.up, self.forward)
+    }
+
+    pub fn near_plane(&self) -> f32 {
+        self.near
     }
 }
 

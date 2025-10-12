@@ -10,11 +10,11 @@ use super::super::overlays::TextOverlay;
 use super::ViewerState;
 use super::layout;
 use bytemuck::cast_slice;
-use glam::Quat;
-use std::f32::consts::PI;
+use glam::{Quat, Vec3};
+use std::f32::consts::FRAC_PI_2;
 use wgpu::SurfaceError;
 
-use crate::scene::{HotspotEventKind, SceneEntityKind, event_marker_style};
+use crate::scene::{CameraProjector, HotspotEventKind, SceneEntityKind, event_marker_style};
 
 const MANNY_ANCHOR_SCALE: f32 = 1.35;
 const DESK_ANCHOR_SCALE: f32 = 1.20;
@@ -25,6 +25,16 @@ const SELECTION_POINTER_SCALE: f32 = 0.60;
 const SELECTION_POINTER_TIP_OFFSET: f32 = 0.30;
 const SELECTION_POINTER_COLOR: [f32; 3] = [0.98, 0.86, 0.32];
 const SELECTION_POINTER_HIGHLIGHT: f32 = 1.0;
+const AXIS_GIZMO_SCALE: f32 = 0.48;
+const AXIS_GIZMO_DISTANCE_FACTOR: f32 = 2.8;
+const AXIS_GIZMO_SCREEN_OFFSET: f32 = 1.4;
+const AXIS_GIZMO_ORIGIN_RATIO: f32 = 0.35;
+const AXIS_GIZMO_HIGHLIGHT: f32 = 0.78;
+const AXIS_ORIGIN_HIGHLIGHT: f32 = 0.45;
+const AXIS_X_COLOR: [f32; 3] = [0.94, 0.36, 0.3];
+const AXIS_Y_COLOR: [f32; 3] = [0.32, 0.9, 0.52];
+const AXIS_Z_COLOR: [f32; 3] = [0.32, 0.63, 0.95];
+const AXIS_ORIGIN_COLOR: [f32; 3] = [0.84, 0.86, 0.92];
 
 const SCALE_MIN: f32 = 0.045;
 const SCALE_MAX: f32 = 3.5;
@@ -427,8 +437,8 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
             let tip_offset = pointer_scale * SELECTION_POINTER_TIP_OFFSET;
             let pointer_position = [
                 position[0],
-                position[1] + pointer_scale * 0.5 + tip_offset,
-                position[2],
+                position[1],
+                position[2] + pointer_scale * 0.5 + tip_offset,
             ];
             groups.push(
                 PrimitiveKind::Cone,
@@ -436,12 +446,16 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
                     model: instance_transform_oriented(
                         pointer_position,
                         pointer_scale,
-                        Quat::from_rotation_x(PI),
+                        Quat::from_rotation_x(-FRAC_PI_2),
                     ),
                     color: palette_to_color(SELECTION_POINTER_COLOR, SELECTION_POINTER_HIGHLIGHT),
                 },
             );
         }
+    }
+
+    if let Some(camera) = state.camera_projector.as_ref() {
+        push_axis_gizmo(&mut groups, camera, base_scale);
     }
 
     Some(groups)
@@ -453,6 +467,46 @@ fn mesh_kind_for_entity(kind: SceneEntityKind) -> PrimitiveKind {
         SceneEntityKind::Object => PrimitiveKind::Cube,
         SceneEntityKind::InterestActor => PrimitiveKind::Cone,
     }
+}
+
+fn push_axis_gizmo(groups: &mut MeshInstanceGroups, camera: &CameraProjector, base_scale: f32) {
+    let gizmo_scale = scale_for_factor(base_scale, AXIS_GIZMO_SCALE);
+    if !gizmo_scale.is_finite() || gizmo_scale <= 0.0 {
+        return;
+    }
+
+    let (right, up, forward) = camera.basis();
+    let distance = camera.near_plane().max(0.2) * AXIS_GIZMO_DISTANCE_FACTOR + gizmo_scale;
+    let offset = right * (gizmo_scale * AXIS_GIZMO_SCREEN_OFFSET)
+        + up * (gizmo_scale * AXIS_GIZMO_SCREEN_OFFSET);
+    let origin = camera.position() + forward * distance + offset;
+
+    let axes = [
+        (Vec3::X, AXIS_X_COLOR),
+        (Vec3::Y, AXIS_Y_COLOR),
+        (Vec3::Z, AXIS_Z_COLOR),
+    ];
+
+    for (direction, color) in axes {
+        let rotation = Quat::from_rotation_arc(Vec3::Y, direction);
+        let translation = origin + direction * (gizmo_scale * 0.5);
+        groups.push(
+            PrimitiveKind::Cone,
+            MeshInstance {
+                model: instance_transform_oriented(translation.to_array(), gizmo_scale, rotation),
+                color: palette_to_color(color, AXIS_GIZMO_HIGHLIGHT),
+            },
+        );
+    }
+
+    let origin_scale = gizmo_scale * AXIS_GIZMO_ORIGIN_RATIO;
+    groups.push(
+        PrimitiveKind::Sphere,
+        MeshInstance {
+            model: instance_transform(origin.to_array(), origin_scale),
+            color: palette_to_color(AXIS_ORIGIN_COLOR, AXIS_ORIGIN_HIGHLIGHT),
+        },
+    );
 }
 
 /// Turn the 2D marker palette into a lit RGBA color for the mesh proxy.
