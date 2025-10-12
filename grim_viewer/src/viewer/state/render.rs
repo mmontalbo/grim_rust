@@ -10,7 +10,7 @@ use super::super::overlays::TextOverlay;
 use super::ViewerState;
 use super::layout;
 use bytemuck::cast_slice;
-use glam::{Mat4, Quat, Vec3, Vec4};
+use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
 use wgpu::SurfaceError;
 
 use crate::scene::{CameraProjector, HotspotEventKind, SceneEntityKind, event_marker_style};
@@ -121,6 +121,7 @@ fn draw_scene_meshes(
     let mesh = state.mesh.as_ref().expect("mesh resources present");
 
     let mut combined = Vec::with_capacity(total_instances);
+    let manny_range = append_instances(&mut combined, &groups.manny);
     let sphere_range = append_instances(&mut combined, &groups.sphere);
     let cube_range = append_instances(&mut combined, &groups.cube);
     let cone_range = append_instances(&mut combined, &groups.cone);
@@ -165,6 +166,21 @@ fn draw_scene_meshes(
 
     let instance_bytes = (combined.len() * std::mem::size_of::<MeshInstance>()) as u64;
     mesh_pass.set_vertex_buffer(1, mesh.instance_buffer.slice(0..instance_bytes));
+
+    if manny_range.count > 0 {
+        if let Some(manny_mesh) = mesh.manny.as_ref() {
+            mesh_pass.set_vertex_buffer(0, manny_mesh.buffers.vertex.slice(..));
+            mesh_pass.set_index_buffer(
+                manny_mesh.buffers.index.slice(..),
+                wgpu::IndexFormat::Uint16,
+            );
+            mesh_pass.draw_indexed(
+                0..manny_mesh.buffers.index_count,
+                0,
+                manny_range.offset..(manny_range.offset + manny_range.count),
+            );
+        }
+    }
 
     if sphere_range.count > 0 {
         mesh_pass.set_vertex_buffer(0, mesh.sphere.vertex.slice(..));
@@ -300,6 +316,7 @@ fn draw_overlay(
 /// Buckets mesh instances by primitive so each draw call stays compact.
 #[derive(Default)]
 struct MeshInstanceGroups {
+    manny: Vec<MeshInstance>,
     sphere: Vec<MeshInstance>,
     cube: Vec<MeshInstance>,
     cone: Vec<MeshInstance>,
@@ -307,7 +324,7 @@ struct MeshInstanceGroups {
 
 impl MeshInstanceGroups {
     fn total_instances(&self) -> usize {
-        self.sphere.len() + self.cube.len() + self.cone.len()
+        self.manny.len() + self.sphere.len() + self.cube.len() + self.cone.len()
     }
 
     fn push(&mut self, kind: PrimitiveKind, instance: MeshInstance) {
@@ -316,6 +333,10 @@ impl MeshInstanceGroups {
             PrimitiveKind::Cube => self.cube.push(instance),
             PrimitiveKind::Cone => self.cone.push(instance),
         }
+    }
+
+    fn push_manny(&mut self, instance: MeshInstance) {
+        self.manny.push(instance);
     }
 }
 
@@ -333,6 +354,58 @@ fn append_instances(target: &mut Vec<MeshInstance>, source: &[MeshInstance]) -> 
         offset,
         count: source.len() as u32,
     }
+}
+
+fn manny_mesh_instance(
+    position: [f32; 3],
+    rotation_degrees: Option<[f32; 3]>,
+    base_scale: f32,
+    mesh: &super::MannyMesh,
+    color: [f32; 4],
+) -> MeshInstance {
+    let anchor_scale = scale_for_factor(base_scale, MANNY_ANCHOR_SCALE);
+    let radius = mesh.radius.unwrap_or(0.0).abs();
+    let mut scale = if radius > 1e-4 {
+        anchor_scale / radius
+    } else {
+        anchor_scale
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        scale = anchor_scale;
+    }
+    scale = scale.min(SCALE_MAX);
+    let rotation = rotation_degrees
+        .map(rotation_from_degrees)
+        .unwrap_or(Quat::IDENTITY);
+    let model = manny_model_matrix(position, rotation, scale, mesh.insert_offset);
+    MeshInstance {
+        model: model.to_cols_array_2d(),
+        color,
+    }
+}
+
+fn rotation_from_degrees(rotation: [f32; 3]) -> Quat {
+    Quat::from_euler(
+        EulerRot::XYZ,
+        rotation[0].to_radians(),
+        rotation[1].to_radians(),
+        rotation[2].to_radians(),
+    )
+}
+
+fn manny_model_matrix(
+    position: [f32; 3],
+    rotation: Quat,
+    scale: f32,
+    insert_offset: Option<[f32; 3]>,
+) -> Mat4 {
+    let translation = Mat4::from_translation(Vec3::from_array(position));
+    let rotation = Mat4::from_quat(rotation);
+    let scale = Mat4::from_scale(Vec3::splat(scale.max(1e-4)));
+    let offset = insert_offset
+        .map(|offset| Mat4::from_translation(-Vec3::from_array(offset)))
+        .unwrap_or(Mat4::IDENTITY);
+    translation * rotation * scale * offset
 }
 
 /// Grow the shared instance buffer if the current frame needs more slots.
@@ -365,18 +438,35 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
     let base_scale = bounds_scale(scene.position_bounds.as_ref());
     let mut groups = MeshInstanceGroups::default();
 
+    let manny_mesh = state
+        .mesh
+        .as_ref()
+        .and_then(|resources| resources.manny.as_ref());
+    let manny_mesh_loaded = manny_mesh.is_some();
+    let manny_entity = scene
+        .entities
+        .iter()
+        .find(|entity| entity.name.eq_ignore_ascii_case("manny"));
+
     if let Some(position) = scene.entity_position("manny") {
         let palette = MANNY_ANCHOR_PALETTE;
-        groups.push(
-            PrimitiveKind::Sphere,
-            MeshInstance {
-                model: instance_transform(
-                    position,
-                    scale_for_factor(base_scale, MANNY_ANCHOR_SCALE),
-                ),
-                color: palette_to_color(palette.color, palette.highlight.max(0.6)),
-            },
-        );
+        let color = palette_to_color(palette.color, palette.highlight.max(0.6));
+        if let Some(mesh) = manny_mesh {
+            let rotation = manny_entity.and_then(|entity| entity.rotation);
+            let instance = manny_mesh_instance(position, rotation, base_scale, mesh, color);
+            groups.push_manny(instance);
+        } else {
+            groups.push(
+                PrimitiveKind::Sphere,
+                MeshInstance {
+                    model: instance_transform(
+                        position,
+                        scale_for_factor(base_scale, MANNY_ANCHOR_SCALE),
+                    ),
+                    color,
+                },
+            );
+        }
     }
 
     if let Some(position) = scene.entity_position("mo.computer") {
@@ -427,18 +517,20 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         } else {
             base_palette.highlight
         };
-        // Keep each primitive tied to the scene entity's timeline category. The
-        // Manny anchor sphere (above) and the cube/cone pairs for desk, cards,
-        // and tube all share transforms injected by
-        // scene::manny::apply_geometry_overrides,
-        // so the proxies deliberately overlap until decoded meshes land.
-        groups.push(
-            mesh_kind_for_entity(entity.kind),
-            MeshInstance {
-                model: instance_transform(position, scale),
-                color: palette_to_color(base_palette.color, highlight),
-            },
-        );
+        let skip_mesh = manny_mesh_loaded && entity.name.eq_ignore_ascii_case("manny");
+        if !skip_mesh {
+            // Keep each primitive tied to the scene entity's timeline category. The
+            // cube/cone pairs for desk, cards, and tube all share transforms injected
+            // by scene::manny::apply_geometry_overrides, so the proxies deliberately
+            // overlap until decoded meshes replace them.
+            groups.push(
+                mesh_kind_for_entity(entity.kind),
+                MeshInstance {
+                    model: instance_transform(position, scale),
+                    color: palette_to_color(base_palette.color, highlight),
+                },
+            );
+        }
 
         if is_selected {
             let pointer_scale = scale_for_factor(base_scale, SELECTION_POINTER_SCALE);

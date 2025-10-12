@@ -14,7 +14,7 @@ use super::layout;
 use super::overlay_updates;
 use super::panels::ViewerOverlays;
 use super::selection;
-use super::{MeshResources, PrimitiveBuffers, ViewerState};
+use super::{MannyMesh, MeshResources, PrimitiveBuffers, ViewerState};
 use anyhow::{Context, Result};
 use bytemuck::cast_slice;
 use glam::Mat4;
@@ -745,7 +745,7 @@ fn create_mesh_resources(
 
     let (depth_texture, depth_view) = create_mesh_depth_texture(device, size);
 
-    let manny_buffers = manny_mesh.map(|asset| {
+    let manny_resources = manny_mesh.map(|asset| {
         let AssetMesh {
             name,
             primitive,
@@ -761,7 +761,12 @@ fn create_mesh_resources(
             "[grim_viewer] Manny mesh loaded: {} vertices, {} triangles, bounds min {:?}, max {:?}, radius {:?}, insert {:?}",
             vertex_count, triangle_count, bounds_min, bounds_max, radius, insert_offset
         );
-        upload_primitive(device, label, primitive)
+        let buffers = upload_primitive(device, label, primitive);
+        MannyMesh {
+            buffers,
+            radius,
+            insert_offset,
+        }
     });
 
     MeshResources {
@@ -775,7 +780,7 @@ fn create_mesh_resources(
         sphere: sphere_buffers,
         cube: cube_buffers,
         cone: cone_buffers,
-        manny: manny_buffers,
+        manny: manny_resources,
     }
 }
 

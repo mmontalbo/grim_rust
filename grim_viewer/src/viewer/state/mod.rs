@@ -129,11 +129,17 @@ pub(super) struct MeshResources {
     pub cube: PrimitiveBuffers,
     pub cone: PrimitiveBuffers,
     #[allow(dead_code)]
-    pub manny: Option<PrimitiveBuffers>,
+    pub manny: Option<MannyMesh>,
 }
 
 pub(super) struct PrimitiveBuffers {
     pub vertex: wgpu::Buffer,
     pub index: wgpu::Buffer,
     pub index_count: u32,
+}
+
+pub(super) struct MannyMesh {
+    pub buffers: PrimitiveBuffers,
+    pub radius: Option<f32>,
+    pub insert_offset: Option<[f32; 3]>,
 }
