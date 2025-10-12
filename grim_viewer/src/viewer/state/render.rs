@@ -10,8 +10,7 @@ use super::super::overlays::TextOverlay;
 use super::ViewerState;
 use super::layout;
 use bytemuck::cast_slice;
-use glam::{Quat, Vec3};
-use std::f32::consts::FRAC_PI_2;
+use glam::{Mat4, Quat, Vec3, Vec4};
 use wgpu::SurfaceError;
 
 use crate::scene::{CameraProjector, HotspotEventKind, SceneEntityKind, event_marker_style};
@@ -22,12 +21,14 @@ const TUBE_ANCHOR_SCALE: f32 = 1.25;
 const ENTITY_SCALE_BASE: f32 = 0.80;
 const ENTITY_SCALE_SELECTED: f32 = 1.00;
 const SELECTION_POINTER_SCALE: f32 = 0.60;
-const SELECTION_POINTER_TIP_OFFSET: f32 = 0.30;
+const SELECTION_POINTER_APEX_LIFT: f32 = 1.10;
+const SELECTION_POINTER_CLEARANCE: f32 = 0.12;
 const SELECTION_POINTER_COLOR: [f32; 3] = [0.98, 0.86, 0.32];
 const SELECTION_POINTER_HIGHLIGHT: f32 = 1.0;
 const AXIS_GIZMO_SCALE: f32 = 0.48;
-const AXIS_GIZMO_DISTANCE_FACTOR: f32 = 2.8;
-const AXIS_GIZMO_SCREEN_OFFSET: f32 = 1.4;
+const AXIS_GIZMO_MARGIN: f32 = 0.07;
+const AXIS_GIZMO_DISTANCE: f32 = 16.0;
+const AXIS_GIZMO_FORWARD_OFFSET: f32 = 0.65;
 const AXIS_GIZMO_ORIGIN_RATIO: f32 = 0.35;
 const AXIS_GIZMO_HIGHLIGHT: f32 = 0.78;
 const AXIS_ORIGIN_HIGHLIGHT: f32 = 0.45;
@@ -409,6 +410,8 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         );
     }
 
+    let pointer_rotation = Quat::from_rotation_arc(Vec3::Y, -Vec3::Z);
+
     for (idx, entity) in scene.entities.iter().enumerate() {
         let Some(position) = entity.position else {
             continue;
@@ -434,19 +437,17 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
 
         if is_selected {
             let pointer_scale = scale_for_factor(base_scale, SELECTION_POINTER_SCALE);
-            let tip_offset = pointer_scale * SELECTION_POINTER_TIP_OFFSET;
-            let pointer_position = [
-                position[0],
-                position[1],
-                position[2] + pointer_scale * 0.5 + tip_offset,
-            ];
+            let apex_height = position[2]
+                + pointer_scale * SELECTION_POINTER_APEX_LIFT
+                + SELECTION_POINTER_CLEARANCE;
+            let pointer_position = [position[0], position[1], apex_height + pointer_scale * 0.5];
             groups.push(
                 PrimitiveKind::Cone,
                 MeshInstance {
                     model: instance_transform_oriented(
                         pointer_position,
                         pointer_scale,
-                        Quat::from_rotation_x(-FRAC_PI_2),
+                        pointer_rotation,
                     ),
                     color: palette_to_color(SELECTION_POINTER_COLOR, SELECTION_POINTER_HIGHLIGHT),
                 },
@@ -476,10 +477,14 @@ fn push_axis_gizmo(groups: &mut MeshInstanceGroups, camera: &CameraProjector, ba
     }
 
     let (right, up, forward) = camera.basis();
-    let distance = camera.near_plane().max(0.2) * AXIS_GIZMO_DISTANCE_FACTOR + gizmo_scale;
-    let offset = right * (gizmo_scale * AXIS_GIZMO_SCREEN_OFFSET)
-        + up * (gizmo_scale * AXIS_GIZMO_SCREEN_OFFSET);
-    let origin = camera.position() + forward * distance + offset;
+    let inv_view_proj = camera.view_projection_matrix().inverse();
+    let margin = AXIS_GIZMO_MARGIN.clamp(0.0, 0.45);
+    let forward_offset = gizmo_scale * AXIS_GIZMO_FORWARD_OFFSET;
+    let gizmo_reach = camera.near_plane().max(0.2) + base_scale * AXIS_GIZMO_DISTANCE;
+    let origin = gizmo_origin(camera, inv_view_proj, margin, forward_offset, gizmo_reach)
+        .unwrap_or_else(|| {
+            camera.position() + forward * gizmo_reach + right * gizmo_scale + up * gizmo_scale
+        });
 
     let axes = [
         (Vec3::X, AXIS_X_COLOR),
@@ -507,6 +512,38 @@ fn push_axis_gizmo(groups: &mut MeshInstanceGroups, camera: &CameraProjector, ba
             color: palette_to_color(AXIS_ORIGIN_COLOR, AXIS_ORIGIN_HIGHLIGHT),
         },
     );
+}
+
+fn gizmo_origin(
+    camera: &CameraProjector,
+    inverse_view_proj: Mat4,
+    margin: f32,
+    forward_offset: f32,
+    reach: f32,
+) -> Option<Vec3> {
+    // Anchor the gizmo to the plate by unprojecting the top-right near-plane corner
+    // and marching along that ray to a stable distance.
+    let ndc_x = 1.0 - margin;
+    let ndc_y = 1.0 - margin;
+    let ndc_z = 0.0;
+    let clip = Vec4::new(ndc_x, ndc_y, ndc_z * 2.0 - 1.0, 1.0);
+    let world = inverse_view_proj * clip;
+    if world.w.abs() <= f32::EPSILON {
+        return None;
+    }
+    let corner = world.truncate() / world.w;
+    if !corner.is_finite() {
+        return None;
+    }
+    let camera_pos = camera.position();
+    let direction = corner - camera_pos;
+    if direction.length_squared() <= f32::EPSILON {
+        return None;
+    }
+    let mut position = camera_pos + direction.normalize() * reach;
+    let (_, _, forward) = camera.basis();
+    position += forward * forward_offset;
+    Some(position)
 }
 
 /// Turn the 2D marker palette into a lit RGBA color for the mesh proxy.
