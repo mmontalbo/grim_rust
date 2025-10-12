@@ -29,7 +29,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Immediate Focus",
             "body": [
                 "Exercise the new primitive mesh pass with Manny, desk, and tube anchors so we can confirm depth/parallax and selection highlights before swapping in decoded assets.",
-                "Convert Manny’s staged 3DO mesh into a viewer-ready buffer that can replace the sphere proxy inside grim_viewer.",
+                "Hook grim_viewer up to the exported Manny mesh JSON and retire the sphere proxy.",
                 "Run the Manny office interaction traces after each rendering change to ensure computer triggers and fallback handling remain stable.",
             ],
         },
@@ -39,6 +39,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Iterate with python tools/grim_viewer.py -- --headless to quickly validate the new 3D marker pass alongside existing overlays.",
                 "Document decoded asset formats in docs/runtime_smoke_tests.md or a new decoder README so refresh steps stay reproducible.",
                 "Use `cargo run -p grim_formats --bin cos_extract -- --cos artifacts/manny_assets/ma_note_type.cos --dest artifacts/run_cache/manny_mesh` to refresh the staged Manny meshes.",
+                "Use `cargo run -p grim_formats --bin three_do_export -- --input artifacts/run_cache/manny_mesh/mannysuit.3do --output artifacts/run_cache/manny_mesh/mannysuit_mesh.json --pretty` to regenerate the viewer-ready JSON.",
                 "Use `cargo run -p grim_formats --bin cos_dump -- <costume>` to inspect costume component lists before wiring up 3DO decoding.",
                 "After regenerating meshes or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
                 "With the flat scene markers retired, spot-check the gold selection pointer and minimap overlays so interactions stay readable.",

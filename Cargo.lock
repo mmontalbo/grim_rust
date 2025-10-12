@@ -1022,8 +1022,11 @@ name = "grim_formats"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "clap",
  "memmap2",
+ "serde",
+ "serde_json",
  "tempfile",
  "walkdir",
 ]
