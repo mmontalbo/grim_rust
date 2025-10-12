@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use glam::{Mat4, Quat, Vec3};
+use glam::{EulerRot, Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use crate::scene::SceneBounds;
@@ -267,6 +267,8 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
     let mut bounds_min = [f32::INFINITY; 3];
     let mut bounds_max = [f32::NEG_INFINITY; 3];
     let mut triangle_count = 0usize;
+    let mesh_transforms = compute_mesh_transforms(&export);
+    let mut mesh_index = 0usize;
 
     for geoset in &export.geosets {
         for mesh in &geoset.meshes {
@@ -279,15 +281,25 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
                 );
             }
 
+            let transform = mesh_transforms
+                .get(mesh_index)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
+            let normal_matrix = Mat3::from_mat4(transform);
+
             let base_index = vertices.len();
             for (position, normal) in mesh.vertices.iter().zip(mesh.vertex_normals.iter()) {
+                let local_position = Vec3::from_array(*position);
+                let local_normal = Vec3::from_array(*normal);
+                let world = transform.transform_point3(local_position);
+                let transformed_normal = (normal_matrix * local_normal).normalize_or_zero();
                 vertices.push(MeshVertex {
-                    position: *position,
-                    normal: *normal,
+                    position: world.into(),
+                    normal: transformed_normal.into(),
                 });
                 for axis in 0..3 {
-                    bounds_min[axis] = bounds_min[axis].min(position[axis]);
-                    bounds_max[axis] = bounds_max[axis].max(position[axis]);
+                    bounds_min[axis] = bounds_min[axis].min(world[axis]);
+                    bounds_max[axis] = bounds_max[axis].max(world[axis]);
                 }
             }
 
@@ -320,6 +332,7 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
                 indices.extend_from_slice(&converted);
                 triangle_count += 1;
             }
+            mesh_index += 1;
         }
     }
 
@@ -349,11 +362,27 @@ struct ExportModel {
     radius: Option<f32>,
     #[serde(default)]
     insert_offset: Option<[f32; 3]>,
+    #[serde(default)]
+    nodes: Vec<ExportNode>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ExportGeoset {
     meshes: Vec<ExportMesh>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportNode {
+    #[serde(default)]
+    mesh_index: Option<usize>,
+    #[serde(default)]
+    parent: Option<usize>,
+    #[serde(default = "zero_vec3")]
+    pivot: [f32; 3],
+    #[serde(default = "zero_vec3")]
+    position: [f32; 3],
+    #[serde(default = "zero_vec3")]
+    rotation_yaw_pitch_roll: [f32; 3],
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,6 +397,71 @@ struct ExportMesh {
 #[derive(Debug, Deserialize)]
 struct ExportTriangle {
     vertex_indices: [u32; 3],
+}
+
+fn zero_vec3() -> [f32; 3] {
+    [0.0, 0.0, 0.0]
+}
+
+fn compute_mesh_transforms(model: &ExportModel) -> Vec<Mat4> {
+    let total_meshes: usize = model.geosets.iter().map(|geoset| geoset.meshes.len()).sum();
+    if model.nodes.is_empty() || total_meshes == 0 {
+        return vec![Mat4::IDENTITY; total_meshes];
+    }
+    let node_transforms = compute_node_world_transforms(&model.nodes);
+    let mut mesh_transforms = vec![Mat4::IDENTITY; total_meshes];
+    for (idx, node) in model.nodes.iter().enumerate() {
+        if let Some(mesh_index) = node.mesh_index {
+            if mesh_index < mesh_transforms.len() {
+                mesh_transforms[mesh_index] = node_transforms[idx];
+            }
+        }
+    }
+    mesh_transforms
+}
+
+fn compute_node_world_transforms(nodes: &[ExportNode]) -> Vec<Mat4> {
+    let mut cache: Vec<Option<Mat4>> = vec![None; nodes.len()];
+    for idx in 0..nodes.len() {
+        resolve_node_transform(idx, nodes, &mut cache);
+    }
+    cache
+        .into_iter()
+        .map(|matrix| matrix.unwrap_or(Mat4::IDENTITY))
+        .collect()
+}
+
+fn resolve_node_transform(
+    idx: usize,
+    nodes: &[ExportNode],
+    cache: &mut [Option<Mat4>],
+) -> Mat4 {
+    if let Some(transform) = cache[idx] {
+        return transform;
+    }
+    let node = &nodes[idx];
+    let local = node_local_transform(node);
+    let world = if let Some(parent_idx) = node.parent {
+        let parent = resolve_node_transform(parent_idx, nodes, cache);
+        parent * local
+    } else {
+        local
+    };
+    cache[idx] = Some(world);
+    world
+}
+
+fn node_local_transform(node: &ExportNode) -> Mat4 {
+    let pivot = Vec3::from_array(node.pivot);
+    let position = Vec3::from_array(node.position);
+    let yaw = node.rotation_yaw_pitch_roll.get(0).copied().unwrap_or(0.0).to_radians();
+    let pitch = node.rotation_yaw_pitch_roll.get(1).copied().unwrap_or(0.0).to_radians();
+    let roll = node.rotation_yaw_pitch_roll.get(2).copied().unwrap_or(0.0).to_radians();
+    let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+    Mat4::from_translation(position)
+        * Mat4::from_translation(pivot)
+        * Mat4::from_quat(rotation)
+        * Mat4::from_translation(-pivot)
 }
 
 fn build_cone(segments: u32) -> MeshPrimitive {
