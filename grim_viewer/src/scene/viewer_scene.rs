@@ -86,16 +86,25 @@ pub struct CameraProjector {
 }
 
 impl CameraProjector {
-    pub fn project(&self, position: [f32; 3]) -> Option<[f32; 2]> {
+    pub fn project_ndc(&self, position: [f32; 3]) -> Option<[f32; 3]> {
         let clip = self.view_projection * Vec4::new(position[0], position[1], position[2], 1.0);
         if clip.w <= 0.0 {
             return None;
         }
         let ndc = clip.truncate() / clip.w;
-        if !ndc.x.is_finite() || !ndc.y.is_finite() {
+        if !ndc.x.is_finite() || !ndc.y.is_finite() || !ndc.z.is_finite() {
             return None;
         }
-        Some([ndc.x, ndc.y])
+        Some([ndc.x, ndc.y, ndc.z])
+    }
+
+    #[allow(dead_code)]
+    pub fn project(&self, position: [f32; 3]) -> Option<[f32; 2]> {
+        self.project_ndc(position).map(|ndc| [ndc[0], ndc[1]])
+    }
+
+    pub fn view_projection_matrix(&self) -> Mat4 {
+        self.view_projection
     }
 }
 

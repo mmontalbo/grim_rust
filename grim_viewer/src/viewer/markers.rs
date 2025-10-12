@@ -12,49 +12,76 @@ pub(super) struct MarkerVertex {
     pub position: [f32; 2],
 }
 
-#[repr(C, align(16))]
+#[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(super) struct MarkerInstance {
     pub translate: [f32; 2],
+    pub depth: f32,
     pub size: f32,
     pub highlight: f32,
     pub color: [f32; 3],
-    pub _padding: f32,
+    pub icon: f32,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct MarkerPalette {
     pub color: [f32; 3],
     pub highlight: f32,
+    pub icon: MarkerIcon,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MarkerIcon {
+    Sphere = 0,
+    Diamond = 1,
+    Square = 2,
+    Ring = 3,
+    Star = 4,
+    Panel = 5,
+    Path = 6,
+    Accent = 7,
+}
+
+impl MarkerIcon {
+    pub fn id(self) -> f32 {
+        self as u32 as f32
+    }
 }
 
 pub(super) const MANNY_ANCHOR_PALETTE: MarkerPalette = MarkerPalette {
     color: [0.2, 0.95, 0.85],
     highlight: 1.0,
+    icon: MarkerIcon::Star,
 };
 pub(super) const DESK_ANCHOR_PALETTE: MarkerPalette = MarkerPalette {
     color: [0.28, 0.82, 0.52],
     highlight: 0.45,
+    icon: MarkerIcon::Square,
 };
 pub(super) const TUBE_ANCHOR_PALETTE: MarkerPalette = MarkerPalette {
     color: [0.98, 0.74, 0.28],
     highlight: 0.65,
+    icon: MarkerIcon::Sphere,
 };
 pub(super) const ENTITY_SELECTED_PALETTE: MarkerPalette = MarkerPalette {
     color: [0.95, 0.35, 0.25],
     highlight: 1.0,
+    icon: MarkerIcon::Ring,
 };
 pub(super) const ENTITY_ACTOR_PALETTE: MarkerPalette = MarkerPalette {
     color: [0.2, 0.85, 0.6],
     highlight: 0.0,
+    icon: MarkerIcon::Diamond,
 };
 pub(super) const ENTITY_OBJECT_PALETTE: MarkerPalette = MarkerPalette {
     color: [0.25, 0.6, 0.95],
     highlight: 0.0,
+    icon: MarkerIcon::Square,
 };
 pub(super) const ENTITY_INTEREST_PALETTE: MarkerPalette = MarkerPalette {
     color: [0.85, 0.7, 0.25],
     highlight: 0.0,
+    icon: MarkerIcon::Accent,
 };
 
 pub(super) const MARKER_VERTICES: [MarkerVertex; 6] = [
@@ -112,9 +139,11 @@ pub(super) enum MarkerProjection<'a> {
 }
 
 impl<'a> MarkerProjection<'a> {
-    pub fn project(&self, position: [f32; 3]) -> Option<[f32; 2]> {
+    fn project_with_depth(&self, position: [f32; 3]) -> Option<([f32; 2], f32)> {
         match self {
-            MarkerProjection::Perspective(projector) => projector.project(position),
+            MarkerProjection::Perspective(projector) => projector
+                .project_ndc(position)
+                .map(|ndc| ([ndc[0], ndc[1]], ndc[2])),
             MarkerProjection::TopDown {
                 horizontal_axis,
                 vertical_axis,
@@ -135,7 +164,7 @@ impl<'a> MarkerProjection<'a> {
                 let scaled_v = clamp_v * (1.0 - MAP_MARGIN * 2.0) + MAP_MARGIN;
                 let clip_x = scaled_h * 2.0 - 1.0;
                 let clip_y = (1.0 - scaled_v) * 2.0 - 1.0;
-                Some([clip_x, clip_y])
+                Some(([clip_x, clip_y], 0.0))
             }
             MarkerProjection::TopDownPanel {
                 horizontal_axis,
@@ -151,9 +180,14 @@ impl<'a> MarkerProjection<'a> {
                 if !norm_h.is_finite() || !norm_v.is_finite() {
                     return None;
                 }
-                layout.project(norm_h, norm_v)
+                layout.project(norm_h, norm_v).map(|coords| (coords, 0.0))
             }
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn project(&self, position: [f32; 3]) -> Option<[f32; 2]> {
+        self.project_with_depth(position).map(|(coords, _)| coords)
     }
 
     pub fn project_marker(
@@ -163,8 +197,9 @@ impl<'a> MarkerProjection<'a> {
         mut size: f32,
         mut color: [f32; 3],
         mut highlight: f32,
+        icon: MarkerIcon,
     ) -> Option<MarkerInstance> {
-        let [ndc_x, ndc_y] = self.project(position)?;
+        let ([ndc_x, ndc_y], depth) = self.project_with_depth(position)?;
         if !ndc_x.is_finite() || !ndc_y.is_finite() {
             return None;
         }
@@ -180,10 +215,11 @@ impl<'a> MarkerProjection<'a> {
 
         Some(MarkerInstance {
             translate: [ndc_x, ndc_y],
+            depth,
             size,
             highlight,
             color,
-            _padding: 0.0,
+            icon: icon.id(),
         })
     }
 }

@@ -12,52 +12,53 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Milestone Goal",
             "body": [
-                "Deliver a first-playable Manny office: load the scene, walk Manny to the desk, and complete the computer interaction loop without regressions.",
-                "Every task should move us closer to confidently demoing that flow end-to-end.",
+                """Deliver a first-playable Manny office where the viewer renders in-world markers and Manny’s actual geometry, the ability to walk around and
+                interact with the world, and placeholders for transitioning to other scenes""",
+                "Every task should accelerate implementing the initial office gameplay, before thinking about work keep this ultimate goal in mind",
             ],
         },
         {
             "title": "Critical Path",
             "body": [
-                "Lock Manny’s geometry overlays so the viewer markers and runtime anchors match after every asset/script tweak.",
-                "Stabilise hotspot scripting for desk/computer interactions; confirm triggers fire with the captured regression traces.",
-                "Keep the runtime regression harness green after any artifact refresh so we trust the first-playable build.",
+                "Bootstrap a depth-aware 3D marker/mesh pass in the viewer that shares camera math with runtime playback.",
+                "Decode Manny’s mesh and transforms from the LAB assets and stage a reusable geometry cache for the viewer.",
+                "Keep the desk/computer interaction script stable and the runtime regression harness green as we layer in 3D rendering.",
             ],
         },
         {
             "title": "Immediate Focus",
             "body": [
-                "Validate the latest geometry snapshot (artifacts/run_cache/manny_geometry.json) against movement_log.json to catch drift early.",
-                "Watch for hotspot.demo.fallback in hotspot_events.json and push Manny’s scripts so the computer interaction returns to suit without needing the fallback path.",
-                "Spin up a dedicated minimap marker pipeline so HUD rendering cannot occlude the scene pass; keep layout docs updated with the split once it lands.",
+                "Exercise the new primitive mesh pass with Manny, desk, and tube anchors so we can confirm depth/parallax and selection highlights before swapping in decoded assets.",
+                "Stand up an extractor that pulls Manny’s geometry/rig into artifacts/run_cache and documents any format assumptions we make.",
+                "Run the Manny office interaction traces after each rendering change to ensure computer triggers and fallback handling remain stable.",
             ],
         },
         {
             "title": "Execution Notes",
             "body": [
-                "Run python tools/grim_viewer.py -- --headless to spot-check overlays whenever geometry or scripts move.",
-                "Follow docs/runtime_smoke_tests.md for the one-button artifact refresh; the harness writes all Manny baselines in one pass.",
-                "After regenerating assets or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
+                "Iterate with python tools/grim_viewer.py -- --headless to quickly validate the new 3D marker pass alongside existing overlays.",
+                "Document decoded asset formats in docs/runtime_smoke_tests.md or a new decoder README so refresh steps stay reproducible.",
+                "After regenerating meshes or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
             ],
         },
     ],
     "workstreams": [
         {
-            "slug": "manny-geometry-lock",
-            "title": "Lock Manny geometry",
-            "description": "Keep viewer overlays aligned with runtime anchors across script edits.",
+            "slug": "viewer-3d-renderer",
+            "title": "Viewer 3D renderer",
+            "description": "Give the viewer a depth-aware render path that can draw markers and meshes in world space.",
             "prompt": (
-                "Run the headless viewer to verify Manny/desk/tube markers. If drift appears, rerun the runtime smoke tests to regenerate "
-                "movement, hotspot, depth, and geometry snapshots together, then restage the refreshed fixtures."
+                "Use the instanced primitive meshes to mirror Manny/desk/tube anchors and verify depth and lighting in grim_viewer. "
+                "Feed the new pass with shared camera matrices, then migrate entity markers to use the 3D infrastructure before swapping in decoded assets."
             ),
         },
         {
-            "slug": "desk-interaction",
-            "title": "Desk/computer interaction parity",
-            "description": "Ensure hotspot scripting and fixtures replay the full interaction cleanly.",
+            "slug": "manny-mesh-decode",
+            "title": "Decode Manny mesh",
+            "description": "Extract Manny’s geometry/rig from LAB archives and stage it for the viewer.",
             "prompt": (
-                "Review hotspot_events.json alongside docs/runtime_smoke_tests.md expectations. Patch scripts or fixtures so Manny reaches the desk, "
-                "triggers the computer, and exits without invoking hotspot.demo.fallback; update regression assets and rerun runtime_regression to lock it in."
+                "Build a decoder that reads the remastered LAB data, exports Manny’s mesh (and transforms if available) into artifacts/run_cache, "
+                "and document the refresh command. Leave hooks for expanding to desk/tube assets next."
             ),
         },
         {

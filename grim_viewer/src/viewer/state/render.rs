@@ -1,6 +1,9 @@
 use super::super::markers::{
-    DESK_ANCHOR_PALETTE, MANNY_ANCHOR_PALETTE, MARKER_VERTICES, MarkerInstance, MarkerProjection,
-    TUBE_ANCHOR_PALETTE, entity_palette,
+    DESK_ANCHOR_PALETTE, MANNY_ANCHOR_PALETTE, MARKER_VERTICES, MarkerIcon, MarkerInstance,
+    MarkerProjection, TUBE_ANCHOR_PALETTE, entity_palette,
+};
+use super::super::mesh::{
+    MeshInstance, PrimitiveKind, bounds_scale, instance_transform, view_projection_uniform,
 };
 use super::super::overlays::TextOverlay;
 use super::ViewerState;
@@ -9,6 +12,22 @@ use bytemuck::cast_slice;
 use wgpu::SurfaceError;
 
 use crate::scene::{HotspotEventKind, SceneEntityKind, event_marker_style};
+
+const MANNY_ANCHOR_SCALE: f32 = 1.35;
+const DESK_ANCHOR_SCALE: f32 = 1.20;
+const TUBE_ANCHOR_SCALE: f32 = 1.25;
+const ENTITY_SCALE_BASE: f32 = 0.80;
+const ENTITY_SCALE_SELECTED: f32 = 1.00;
+
+const SCALE_MIN: f32 = 0.045;
+const SCALE_MAX: f32 = 3.5;
+
+const HIGHLIGHT_BASE_BOOST: f32 = 0.75;
+const HIGHLIGHT_RANGE: f32 = 0.45;
+const COLOR_CLAMP_MIN: f32 = 0.05;
+const COLOR_CLAMP_MAX: f32 = 1.0;
+const HIGHLIGHT_BOOST_MIN: f32 = 0.4;
+const HIGHLIGHT_BOOST_MAX: f32 = 1.6;
 
 pub(super) fn render(state: &mut ViewerState) -> Result<(), SurfaceError> {
     let frame = state.surface.get_current_texture()?;
@@ -22,6 +41,7 @@ pub(super) fn render(state: &mut ViewerState) -> Result<(), SurfaceError> {
         });
 
     draw_background(state, &view, &mut encoder);
+    draw_scene_meshes(state, &view, &mut encoder);
     draw_scene_markers(state, &view, &mut encoder);
     draw_minimap_markers(state, &view, &mut encoder);
     draw_overlays(state, &view, &mut encoder);
@@ -57,6 +77,107 @@ fn draw_background(
     rpass.set_vertex_buffer(0, state.quad_vertex_buffer.slice(..));
     rpass.set_index_buffer(state.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
     rpass.draw_indexed(0..state.quad_index_count, 0, 0..1);
+}
+
+fn draw_scene_meshes(
+    state: &mut ViewerState,
+    view: &wgpu::TextureView,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    if state.mesh.is_none() {
+        return;
+    }
+    let Some(groups) = build_mesh_groups(state) else {
+        return;
+    };
+    let total_instances = groups.total_instances();
+    if total_instances == 0 {
+        return;
+    }
+    let Some(camera) = state.camera_projector.as_ref() else {
+        return;
+    };
+    let camera_matrix = camera.view_projection_matrix();
+
+    ensure_mesh_instance_capacity(state, total_instances);
+
+    let mesh = state.mesh.as_ref().expect("mesh resources present");
+
+    let mut combined = Vec::with_capacity(total_instances);
+    let sphere_range = append_instances(&mut combined, &groups.sphere);
+    let cube_range = append_instances(&mut combined, &groups.cube);
+    let cone_range = append_instances(&mut combined, &groups.cone);
+
+    state
+        .queue
+        .write_buffer(&mesh.instance_buffer, 0, cast_slice(&combined));
+
+    let uniform = view_projection_uniform(camera_matrix);
+    state
+        .queue
+        .write_buffer(&mesh.uniform_buffer, 0, cast_slice(&[uniform]));
+
+    let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
+        view: &mesh.depth_view,
+        depth_ops: Some(wgpu::Operations {
+            load: wgpu::LoadOp::Clear(1.0),
+            store: wgpu::StoreOp::Store,
+        }),
+        stencil_ops: None,
+    };
+
+    let mut mesh_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mesh-pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(depth_attachment),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+
+    let (vx, vy, vw, vh) = layout::plate_viewport(state);
+    mesh_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+    mesh_pass.set_pipeline(&mesh.pipeline);
+    mesh_pass.set_bind_group(0, &mesh.bind_group, &[]);
+
+    let instance_bytes = (combined.len() * std::mem::size_of::<MeshInstance>()) as u64;
+    mesh_pass.set_vertex_buffer(1, mesh.instance_buffer.slice(0..instance_bytes));
+
+    if sphere_range.count > 0 {
+        mesh_pass.set_vertex_buffer(0, mesh.sphere.vertex.slice(..));
+        mesh_pass.set_index_buffer(mesh.sphere.index.slice(..), wgpu::IndexFormat::Uint16);
+        mesh_pass.draw_indexed(
+            0..mesh.sphere.index_count,
+            0,
+            sphere_range.offset..(sphere_range.offset + sphere_range.count),
+        );
+    }
+
+    if cube_range.count > 0 {
+        mesh_pass.set_vertex_buffer(0, mesh.cube.vertex.slice(..));
+        mesh_pass.set_index_buffer(mesh.cube.index.slice(..), wgpu::IndexFormat::Uint16);
+        mesh_pass.draw_indexed(
+            0..mesh.cube.index_count,
+            0,
+            cube_range.offset..(cube_range.offset + cube_range.count),
+        );
+    }
+
+    if cone_range.count > 0 {
+        mesh_pass.set_vertex_buffer(0, mesh.cone.vertex.slice(..));
+        mesh_pass.set_index_buffer(mesh.cone.index.slice(..), wgpu::IndexFormat::Uint16);
+        mesh_pass.draw_indexed(
+            0..mesh.cone.index_count,
+            0,
+            cone_range.offset..(cone_range.offset + cone_range.count),
+        );
+    }
 }
 
 fn draw_scene_markers(
@@ -207,6 +328,167 @@ fn draw_overlay(
     overlay_pass.draw_indexed(0..state.quad_index_count, 0, 0..1);
 }
 
+/// Buckets mesh instances by primitive so each draw call stays compact.
+#[derive(Default)]
+struct MeshInstanceGroups {
+    sphere: Vec<MeshInstance>,
+    cube: Vec<MeshInstance>,
+    cone: Vec<MeshInstance>,
+}
+
+impl MeshInstanceGroups {
+    fn total_instances(&self) -> usize {
+        self.sphere.len() + self.cube.len() + self.cone.len()
+    }
+
+    fn push(&mut self, kind: PrimitiveKind, instance: MeshInstance) {
+        match kind {
+            PrimitiveKind::Sphere => self.sphere.push(instance),
+            PrimitiveKind::Cube => self.cube.push(instance),
+            PrimitiveKind::Cone => self.cone.push(instance),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct InstanceRange {
+    offset: u32,
+    count: u32,
+}
+
+/// Append `source` instances into `target`, returning the range to draw.
+fn append_instances(target: &mut Vec<MeshInstance>, source: &[MeshInstance]) -> InstanceRange {
+    let offset = target.len() as u32;
+    target.extend_from_slice(source);
+    InstanceRange {
+        offset,
+        count: source.len() as u32,
+    }
+}
+
+/// Grow the shared instance buffer if the current frame needs more slots.
+fn ensure_mesh_instance_capacity(state: &mut ViewerState, required: usize) {
+    let Some(mesh) = state.mesh.as_mut() else {
+        return;
+    };
+    if required <= mesh.instance_capacity {
+        return;
+    }
+    let mut capacity = mesh.instance_capacity.max(1);
+    while capacity < required {
+        capacity *= 2;
+    }
+    let new_size = (capacity * std::mem::size_of::<MeshInstance>()) as u64;
+    let label = format!("mesh-instance-buffer({capacity})");
+    let new_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label.as_str()),
+        size: new_size,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    mesh.instance_buffer = new_buffer;
+    mesh.instance_capacity = capacity;
+}
+
+/// Collect per-entity mesh instances with sizes derived from the marker palette.
+fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
+    let scene = state.scene.as_ref()?;
+    let base_scale = bounds_scale(scene.position_bounds.as_ref());
+    let mut groups = MeshInstanceGroups::default();
+
+    if let Some(position) = scene.entity_position("manny") {
+        let palette = MANNY_ANCHOR_PALETTE;
+        groups.push(
+            PrimitiveKind::Sphere,
+            MeshInstance {
+                model: instance_transform(
+                    position,
+                    scale_for_factor(base_scale, MANNY_ANCHOR_SCALE),
+                ),
+                color: palette_to_color(palette.color, palette.highlight.max(0.6)),
+            },
+        );
+    }
+
+    if let Some(position) = scene.entity_position("mo.computer") {
+        let palette = DESK_ANCHOR_PALETTE;
+        groups.push(
+            PrimitiveKind::Cube,
+            MeshInstance {
+                model: instance_transform(
+                    position,
+                    scale_for_factor(base_scale, DESK_ANCHOR_SCALE),
+                ),
+                color: palette_to_color(palette.color, palette.highlight),
+            },
+        );
+    }
+
+    if let Some(position) = scene
+        .entity_position("mo.tube.anchor")
+        .or_else(|| scene.entity_position("mo.tube.interest_actor"))
+    {
+        let palette = TUBE_ANCHOR_PALETTE;
+        groups.push(
+            PrimitiveKind::Cone,
+            MeshInstance {
+                model: instance_transform(
+                    position,
+                    scale_for_factor(base_scale, TUBE_ANCHOR_SCALE),
+                ),
+                color: palette_to_color(palette.color, palette.highlight),
+            },
+        );
+    }
+
+    for (idx, entity) in scene.entities.iter().enumerate() {
+        let Some(position) = entity.position else {
+            continue;
+        };
+        let is_selected = state.selected_entity == Some(idx);
+        let palette = entity_palette(entity.kind, is_selected);
+        let mut scale = scale_for_factor(base_scale, ENTITY_SCALE_BASE);
+        if is_selected {
+            scale = scale_for_factor(base_scale, ENTITY_SCALE_SELECTED);
+        }
+        let highlight = if is_selected { 1.0 } else { palette.highlight };
+        groups.push(
+            mesh_kind_for_entity(entity.kind),
+            MeshInstance {
+                model: instance_transform(position, scale),
+                color: palette_to_color(palette.color, highlight),
+            },
+        );
+    }
+
+    Some(groups)
+}
+
+fn mesh_kind_for_entity(kind: SceneEntityKind) -> PrimitiveKind {
+    match kind {
+        SceneEntityKind::Actor => PrimitiveKind::Sphere,
+        SceneEntityKind::Object => PrimitiveKind::Cube,
+        SceneEntityKind::InterestActor => PrimitiveKind::Cone,
+    }
+}
+
+/// Turn the 2D marker palette into a lit RGBA color for the mesh proxy.
+fn palette_to_color(color: [f32; 3], highlight: f32) -> [f32; 4] {
+    let boost = (HIGHLIGHT_BASE_BOOST + highlight * HIGHLIGHT_RANGE)
+        .clamp(HIGHLIGHT_BOOST_MIN, HIGHLIGHT_BOOST_MAX);
+    [
+        (color[0] * boost).clamp(COLOR_CLAMP_MIN, COLOR_CLAMP_MAX),
+        (color[1] * boost).clamp(COLOR_CLAMP_MIN, COLOR_CLAMP_MAX),
+        (color[2] * boost).clamp(COLOR_CLAMP_MIN, COLOR_CLAMP_MAX),
+        1.0,
+    ]
+}
+
+/// Clamp the derived instance scale to keep proxies from dwarfing the plate.
+fn scale_for_factor(base: f32, factor: f32) -> f32 {
+    (base * factor).clamp(SCALE_MIN, SCALE_MAX)
+}
+
 fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
     let mut instances = Vec::new();
 
@@ -238,14 +520,18 @@ fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
     };
 
     let selected = state.selected_entity;
-    let mut push_marker =
-        |label: &str, position: [f32; 3], size: f32, color: [f32; 3], highlight: f32| {
-            if let Some(instance) =
-                projection.project_marker(Some(label), position, size, color, highlight)
-            {
-                instances.push(instance);
-            }
-        };
+    let mut push_marker = |label: &str,
+                           position: [f32; 3],
+                           size: f32,
+                           color: [f32; 3],
+                           highlight: f32,
+                           icon: MarkerIcon| {
+        if let Some(instance) =
+            projection.project_marker(Some(label), position, size, color, highlight, icon)
+        {
+            instances.push(instance);
+        }
+    };
 
     let mut scrub_position: Option<[f32; 3]> = None;
     if let Some(scrubber) = state.scrubber.as_ref() {
@@ -258,7 +544,14 @@ fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
 
     if let Some(position) = scene.entity_position("manny") {
         let palette = MANNY_ANCHOR_PALETTE;
-        push_marker("manny", position, 0.1, palette.color, palette.highlight);
+        push_marker(
+            "manny",
+            position,
+            0.1,
+            palette.color,
+            palette.highlight,
+            palette.icon,
+        );
     }
 
     if let Some(position) = scene.entity_position("mo.computer") {
@@ -269,6 +562,7 @@ fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
             0.08,
             palette.color,
             palette.highlight,
+            palette.icon,
         );
     }
 
@@ -277,7 +571,14 @@ fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
         .or_else(|| scene.entity_position("mo.tube.interest_actor"))
     {
         let palette = TUBE_ANCHOR_PALETTE;
-        push_marker("mo.tube", position, 0.09, palette.color, palette.highlight);
+        push_marker(
+            "mo.tube",
+            position,
+            0.09,
+            palette.color,
+            palette.highlight,
+            palette.icon,
+        );
     }
 
     for (idx, entity) in scene.entities.iter().enumerate() {
@@ -304,6 +605,7 @@ fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
             size,
             palette.color,
             palette.highlight,
+            palette.icon,
         );
     }
 
@@ -315,6 +617,7 @@ fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
             0.11,
             palette.color,
             palette.highlight.max(0.9),
+            palette.icon,
         );
         for (idx, event) in scene.hotspot_events().iter().enumerate() {
             if matches!(event.kind(), HotspotEventKind::Selection) {
@@ -325,6 +628,7 @@ fn build_marker_instances(state: &ViewerState) -> Vec<MarkerInstance> {
                         0.12,
                         [0.98, 0.93, 0.32],
                         0.95,
+                        MarkerIcon::Ring,
                     );
                 }
             }
@@ -358,20 +662,25 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
     let mut instances = Vec::new();
     instances.push(MarkerInstance {
         translate: layout.center,
+        depth: -0.95,
         size: layout.panel_width(),
         highlight: 0.0,
         color: [0.07, 0.08, 0.12],
-        _padding: 0.0,
+        icon: MarkerIcon::Panel.id(),
     });
 
-    let mut push_marker =
-        |label: &str, position: [f32; 3], size: f32, color: [f32; 3], highlight: f32| {
-            if let Some(instance) =
-                projection.project_marker(Some(label), position, size, color, highlight)
-            {
-                instances.push(instance);
-            }
-        };
+    let mut push_marker = |label: &str,
+                           position: [f32; 3],
+                           size: f32,
+                           color: [f32; 3],
+                           highlight: f32,
+                           icon: MarkerIcon| {
+        if let Some(instance) =
+            projection.project_marker(Some(label), position, size, color, highlight, icon)
+        {
+            instances.push(instance);
+        }
+    };
 
     let scale_size = |base: f32| layout.scaled_size(base * 0.5);
 
@@ -405,7 +714,14 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
                 if idx == 0 || idx + 1 == len {
                     continue;
                 }
-                push_marker("minimap.path", sample.position, path_size, path_color, 0.0);
+                push_marker(
+                    "minimap.path",
+                    sample.position,
+                    path_size,
+                    path_color,
+                    0.0,
+                    MarkerIcon::Path,
+                );
             }
 
             for (idx, event) in scene.hotspot_events().iter().enumerate() {
@@ -419,10 +735,12 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
                 };
                 let (mut marker_size, mut marker_color, mut marker_highlight) =
                     event_marker_style(event.kind());
+                let mut marker_icon = event_marker_icon(event.kind());
                 if Some(idx) == highlight_event_scene_index {
                     marker_highlight = marker_highlight.max(0.9);
                     marker_color = [0.98, 0.93, 0.32];
                     marker_size *= 1.08;
+                    marker_icon = MarkerIcon::Ring;
                 }
                 push_marker(
                     event.kind().label(),
@@ -430,6 +748,7 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
                     scale_size(marker_size),
                     marker_color,
                     marker_highlight,
+                    marker_icon,
                 );
             }
         }
@@ -446,6 +765,7 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
             scale_size(0.058),
             palette.color,
             palette.highlight,
+            palette.icon,
         );
     }
 
@@ -462,6 +782,7 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
             scale_size(0.064),
             palette.color,
             palette.highlight,
+            palette.icon,
         );
     }
 
@@ -473,6 +794,7 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
             scale_size(0.07),
             palette.color,
             palette.highlight,
+            palette.icon,
         );
     }
 
@@ -501,10 +823,23 @@ fn build_minimap_instances(state: &ViewerState) -> Option<Vec<MarkerInstance>> {
             size,
             palette.color,
             palette.highlight,
+            palette.icon,
         );
     }
 
     Some(instances)
+}
+
+fn event_marker_icon(kind: HotspotEventKind) -> MarkerIcon {
+    match kind {
+        HotspotEventKind::Hotspot => MarkerIcon::Star,
+        HotspotEventKind::HeadTarget => MarkerIcon::Path,
+        HotspotEventKind::IgnoreBoxes => MarkerIcon::Square,
+        HotspotEventKind::Chore => MarkerIcon::Diamond,
+        HotspotEventKind::Dialog => MarkerIcon::Sphere,
+        HotspotEventKind::Selection => MarkerIcon::Ring,
+        HotspotEventKind::Other => MarkerIcon::Accent,
+    }
 }
 
 fn ensure_scene_marker_capacity(state: &mut ViewerState, required: usize) {

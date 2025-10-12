@@ -45,6 +45,7 @@ pub struct ViewerState {
     minimap_marker_vertex_buffer: wgpu::Buffer,
     minimap_marker_instance_buffer: wgpu::Buffer,
     minimap_marker_capacity: usize,
+    mesh: Option<MeshResources>,
     ui_layout: UiLayout,
 }
 
@@ -108,4 +109,31 @@ impl ViewerState {
     pub fn handle_key_event(&mut self, event: &winit::event::KeyEvent) {
         selection::handle_key_event(self, event);
     }
+
+    pub(super) fn rebuild_mesh_depth(&mut self) {
+        if let Some(mesh) = self.mesh.as_mut() {
+            let (texture, view) = init::create_mesh_depth_texture(&self.device, self.size);
+            mesh.depth_texture = texture;
+            mesh.depth_view = view;
+        }
+    }
+}
+
+pub(super) struct MeshResources {
+    pub pipeline: wgpu::RenderPipeline,
+    pub bind_group: wgpu::BindGroup,
+    pub uniform_buffer: wgpu::Buffer,
+    pub depth_texture: wgpu::Texture,
+    pub depth_view: wgpu::TextureView,
+    pub instance_buffer: wgpu::Buffer,
+    pub instance_capacity: usize,
+    pub sphere: PrimitiveBuffers,
+    pub cube: PrimitiveBuffers,
+    pub cone: PrimitiveBuffers,
+}
+
+pub(super) struct PrimitiveBuffers {
+    pub vertex: wgpu::Buffer,
+    pub index: wgpu::Buffer,
+    pub index_count: u32,
 }

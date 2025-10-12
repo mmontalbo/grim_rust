@@ -1,17 +1,23 @@
 use std::{borrow::Cow, sync::Arc};
 
 use super::super::markers::{MARKER_VERTICES, MarkerInstance, MarkerVertex};
+use super::super::mesh::{
+    MeshInstance, MeshPrimitive, MeshUniforms, MeshVertex, PrimitiveKind, primitive,
+    view_projection_uniform,
+};
 use super::super::overlays::{OverlayConfig, TextOverlay};
 use super::super::shaders::{
-    MARKER_SHADER_SOURCE, QUAD_INDICES, QUAD_VERTICES, QuadVertex, SHADER_SOURCE,
+    MARKER_SHADER_SOURCE, MESH_SHADER_SOURCE, QUAD_INDICES, QUAD_VERTICES, QuadVertex,
+    SHADER_SOURCE,
 };
-use super::ViewerState;
 use super::layout;
 use super::overlay_updates;
 use super::panels::ViewerOverlays;
 use super::selection;
+use super::{MeshResources, PrimitiveBuffers, ViewerState};
 use anyhow::{Context, Result};
 use bytemuck::cast_slice;
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -62,6 +68,8 @@ struct RenderResources {
     minimap_marker_instance_buffer: wgpu::Buffer,
     minimap_marker_capacity: usize,
 }
+
+const MESH_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Overlay textures plus layout hints for the HUD panels.
 struct OverlaySetup {
@@ -170,6 +178,7 @@ pub(super) async fn new(
         &texture_resources.bind_group_layout,
         wgpu.surface_format,
     );
+    let mesh_resources = create_mesh_resources(&wgpu.device, size, wgpu.surface_format);
 
     let selected_entity = initial_selected_entity(scene_ref);
 
@@ -203,6 +212,7 @@ pub(super) async fn new(
         overlays,
         texture_resources,
         render_resources,
+        Some(mesh_resources),
     );
 
     state.surface.configure(&state.device, &state.config);
@@ -544,6 +554,7 @@ fn assemble_viewer_state(
     overlays: ViewerOverlays,
     texture_resources: TextureResources,
     render_resources: RenderResources,
+    mesh: Option<MeshResources>,
 ) -> ViewerState {
     let TextureResources {
         texture,
@@ -607,7 +618,180 @@ fn assemble_viewer_state(
         minimap_marker_vertex_buffer,
         minimap_marker_instance_buffer,
         minimap_marker_capacity,
+        mesh,
         ui_layout,
+    }
+}
+
+fn create_mesh_resources(
+    device: &wgpu::Device,
+    size: PhysicalSize<u32>,
+    surface_format: wgpu::TextureFormat,
+) -> MeshResources {
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mesh-uniform-layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<MeshUniforms>() as u64),
+            },
+            count: None,
+        }],
+    });
+
+    let initial_uniform = view_projection_uniform(Mat4::IDENTITY);
+    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mesh-uniform-buffer"),
+        contents: cast_slice(&[initial_uniform]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh-uniform-bind-group"),
+        layout: &bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buffer.as_entire_binding(),
+        }],
+    });
+
+    let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("mesh-shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(MESH_SHADER_SOURCE)),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("mesh-pipeline-layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let vertex_layout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<MeshVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+    };
+
+    let instance_layout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<MeshInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 16,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 32,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 64,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+        ],
+    };
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("mesh-pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &mesh_shader,
+            entry_point: "mesh_vs_main",
+            buffers: &[vertex_layout, instance_layout],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &mesh_shader,
+            entry_point: "mesh_fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Back),
+            ..wgpu::PrimitiveState::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: MESH_DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+
+    let sphere_buffers = upload_primitive(device, "mesh-sphere", primitive(PrimitiveKind::Sphere));
+    let cube_buffers = upload_primitive(device, "mesh-cube", primitive(PrimitiveKind::Cube));
+    let cone_buffers = upload_primitive(device, "mesh-cone", primitive(PrimitiveKind::Cone));
+
+    let initial_capacity = 8usize;
+    let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mesh-instance-buffer"),
+        size: (initial_capacity * std::mem::size_of::<MeshInstance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let (depth_texture, depth_view) = create_mesh_depth_texture(device, size);
+
+    MeshResources {
+        pipeline,
+        bind_group,
+        uniform_buffer,
+        depth_texture,
+        depth_view,
+        instance_buffer,
+        instance_capacity: initial_capacity,
+        sphere: sphere_buffers,
+        cube: cube_buffers,
+        cone: cone_buffers,
+    }
+}
+
+fn upload_primitive(
+    device: &wgpu::Device,
+    label: &'static str,
+    primitive: MeshPrimitive,
+) -> PrimitiveBuffers {
+    let vertex_label = format!("{label}-vertex-buffer");
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&vertex_label),
+        contents: cast_slice(&primitive.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    let index_label = format!("{label}-index-buffer");
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&index_label),
+        contents: cast_slice(&primitive.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    PrimitiveBuffers {
+        vertex: vertex_buffer,
+        index: index_buffer,
+        index_count: primitive.indices.len() as u32,
     }
 }
 
@@ -775,7 +959,17 @@ fn create_marker_pipeline(
             wgpu::VertexAttribute {
                 offset: 16,
                 shader_location: 4,
+                format: wgpu::VertexFormat::Float32,
+            },
+            wgpu::VertexAttribute {
+                offset: 20,
+                shader_location: 5,
                 format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 32,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32,
             },
         ],
     };
@@ -804,6 +998,29 @@ fn create_marker_pipeline(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
     })
+}
+
+pub(super) fn create_mesh_depth_texture(
+    device: &wgpu::Device,
+    size: PhysicalSize<u32>,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let extent = wgpu::Extent3d {
+        width: size.width.max(1),
+        height: size.height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh-depth-texture"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: MESH_DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 fn initial_selected_entity(scene: Option<&ViewerScene>) -> Option<usize> {

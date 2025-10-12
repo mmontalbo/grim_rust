@@ -13,6 +13,7 @@ pub(super) fn resize(state: &mut ViewerState, new_size: PhysicalSize<u32>) {
     state.config.width = new_size.width;
     state.config.height = new_size.height;
     state.surface.configure(&state.device, &state.config);
+    state.rebuild_mesh_depth();
     if let Err(err) = state.ui_layout.set_window_size(new_size) {
         eprintln!("[grim_viewer] layout resize failed: {err:?}");
     } else {
