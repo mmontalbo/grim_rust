@@ -1,6 +1,10 @@
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable, cast_slice};
-use font8x8::legacy::BASIC_MODERN;
+use fontdue::{Font, FontSettings, Metrics};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::mem;
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
@@ -9,6 +13,20 @@ use crate::cli::PanelPreset;
 use crate::scene::{HotspotEventKind, ViewerScene};
 use crate::texture::prepare_rgba_upload;
 use crate::ui_layout::{PanelSize, ViewportRect};
+
+const FONT_SIZE_PX: f32 = 16.0;
+
+static FONT_DATA: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dev-install/FontsHD/OCRA.ttf"
+));
+static FONT: Lazy<Font> = Lazy::new(|| {
+    Font::from_bytes(FONT_DATA, FontSettings::default())
+        .expect("failed to load OCRA font for overlays")
+});
+static GLYPH_LAYOUT: Lazy<GlyphLayout> = Lazy::new(|| GlyphLayout::from_font(&*FONT, FONT_SIZE_PX));
+static GLYPH_CACHE: Lazy<Mutex<HashMap<char, GlyphBitmap>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub(super) struct OverlayConfig {
     pub width: u32,
@@ -65,8 +83,6 @@ pub(super) struct TextOverlay {
 }
 
 impl TextOverlay {
-    const GLYPH_WIDTH: u32 = 8;
-    const GLYPH_HEIGHT: u32 = 8;
     const FG_COLOR: [u8; 4] = [255, 255, 255, 240];
     const BG_COLOR: [u8; 4] = [0, 0, 0, 96];
 
@@ -198,8 +214,11 @@ impl TextOverlay {
             return;
         }
 
-        let max_cols = (usable_width / Self::GLYPH_WIDTH) as usize;
-        let max_rows = (usable_height / Self::GLYPH_HEIGHT) as usize;
+        let layout = &*GLYPH_LAYOUT;
+        let glyph_width = layout.cell_advance.max(1);
+        let glyph_height = layout.line_height.max(1);
+        let max_cols = (usable_width / glyph_width) as usize;
+        let max_rows = (usable_height / glyph_height) as usize;
 
         if max_cols == 0 || max_rows == 0 {
             self.dirty = true;
@@ -207,33 +226,67 @@ impl TextOverlay {
             return;
         }
 
-        for (row_idx, line) in lines.iter().take(max_rows).enumerate() {
-            let glyph_row = self.padding_y + row_idx as u32 * Self::GLYPH_HEIGHT;
+        let display_lines = Self::wrap_lines(lines, max_cols, max_rows);
+
+        for (row_idx, line) in display_lines.iter().enumerate() {
+            let line_top = self.padding_y + row_idx as u32 * glyph_height;
             for (col_idx, ch) in line.chars().take(max_cols).enumerate() {
-                let glyph = glyph_for_char(ch);
-                let glyph_col = self.padding_x + col_idx as u32 * Self::GLYPH_WIDTH;
-                for (y_offset, bits) in glyph.iter().enumerate() {
-                    let y = glyph_row + y_offset as u32;
-                    if y >= self.height {
-                        continue;
-                    }
-                    for x_bit in 0..Self::GLYPH_WIDTH {
-                        if (bits >> x_bit) & 0x01 == 0 {
-                            continue;
-                        }
-                        let x = glyph_col + x_bit;
-                        if x >= self.width {
-                            continue;
-                        }
-                        let idx = ((y * self.width + x) * 4) as usize;
-                        self.pixels[idx..idx + 4].copy_from_slice(&Self::FG_COLOR);
-                    }
+                if ch == '\r' {
+                    continue;
                 }
+                let glyph = glyph_for_char(ch);
+                let glyph_col = self.padding_x + col_idx as u32 * glyph_width;
+                self.blit_glyph(glyph_col, line_top, &glyph, layout);
             }
         }
 
         self.dirty = true;
-        self.visible = !lines.is_empty();
+        self.visible = !display_lines.is_empty();
+    }
+
+    fn blit_glyph(
+        &mut self,
+        cell_x: u32,
+        line_top: u32,
+        glyph: &GlyphBitmap,
+        layout: &GlyphLayout,
+    ) {
+        if glyph.width == 0 || glyph.height == 0 {
+            return;
+        }
+
+        let start_x = cell_x as i32 + layout.left_bearing + glyph.xmin;
+        let baseline = line_top as i32 + layout.ascent;
+        let glyph_ymax = glyph.ymin + glyph.height as i32;
+        let start_y = baseline - glyph_ymax;
+
+        for gy in 0..glyph.height {
+            let dest_y = start_y + gy as i32;
+            if dest_y < 0 || dest_y >= self.height as i32 {
+                continue;
+            }
+            let dest_y = dest_y as u32;
+            let source_row_offset = gy as usize * glyph.width as usize;
+            for gx in 0..glyph.width {
+                let coverage = glyph.alpha[source_row_offset + gx as usize];
+                if coverage == 0 {
+                    continue;
+                }
+                let dest_x = start_x + gx as i32;
+                if dest_x < 0 || dest_x >= self.width as i32 {
+                    continue;
+                }
+                let dest_x = dest_x as u32;
+                let idx = ((dest_y * self.width + dest_x) * 4) as usize;
+                let alpha = ((coverage as u16 * Self::FG_COLOR[3] as u16) / u8::MAX as u16) as u8;
+                self.pixels[idx..idx + 4].copy_from_slice(&[
+                    Self::FG_COLOR[0],
+                    Self::FG_COLOR[1],
+                    Self::FG_COLOR[2],
+                    alpha,
+                ]);
+            }
+        }
     }
 
     pub fn upload(&mut self, queue: &wgpu::Queue) {
@@ -334,6 +387,53 @@ impl TextOverlay {
             chunk.copy_from_slice(&Self::BG_COLOR);
         }
     }
+
+    fn wrap_lines(lines: &[String], max_cols: usize, max_rows: usize) -> Vec<String> {
+        if max_cols == 0 || max_rows == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for line in lines {
+            if result.len() >= max_rows {
+                break;
+            }
+            for segment in line.split('\n') {
+                if result.len() >= max_rows {
+                    break;
+                }
+                Self::wrap_segment(&mut result, segment, max_cols, max_rows);
+            }
+        }
+        result
+    }
+
+    fn wrap_segment(out: &mut Vec<String>, segment: &str, max_cols: usize, max_rows: usize) {
+        if out.len() >= max_rows {
+            return;
+        }
+        if segment.is_empty() {
+            out.push(String::new());
+            return;
+        }
+
+        let mut buffer = String::new();
+        let mut count = 0;
+        for ch in segment.chars() {
+            buffer.push(ch);
+            count += 1;
+            if count == max_cols {
+                if out.len() >= max_rows {
+                    return;
+                }
+                out.push(mem::take(&mut buffer));
+                count = 0;
+            }
+        }
+
+        if count > 0 && out.len() < max_rows {
+            out.push(buffer);
+        }
+    }
 }
 
 #[repr(C)]
@@ -341,6 +441,160 @@ impl TextOverlay {
 struct OverlayVertex {
     position: [f32; 2],
     uv: [f32; 2],
+}
+
+#[derive(Clone)]
+struct GlyphBitmap {
+    width: u32,
+    height: u32,
+    xmin: i32,
+    ymin: i32,
+    alpha: Arc<[u8]>,
+}
+
+struct GlyphLayout {
+    line_height: u32,
+    cell_advance: u32,
+    ascent: i32,
+    left_bearing: i32,
+}
+
+impl GlyphBitmap {
+    fn empty() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            xmin: 0,
+            ymin: 0,
+            alpha: Arc::<[u8]>::from([]),
+        }
+    }
+}
+
+impl GlyphLayout {
+    fn from_font(font: &Font, size: f32) -> Self {
+        let mut min_xmin = 0;
+        let mut max_xmax = 0;
+        let mut min_ymin = 0;
+        let mut max_ymax = 0;
+        let mut max_advance = 0.0f32;
+        let mut initialized = false;
+
+        let mut sample_chars: Vec<char> = (32u8..=126).map(|b| b as char).collect();
+        sample_chars.push('?');
+        sample_chars.push('…');
+
+        for ch in sample_chars {
+            Self::accumulate_metrics(
+                font,
+                size,
+                ch,
+                &mut min_xmin,
+                &mut max_xmax,
+                &mut min_ymin,
+                &mut max_ymax,
+                &mut max_advance,
+                &mut initialized,
+            );
+        }
+
+        if !initialized {
+            return Self {
+                line_height: 1,
+                cell_advance: 1,
+                ascent: 0,
+                left_bearing: 0,
+            };
+        }
+
+        let left_bearing = -min_xmin;
+        let descent = -min_ymin;
+        let ascent = max_ymax;
+        let cell_width = (left_bearing + max_xmax).max(1) as u32;
+        let advance = max_advance.max(cell_width as f32).ceil() as u32;
+        let line_height = (ascent + descent).max(1) as u32;
+
+        Self {
+            line_height,
+            cell_advance: advance.max(1),
+            ascent,
+            left_bearing,
+        }
+    }
+
+    fn accumulate_metrics(
+        font: &Font,
+        size: f32,
+        ch: char,
+        min_xmin: &mut i32,
+        max_xmax: &mut i32,
+        min_ymin: &mut i32,
+        max_ymax: &mut i32,
+        max_advance: &mut f32,
+        initialized: &mut bool,
+    ) {
+        let glyph_index = font.lookup_glyph_index(ch);
+        let metrics: Metrics = font.metrics_indexed(glyph_index, size);
+        *max_advance = (*max_advance).max(metrics.advance_width);
+
+        if metrics.width == 0 && metrics.height == 0 {
+            if !*initialized {
+                *min_xmin = 0;
+                *max_xmax = 0;
+                *min_ymin = 0;
+                *max_ymax = 0;
+                *initialized = true;
+            }
+            return;
+        }
+
+        let xmax = metrics.xmin + metrics.width as i32;
+        let ymax = metrics.ymin + metrics.height as i32;
+
+        if !*initialized {
+            *min_xmin = metrics.xmin;
+            *max_xmax = xmax;
+            *min_ymin = metrics.ymin;
+            *max_ymax = ymax;
+            *initialized = true;
+        } else {
+            *min_xmin = (*min_xmin).min(metrics.xmin);
+            *max_xmax = (*max_xmax).max(xmax);
+            *min_ymin = (*min_ymin).min(metrics.ymin);
+            *max_ymax = (*max_ymax).max(ymax);
+        }
+    }
+}
+
+fn glyph_for_char(ch: char) -> GlyphBitmap {
+    load_or_cache_glyph(ch)
+        .or_else(|| load_or_cache_glyph('?'))
+        .unwrap_or_else(GlyphBitmap::empty)
+}
+
+fn load_or_cache_glyph(ch: char) -> Option<GlyphBitmap> {
+    if let Some(glyph) = GLYPH_CACHE.lock().unwrap().get(&ch).cloned() {
+        return Some(glyph);
+    }
+
+    let font = &*FONT;
+    let glyph_index = font.lookup_glyph_index(ch);
+    if glyph_index == 0 && ch != '?' && ch != ' ' {
+        return None;
+    }
+
+    let (metrics, bitmap) = font.rasterize_indexed(glyph_index, FONT_SIZE_PX);
+    let glyph = GlyphBitmap {
+        width: metrics.width as u32,
+        height: metrics.height as u32,
+        xmin: metrics.xmin,
+        ymin: metrics.ymin,
+        alpha: Arc::from(bitmap.into_boxed_slice()),
+    };
+
+    let mut cache = GLYPH_CACHE.lock().unwrap();
+    cache.insert(ch, glyph.clone());
+    Some(glyph)
 }
 
 pub(super) fn audio_overlay_lines(status: &AudioStatus) -> Vec<String> {
@@ -353,37 +607,47 @@ pub(super) fn audio_overlay_lines(status: &AudioStatus) -> Vec<String> {
 
     match status.state.current_music.as_ref() {
         Some(music) => {
-            lines.push(truncate_line(&format!("Music: {}", music.cue), 62));
-            if !music.params.is_empty() {
-                lines.push(truncate_line(
-                    &format!("  params: {}", music.params.join(", ")),
-                    62,
-                ));
-            }
+            let params = if music.params.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", music.params.join(", "))
+            };
+            lines.push(truncate_line(
+                &format!("Music: {}{}", music.cue, params),
+                62,
+            ));
         }
         None => {
             let stop = status.state.last_music_stop_mode.as_deref().unwrap_or("-");
-            lines.push(truncate_line(&format!("Music: <none> (stop: {stop})"), 62));
+            lines.push(truncate_line(&format!("Music: <none> (stop {stop})"), 62));
         }
     }
 
-    lines.push("SFX:".to_string());
-    if status.state.active_sfx.is_empty() {
-        lines.push("  (none)".to_string());
+    let sfx_count = status.state.active_sfx.len();
+    if sfx_count == 0 {
+        lines.push("SFX: none".to_string());
     } else {
-        const MAX_SFX_LINES: usize = 6;
-        for (idx, (handle, entry)) in status.state.active_sfx.iter().enumerate() {
-            if idx >= MAX_SFX_LINES {
-                let remaining = status.state.active_sfx.len() - MAX_SFX_LINES;
-                lines.push(format!("  ... +{} more", remaining));
-                break;
-            }
-            let mut line = format!("  {}: {}", handle, entry.cue);
-            if !entry.params.is_empty() {
-                line.push_str(&format!(" [{}]", entry.params.join(", ")));
-            }
-            lines.push(truncate_line(&line, 62));
-        }
+        let top_cues: Vec<String> = status
+            .state
+            .active_sfx
+            .iter()
+            .take(3)
+            .map(|(_, entry)| entry.cue.clone())
+            .collect();
+        let remainder = sfx_count.saturating_sub(top_cues.len());
+        let summary = if top_cues.is_empty() {
+            String::new()
+        } else {
+            top_cues.join(", ")
+        };
+        let line = if summary.is_empty() {
+            format!("SFX ({sfx_count})")
+        } else if remainder > 0 {
+            format!("SFX ({sfx_count}): {summary} (+{remainder})")
+        } else {
+            format!("SFX ({sfx_count}): {summary}")
+        };
+        lines.push(truncate_line(&line, 62));
     }
 
     lines
@@ -404,8 +668,12 @@ pub(super) fn timeline_overlay_lines(
         None => return Vec::new(),
     };
 
+    let stage_count = summary.stages.len();
+    let hook_count = summary.hooks.len();
     let selected_entity = selected_index.and_then(|idx| scene.entities.get(idx));
-    if selected_entity.is_none() && summary.hooks.is_empty() && scene.movement_trace().is_none() {
+    let has_trace = scene.movement_trace().is_some();
+    let has_events = !scene.hotspot_events().is_empty();
+    if selected_entity.is_none() && !has_trace && !has_events {
         return Vec::new();
     }
 
@@ -418,13 +686,19 @@ pub(super) fn timeline_overlay_lines(
             MAX_LINE,
         ));
         if let Some(stage_index) = entity.timeline_stage_index {
-            let label = entity.timeline_stage_label.as_deref().unwrap_or("-");
+            let label = summary
+                .stages
+                .iter()
+                .find(|stage| stage.index == stage_index)
+                .map(|stage| stage.label.as_str())
+                .or_else(|| entity.timeline_stage_label.as_deref())
+                .unwrap_or("-");
             lines.push(truncate_line(
-                &format!("  Stage {:02} {label}", stage_index),
+                &format!("Stage {stage_index:02}: {label}"),
                 MAX_LINE,
             ));
         } else if let Some(label) = entity.timeline_stage_label.as_deref() {
-            lines.push(truncate_line(&format!("  Stage -- {label}"), MAX_LINE));
+            lines.push(truncate_line(&format!("Stage --: {label}"), MAX_LINE));
         }
 
         if let Some(hook_index) = entity.timeline_hook_index {
@@ -433,215 +707,126 @@ pub(super) fn timeline_overlay_lines(
                     .timeline_hook_name
                     .as_deref()
                     .unwrap_or_else(|| hook.key.name.as_str());
-                let stage_label = hook
-                    .stage_label
-                    .as_deref()
-                    .unwrap_or_else(|| entity.timeline_stage_label.as_deref().unwrap_or("-"));
-                lines.push(truncate_line(
-                    &format!("  Hook {hook_index:03} [{stage_label}] {hook_name}"),
-                    MAX_LINE,
-                ));
+                let stage_display = hook
+                    .stage_index
+                    .map(|value| format!("{value:02}"))
+                    .unwrap_or_else(|| String::from("--"));
+                let mut extras = Vec::new();
+                if let Some(stage_label) = hook.stage_label.as_deref() {
+                    extras.push(stage_label.to_string());
+                }
                 if let Some(kind) = hook.kind.as_deref() {
-                    lines.push(truncate_line(&format!("    kind: {kind}"), MAX_LINE));
+                    extras.push(kind.to_string());
                 }
                 if !hook.targets.is_empty() {
-                    let targets = hook.targets.join(", ");
-                    lines.push(truncate_line(&format!("    targets: {targets}"), MAX_LINE));
+                    extras.push(format!("targets {}", hook.targets.len()));
                 }
                 if !hook.prerequisites.is_empty() {
-                    let prereqs = hook.prerequisites.join(", ");
-                    lines.push(truncate_line(&format!("    prereqs: {prereqs}"), MAX_LINE));
+                    extras.push(format!("prereqs {}", hook.prerequisites.len()));
                 }
                 if let Some(file) = hook.defined_in.as_deref() {
-                    let location = match hook.defined_at_line {
-                        Some(line) => format!("{file}:{line}"),
-                        None => file.to_string(),
-                    };
-                    lines.push(truncate_line(
-                        &format!("    defined in {location}"),
-                        MAX_LINE,
-                    ));
+                    let location = hook
+                        .defined_at_line
+                        .map(|line| format!("{file}:{line}"))
+                        .unwrap_or_else(|| file.to_string());
+                    extras.push(location);
                 }
+                let extras = if extras.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | {}", extras.join(" | "))
+                };
+                lines.push(truncate_line(
+                    &format!("Hook {hook_index:03} [{stage_display}]: {hook_name}{extras}"),
+                    MAX_LINE,
+                ));
             }
         } else if let Some(name) = entity.timeline_hook_name.as_deref() {
-            lines.push(truncate_line(&format!("  Hook -- {name}"), MAX_LINE));
+            lines.push(truncate_line(&format!("Hook --: {name}"), MAX_LINE));
         }
 
-        let mut detail_lines: Vec<String> = Vec::new();
         if let Some(position) = entity.position {
-            detail_lines.push(format!(
-                "  pos: ({:.3}, {:.3}, {:.3})",
-                position[0], position[1], position[2]
-            ));
-        }
-        if let Some(rotation) = entity.rotation {
-            detail_lines.push(format!(
-                "  rot: ({:.3}, {:.3}, {:.3})",
-                rotation[0], rotation[1], rotation[2]
+            lines.push(truncate_line(
+                &format!(
+                    "Pos ({:.2}, {:.2}, {:.2})",
+                    position[0], position[1], position[2]
+                ),
+                MAX_LINE,
             ));
         }
         if let Some(target) = entity.facing_target.as_deref() {
             if !target.is_empty() {
-                detail_lines.push(format!("  facing: {target}"));
+                lines.push(truncate_line(&format!("Facing: {target}"), MAX_LINE));
             }
         }
         if let Some(control) = entity.head_control.as_deref() {
             if !control.is_empty() {
-                detail_lines.push(format!("  head control: {control}"));
+                lines.push(truncate_line(&format!("Head: {control}"), MAX_LINE));
             }
         }
-        if let Some(rate) = entity.head_look_rate {
-            detail_lines.push(format!("  head rate: {:.3}", rate));
-        }
-
-        if entity.last_played.is_some()
-            || entity.last_looping.is_some()
-            || entity.last_completed.is_some()
-        {
-            let played = entity.last_played.as_deref().unwrap_or("-");
-            let looping = entity.last_looping.as_deref().unwrap_or("-");
-            let completed = entity.last_completed.as_deref().unwrap_or("-");
-            detail_lines.push(format!(
-                "  chore: played={} looping={} completed={}",
-                played, looping, completed
-            ));
-        }
-
-        if let Some(created) = entity.created_by.as_ref() {
-            detail_lines.push(format!("  Hook {created}"));
-        }
-
-        for line in detail_lines {
-            lines.push(truncate_line(&line, MAX_LINE));
+        if let Some(played) = entity.last_played.as_deref() {
+            lines.push(truncate_line(&format!("Chore: {played}"), MAX_LINE));
         }
     } else {
         lines.push("  (Use Left/Right arrows to select a marker)".to_string());
+        lines.push(truncate_line(
+            &format!("Timeline: {stage_count} stages / {hook_count} hooks"),
+            MAX_LINE,
+        ));
     }
 
     if let Some(trace) = scene.movement_trace() {
         lines.push(String::new());
-        lines.push("Movement Trace".to_string());
-
+        lines.push("Movement".to_string());
         lines.push(truncate_line(
             &format!(
-                "  samples: {} (frames {}–{})",
-                trace.sample_count(),
+                "Frames {}–{} | samples {}",
                 trace.first_frame,
-                trace.last_frame
+                trace.last_frame,
+                trace.sample_count()
             ),
             MAX_LINE,
         ));
         lines.push(truncate_line(
-            &format!("  distance: {:.3}", trace.total_distance),
+            &format!("Distance {:.2}", trace.total_distance),
             MAX_LINE,
         ));
         if let Some((min_yaw, max_yaw)) = trace.yaw_range() {
             lines.push(truncate_line(
-                &format!("  yaw: {:.3} → {:.3}", min_yaw, max_yaw),
+                &format!("Yaw {:.1}→{:.1}", min_yaw, max_yaw),
                 MAX_LINE,
             ));
-        }
-        if let Some(first) = trace.samples.first() {
-            let sector = first.sector.as_deref().unwrap_or("-");
-            lines.push(truncate_line(
-                &format!(
-                    "  start: ({:.3}, {:.3}, {:.3}) {}",
-                    first.position[0], first.position[1], first.position[2], sector
-                ),
-                MAX_LINE,
-            ));
-        }
-        if let Some(last) = trace.samples.last() {
-            let sector = last.sector.as_deref().unwrap_or("-");
-            let yaw_label = last
-                .yaw
-                .map(|value| format!(" yaw {:.3}", value))
-                .unwrap_or_default();
-            lines.push(truncate_line(
-                &format!(
-                    "  end: ({:.3}, {:.3}, {:.3}) {}{}",
-                    last.position[0], last.position[1], last.position[2], sector, yaw_label
-                ),
-                MAX_LINE,
-            ));
-        }
-        let sectors = trace.dominant_sectors(3);
-        if !sectors.is_empty() {
-            let summary = sectors
-                .iter()
-                .map(|(name, count)| format!("{}×{}", count, name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(truncate_line(&format!("  sectors: {summary}"), MAX_LINE));
         }
     }
 
     let events = scene.hotspot_events();
     if !events.is_empty() {
         lines.push(String::new());
-        lines.push("Hotspot Events".to_string());
-        const MAX_EVENTS: usize = 6;
-        for event in events.iter().take(MAX_EVENTS) {
-            let frame = event
-                .frame
-                .map(|value| format!("{value:03}"))
-                .unwrap_or_else(|| String::from("--"));
-            let prefix = if matches!(event.kind(), HotspotEventKind::Selection) {
-                "(sel) "
-            } else {
-                ""
-            };
-            let line = format!("  [{frame}] {prefix}{}", event.label);
-            lines.push(truncate_line(&line, MAX_LINE));
+        lines.push("Recent Events".to_string());
+        let items: Vec<String> = events
+            .iter()
+            .take(3)
+            .map(|event| {
+                let frame = event
+                    .frame
+                    .map(|value| format!("{value:03}"))
+                    .unwrap_or_else(|| String::from("--"));
+                let prefix = if matches!(event.kind(), HotspotEventKind::Selection) {
+                    "(sel) "
+                } else {
+                    ""
+                };
+                format!("[{frame}] {prefix}{}", event.label)
+            })
+            .collect();
+        if !items.is_empty() {
+            lines.push(truncate_line(&items.join(" | "), MAX_LINE));
         }
-        if events.len() > MAX_EVENTS {
-            let remaining = events.len() - MAX_EVENTS;
-            lines.push(truncate_line(&format!("  ... +{remaining} more"), MAX_LINE));
-        }
-    }
-
-    if !summary.stages.is_empty() {
-        lines.push(String::new());
-        lines.push("Timeline Stages".to_string());
-        const MAX_STAGES: usize = 6;
-        for stage in summary.stages.iter().take(MAX_STAGES) {
+        if events.len() > 3 {
             lines.push(truncate_line(
-                &format!("  {:02}: {}", stage.index, stage.label),
+                &format!("(+{} more)", events.len() - 3),
                 MAX_LINE,
             ));
-        }
-        if summary.stages.len() > MAX_STAGES {
-            let remaining = summary.stages.len() - MAX_STAGES;
-            lines.push(truncate_line(&format!("  ... +{remaining} more"), MAX_LINE));
-        }
-    }
-
-    if !summary.hooks.is_empty() {
-        lines.push(String::new());
-        lines.push("Timeline Hooks".to_string());
-        const MAX_HOOKS: usize = 5;
-        for (idx, hook) in summary.hooks.iter().enumerate().take(MAX_HOOKS) {
-            let stage_index = hook
-                .stage_index
-                .map(|value| format!("{:02}", value))
-                .unwrap_or_else(|| String::from("--"));
-            lines.push(truncate_line(
-                &format!("  {:03} [{stage_index}] {}", idx, hook.key.name),
-                MAX_LINE,
-            ));
-            if let Some(kind) = hook.kind.as_deref() {
-                lines.push(truncate_line(&format!("    kind: {kind}"), MAX_LINE));
-            }
-            if !hook.targets.is_empty() {
-                lines.push(truncate_line(
-                    &format!("    targets: {}", hook.targets.join(", ")),
-                    MAX_LINE,
-                ));
-            }
-        }
-        if summary.hooks.len() > MAX_HOOKS {
-            let remaining = summary.hooks.len() - MAX_HOOKS;
-            lines.push(truncate_line(&format!("  ... +{remaining} more"), MAX_LINE));
         }
     }
 
@@ -652,24 +837,5 @@ fn truncate_line(line: &str, limit: usize) -> String {
     if limit == 0 {
         return String::new();
     }
-    let mut count = 0;
-    let mut result = String::new();
-    for ch in line.chars() {
-        if count + 1 >= limit {
-            result.push('…');
-            return result;
-        }
-        result.push(ch);
-        count += 1;
-    }
-    result
-}
-
-fn glyph_for_char(ch: char) -> [u8; 8] {
-    let index = ch as usize;
-    if index < BASIC_MODERN.len() {
-        BASIC_MODERN[index]
-    } else {
-        BASIC_MODERN[b'?' as usize]
-    }
+    line.to_string()
 }

@@ -335,14 +335,6 @@ impl MovementScrubber {
             ));
         }
 
-        lines.push(truncate_line(
-            "  Overlay: markers render in plate space using the active camera transform.",
-            MAX_LINE,
-        ));
-        lines.push(truncate_line(
-            "  Legend: teal spawn, violet path, orange finish, aqua current frame, gold head target highlight.",
-            MAX_LINE,
-        ));
         lines.push("  Controls: [ ] step, { } jump".to_string());
 
         lines
