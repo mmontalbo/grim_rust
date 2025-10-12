@@ -29,7 +29,7 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Immediate Focus",
             "body": [
                 "Exercise the new primitive mesh pass with Manny, desk, and tube anchors so we can confirm depth/parallax and selection highlights before swapping in decoded assets.",
-                "Stand up an extractor that pulls Manny’s geometry/rig into artifacts/run_cache and documents any format assumptions we make.",
+                "Hook the new costume parser into an extractor that pulls Manny’s 3DO geometry/rig into artifacts/run_cache and documents any format assumptions we make.",
                 "Run the Manny office interaction traces after each rendering change to ensure computer triggers and fallback handling remain stable.",
             ],
         },
@@ -38,6 +38,7 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "Iterate with python tools/grim_viewer.py -- --headless to quickly validate the new 3D marker pass alongside existing overlays.",
                 "Document decoded asset formats in docs/runtime_smoke_tests.md or a new decoder README so refresh steps stay reproducible.",
+                "Use `cargo run -p grim_formats --bin cos_dump -- <costume>` to inspect costume component lists before wiring up 3DO decoding.",
                 "After regenerating meshes or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
                 "With the flat scene markers retired, spot-check the gold selection pointer and minimap overlays so interactions stay readable.",
                 "Leverage the in-view axis gizmo to confirm world orientation when debugging new 3D markers or meshes.",
