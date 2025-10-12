@@ -41,6 +41,7 @@ WIP_DATA: Dict[str, Any] = {
                 "After regenerating meshes or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
                 "With the flat scene markers retired, spot-check the gold selection pointer and minimap overlays so interactions stay readable.",
                 "Leverage the in-view axis gizmo to confirm world orientation when debugging new 3D markers or meshes.",
+                "Document the primitive mesh legend (cones/spheres/cubes) and call out that overlap is expected until decoded meshes replace the proxies.",
             ],
         },
     ],

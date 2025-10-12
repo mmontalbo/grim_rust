@@ -427,6 +427,11 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         } else {
             base_palette.highlight
         };
+        // Keep each primitive tied to the scene entity's timeline category. The
+        // Manny anchor sphere (above) and the cube/cone pairs for desk, cards,
+        // and tube all share transforms injected by
+        // scene::manny::apply_geometry_overrides,
+        // so the proxies deliberately overlap until decoded meshes land.
         groups.push(
             mesh_kind_for_entity(entity.kind),
             MeshInstance {
