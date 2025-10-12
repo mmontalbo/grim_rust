@@ -61,6 +61,7 @@ impl ViewerState {
         scene: Option<Arc<ViewerScene>>,
         enable_audio_overlay: bool,
         layout_preset: Option<LayoutPreset>,
+        manny_mesh: Option<super::mesh::AssetMesh>,
     ) -> Result<Self> {
         init::new(
             window,
@@ -70,6 +71,7 @@ impl ViewerState {
             scene,
             enable_audio_overlay,
             layout_preset,
+            manny_mesh,
         )
         .await
     }
@@ -126,6 +128,8 @@ pub(super) struct MeshResources {
     pub sphere: PrimitiveBuffers,
     pub cube: PrimitiveBuffers,
     pub cone: PrimitiveBuffers,
+    #[allow(dead_code)]
+    pub manny: Option<PrimitiveBuffers>,
 }
 
 pub(super) struct PrimitiveBuffers {

@@ -3,8 +3,12 @@
 //! apply a single uniform scale derived from scene bounds.
 
 use std::f32::consts::PI;
+use std::fs;
+use std::path::Path;
 
+use anyhow::{Context, Result, anyhow, bail};
 use glam::{Mat4, Quat, Vec3};
+use serde::Deserialize;
 
 use crate::scene::SceneBounds;
 
@@ -40,6 +44,17 @@ pub enum PrimitiveKind {
     Sphere,
     Cube,
     Cone,
+}
+
+/// Flattened vertex/index buffers decoded from a 3DO export.
+pub struct AssetMesh {
+    pub name: Option<String>,
+    pub primitive: MeshPrimitive,
+    pub triangle_count: usize,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub radius: Option<f32>,
+    pub insert_offset: Option<[f32; 3]>,
 }
 
 #[repr(C)]
@@ -238,6 +253,121 @@ fn build_cube() -> MeshPrimitive {
     }
 
     MeshPrimitive::new(vertices, indices)
+}
+
+/// Load a JSON mesh exported via `grim_formats::three_do_export` into flattened buffers.
+pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
+    let data = fs::read(path).with_context(|| format!("reading mesh JSON {}", path.display()))?;
+    let export: ExportModel = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing mesh JSON {}", path.display()))?;
+    let model_name = export.name.clone();
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut bounds_min = [f32::INFINITY; 3];
+    let mut bounds_max = [f32::NEG_INFINITY; 3];
+    let mut triangle_count = 0usize;
+
+    for geoset in &export.geosets {
+        for mesh in &geoset.meshes {
+            if mesh.vertices.len() != mesh.vertex_normals.len() {
+                bail!(
+                    "mesh {} has {} vertices but {} normals",
+                    mesh.name,
+                    mesh.vertices.len(),
+                    mesh.vertex_normals.len()
+                );
+            }
+
+            let base_index = vertices.len();
+            for (position, normal) in mesh.vertices.iter().zip(mesh.vertex_normals.iter()) {
+                vertices.push(MeshVertex {
+                    position: *position,
+                    normal: *normal,
+                });
+                for axis in 0..3 {
+                    bounds_min[axis] = bounds_min[axis].min(position[axis]);
+                    bounds_max[axis] = bounds_max[axis].max(position[axis]);
+                }
+            }
+
+            for tri in &mesh.triangles {
+                let mut converted = [0u16; 3];
+                for (dst, &raw_index) in converted.iter_mut().zip(tri.vertex_indices.iter()) {
+                    let local_index: usize = raw_index
+                        .try_into()
+                        .context("triangle vertex index does not fit usize")?;
+                    let Some(_) = mesh.vertices.get(local_index) else {
+                        bail!(
+                            "triangle references vertex {} in mesh {} (only {} vertices)",
+                            local_index,
+                            mesh.name,
+                            mesh.vertices.len()
+                        );
+                    };
+                    let global_index = base_index
+                        .checked_add(local_index)
+                        .ok_or_else(|| anyhow!("global vertex index overflow"))?;
+                    if global_index > u16::MAX as usize {
+                        bail!(
+                            "mesh {} requires index {} which exceeds u16::MAX; split the mesh or upgrade index size",
+                            mesh.name,
+                            global_index
+                        );
+                    }
+                    *dst = global_index as u16;
+                }
+                indices.extend_from_slice(&converted);
+                triangle_count += 1;
+            }
+        }
+    }
+
+    if vertices.is_empty() || triangle_count == 0 {
+        let label = model_name
+            .clone()
+            .unwrap_or_else(|| path.display().to_string());
+        bail!("mesh {} contained no geometry", label);
+    }
+
+    Ok(AssetMesh {
+        name: export.name,
+        primitive: MeshPrimitive::new(vertices, indices),
+        triangle_count,
+        bounds_min,
+        bounds_max,
+        radius: export.radius,
+        insert_offset: export.insert_offset,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportModel {
+    name: Option<String>,
+    geosets: Vec<ExportGeoset>,
+    #[serde(default)]
+    radius: Option<f32>,
+    #[serde(default)]
+    insert_offset: Option<[f32; 3]>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportGeoset {
+    meshes: Vec<ExportMesh>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportMesh {
+    name: String,
+    vertices: Vec<[f32; 3]>,
+    vertex_normals: Vec<[f32; 3]>,
+    #[serde(default)]
+    triangles: Vec<ExportTriangle>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportTriangle {
+    vertex_indices: [u32; 3],
 }
 
 fn build_cone(segments: u32) -> MeshPrimitive {

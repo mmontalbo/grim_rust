@@ -4,7 +4,7 @@
 //! audio fixtures. Also exposes headless and PNG-dump paths used by automation
 //! to validate decoded assets without opening a window.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 mod audio;
 mod audio_log;
@@ -32,7 +32,7 @@ use scene::{
 };
 use texture::{decode_asset_texture, dump_texture_to_png, load_asset_bytes, load_zbm_seed};
 use ui_layout::{DEFAULT_MINIMAP_MIN_SIDE, PANEL_MARGIN};
-use viewer::ViewerState;
+use viewer::{AssetMesh, ViewerState, load_exported_mesh};
 use wgpu::SurfaceError;
 use winit::{
     dpi::PhysicalSize,
@@ -116,6 +116,40 @@ impl SceneFixtures {
     /// print command-line summaries for the operator.
     fn take_movement(&mut self) -> Option<MovementTrace> {
         self.movement.take()
+    }
+}
+
+fn resolve_manny_mesh(args: &Args) -> Option<(PathBuf, AssetMesh)> {
+    let (path, explicit) = if let Some(path) = args.manny_mesh_json.as_ref() {
+        (path.clone(), true)
+    } else {
+        let default = PathBuf::from("artifacts/run_cache/manny_mesh/mannysuit_mesh.json");
+        if default.exists() {
+            (default, false)
+        } else {
+            eprintln!(
+                "[grim_viewer] Manny mesh JSON not found at artifacts/run_cache/manny_mesh/mannysuit_mesh.json; using proxy primitives",
+            );
+            return None;
+        }
+    };
+
+    match load_exported_mesh(&path) {
+        Ok(mesh) => Some((path, mesh)),
+        Err(err) => {
+            if explicit {
+                eprintln!(
+                    "[grim_viewer] warning: failed to load Manny mesh {}: {err:?}",
+                    path.display()
+                );
+            } else {
+                eprintln!(
+                    "[grim_viewer] warning: Manny mesh load failed from {}: {err:?}; continuing with proxy primitives",
+                    path.display()
+                );
+            }
+            None
+        }
     }
 }
 
@@ -284,6 +318,11 @@ fn main() -> Result<()> {
 
     let audio_overlay_requested = audio_status_rx.is_some();
 
+    let manny_mesh_candidate = resolve_manny_mesh(&args);
+    if let Some((path, _)) = &manny_mesh_candidate {
+        println!("[grim_viewer] using Manny mesh {}", path.display());
+    }
+
     let layout_preset_ref = layout_preset.as_ref();
     let panel_width = |preset: Option<&PanelPreset>, default: u32| -> u32 {
         preset.and_then(|p| p.width).unwrap_or(default)
@@ -366,6 +405,7 @@ fn main() -> Result<()> {
         scene.clone(),
         audio_overlay_requested,
         layout_preset,
+        manny_mesh_candidate.map(|(_, mesh)| mesh),
     )
     .block_on()?;
 

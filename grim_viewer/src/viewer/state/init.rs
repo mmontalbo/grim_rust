@@ -2,7 +2,7 @@ use std::{borrow::Cow, sync::Arc};
 
 use super::super::markers::{MARKER_VERTICES, MarkerInstance, MarkerVertex};
 use super::super::mesh::{
-    MeshInstance, MeshPrimitive, MeshUniforms, MeshVertex, PrimitiveKind, primitive,
+    AssetMesh, MeshInstance, MeshPrimitive, MeshUniforms, MeshVertex, PrimitiveKind, primitive,
     view_projection_uniform,
 };
 use super::super::overlays::{OverlayConfig, TextOverlay};
@@ -124,6 +124,7 @@ pub(super) async fn new(
     scene: Option<Arc<ViewerScene>>,
     enable_audio_overlay: bool,
     layout_preset: Option<LayoutPreset>,
+    manny_mesh: Option<AssetMesh>,
 ) -> Result<ViewerState> {
     let size = window.inner_size();
     let layout_preset = layout_preset.unwrap_or_default();
@@ -174,7 +175,7 @@ pub(super) async fn new(
         &texture_resources.bind_group_layout,
         wgpu.surface_format,
     );
-    let mesh_resources = create_mesh_resources(&wgpu.device, size, wgpu.surface_format);
+    let mesh_resources = create_mesh_resources(&wgpu.device, size, wgpu.surface_format, manny_mesh);
 
     let selected_entity = initial_selected_entity(scene_ref);
 
@@ -615,6 +616,7 @@ fn create_mesh_resources(
     device: &wgpu::Device,
     size: PhysicalSize<u32>,
     surface_format: wgpu::TextureFormat,
+    manny_mesh: Option<AssetMesh>,
 ) -> MeshResources {
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("mesh-uniform-layout"),
@@ -743,6 +745,25 @@ fn create_mesh_resources(
 
     let (depth_texture, depth_view) = create_mesh_depth_texture(device, size);
 
+    let manny_buffers = manny_mesh.map(|asset| {
+        let AssetMesh {
+            name,
+            primitive,
+            triangle_count,
+            bounds_min,
+            bounds_max,
+            radius,
+            insert_offset,
+        } = asset;
+        let label = name.as_deref().unwrap_or("mesh-manny");
+        let vertex_count = primitive.vertices.len();
+        println!(
+            "[grim_viewer] Manny mesh loaded: {} vertices, {} triangles, bounds min {:?}, max {:?}, radius {:?}, insert {:?}",
+            vertex_count, triangle_count, bounds_min, bounds_max, radius, insert_offset
+        );
+        upload_primitive(device, label, primitive)
+    });
+
     MeshResources {
         pipeline,
         bind_group,
@@ -754,12 +775,13 @@ fn create_mesh_resources(
         sphere: sphere_buffers,
         cube: cube_buffers,
         cone: cone_buffers,
+        manny: manny_buffers,
     }
 }
 
 fn upload_primitive(
     device: &wgpu::Device,
-    label: &'static str,
+    label: &str,
     primitive: MeshPrimitive,
 ) -> PrimitiveBuffers {
     let vertex_label = format!("{label}-vertex-buffer");

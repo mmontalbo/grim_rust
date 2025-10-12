@@ -49,6 +49,10 @@ pub struct Args {
     /// Optional layout preset JSON describing overlay sizes and minimap constraints
     #[arg(long)]
     pub layout_preset: Option<PathBuf>,
+
+    /// Optional Manny mesh JSON exported via three_do_export for 3D rendering
+    #[arg(long)]
+    pub manny_mesh_json: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
