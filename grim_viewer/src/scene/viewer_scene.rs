@@ -411,6 +411,9 @@ impl SceneEntityBuilder {
     }
 
     fn build(self) -> SceneEntity {
+        let orientation = self
+            .rotation
+            .map(crate::scene::EntityOrientation::from_degrees);
         SceneEntity {
             kind: self.key.kind,
             name: self.key.name,
@@ -422,6 +425,7 @@ impl SceneEntityBuilder {
             methods: self.methods.into_iter().collect(),
             position: self.position,
             rotation: self.rotation,
+            orientation,
             facing_target: self.facing_target,
             head_control: self.head_control,
             head_look_rate: self.head_look_rate,
@@ -459,6 +463,7 @@ pub struct SceneEntity {
     pub methods: Vec<String>,
     pub position: Option<[f32; 3]>,
     pub rotation: Option<[f32; 3]>,
+    pub orientation: Option<crate::scene::EntityOrientation>,
     pub facing_target: Option<String>,
     pub head_control: Option<String>,
     pub head_look_rate: Option<f32>,

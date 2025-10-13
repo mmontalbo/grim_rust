@@ -15,7 +15,9 @@ use std::f32::consts::PI;
 use wgpu::SurfaceError;
 
 use crate::{
-    scene::{CameraProjector, HotspotEventKind, SceneEntityKind, event_marker_style},
+    scene::{
+        CameraProjector, EntityOrientation, HotspotEventKind, SceneEntityKind, event_marker_style,
+    },
     ui_layout::{PanelKind, ViewportRect},
 };
 
@@ -494,7 +496,7 @@ fn append_instances(target: &mut Vec<MeshInstance>, source: &[MeshInstance]) -> 
 
 fn manny_mesh_instance(
     position: [f32; 3],
-    rotation_degrees: Option<[f32; 3]>,
+    orientation: Option<EntityOrientation>,
     base_scale: f32,
     mesh: &super::MannyMesh,
     color: [f32; 4],
@@ -510,26 +512,14 @@ fn manny_mesh_instance(
         scale = anchor_scale;
     }
     scale = scale.min(SCALE_MAX);
-    let rotation = rotation_degrees
-        .map(rotation_from_degrees)
+    let rotation = orientation
+        .map(|basis| basis.quaternion)
         .unwrap_or(Quat::IDENTITY);
     let model = manny_model_matrix(position, rotation, scale, mesh.insert_offset);
     MeshInstance {
         model: model.to_cols_array_2d(),
         color,
     }
-}
-
-fn rotation_from_degrees(rotation: [f32; 3]) -> Quat {
-    // Lua snapshots store rotations as {pitch, yaw, roll} where yaw spins around the
-    // game's vertical (Z) axis. Convert to our Z-up basis before building the quaternion.
-    let pitch = rotation[0].to_radians();
-    let yaw = rotation[1].to_radians();
-    let roll = rotation[2].to_radians();
-    let yaw_z = Quat::from_rotation_z(yaw);
-    let pitch_x = Quat::from_rotation_x(pitch);
-    let roll_y = Quat::from_rotation_y(roll);
-    yaw_z * pitch_x * roll_y
 }
 
 fn manny_model_matrix(
@@ -591,8 +581,8 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         let palette = MANNY_ANCHOR_PALETTE;
         let color = palette_to_color(palette.color, palette.highlight.max(0.6));
         if let Some(mesh) = manny_mesh {
-            let rotation = manny_entity.and_then(|entity| entity.rotation);
-            let instance = manny_mesh_instance(position, rotation, base_scale, mesh, color);
+            let orientation = manny_entity.and_then(|entity| entity.orientation);
+            let instance = manny_mesh_instance(position, orientation, base_scale, mesh, color);
             groups.push_manny(instance);
         } else {
             groups.push(
@@ -1017,39 +1007,4 @@ fn ensure_minimap_marker_capacity(state: &mut ViewerState, required: usize) {
         mapped_at_creation: false,
     });
     state.minimap_marker_capacity = new_capacity;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use glam::Vec3;
-
-    const EPS: f32 = 1e-5;
-
-    #[test]
-    fn rotation_from_degrees_yaw_spins_around_z_axis() {
-        let quat = rotation_from_degrees([0.0, 90.0, 0.0]);
-        let rotated = quat * Vec3::X;
-        assert!(rotated.x.abs() < EPS);
-        assert!((rotated.y - 1.0).abs() < EPS);
-        assert!(rotated.z.abs() < EPS);
-    }
-
-    #[test]
-    fn rotation_from_degrees_pitch_spins_around_x_axis() {
-        let quat = rotation_from_degrees([90.0, 0.0, 0.0]);
-        let rotated = quat * Vec3::Z;
-        assert!(rotated.x.abs() < EPS);
-        assert!((rotated.y + 1.0).abs() < EPS);
-        assert!(rotated.z.abs() < EPS);
-    }
-
-    #[test]
-    fn rotation_from_degrees_roll_spins_around_y_axis() {
-        let quat = rotation_from_degrees([0.0, 0.0, 90.0]);
-        let rotated = quat * Vec3::Z;
-        assert!((rotated.x - 1.0).abs() < EPS);
-        assert!(rotated.y.abs() < EPS);
-        assert!(rotated.z.abs() < EPS);
-    }
 }

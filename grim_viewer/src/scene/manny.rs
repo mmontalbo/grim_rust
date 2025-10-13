@@ -1,7 +1,7 @@
 //! Manny-office specific behaviour: pruning the scene allowlist and reconciling
 //! geometry snapshots so the viewer focuses on the core desk/tube experience.
 
-use super::{GeometryPose, LuaGeometrySnapshot, SceneEntity};
+use super::{EntityOrientation, GeometryPose, LuaGeometrySnapshot, SceneEntity};
 
 pub(super) fn is_manny_office(
     set_variable_name: Option<&str>,
@@ -84,6 +84,7 @@ pub(super) fn apply_geometry_overrides(
             entity.position = Some(pose.position);
             if let Some(rotation) = pose.rotation {
                 entity.rotation = Some(rotation);
+                entity.orientation = Some(EntityOrientation::from_degrees(rotation));
             }
         }
     }
@@ -148,6 +149,7 @@ mod tests {
             methods: Vec::new(),
             position: None,
             rotation: None,
+            orientation: None,
             facing_target: None,
             head_control: None,
             head_look_rate: None,
@@ -209,6 +211,12 @@ mod tests {
 
         assert_eq!(entities[0].position, Some([1.0, 2.0, 3.0]));
         assert_eq!(entities[0].rotation, Some([0.0, 90.0, 0.0]));
+        let orientation = entities[0]
+            .orientation
+            .expect("orientation derived from rotation");
+        assert!((orientation.forward[0] + 1.0).abs() < 1e-6);
+        assert!(orientation.forward[1].abs() < 1e-6);
+        assert!(orientation.forward[2].abs() < 1e-6);
         assert_eq!(entities[1].position, Some([4.0, 5.0, 6.0]));
     }
 }

@@ -6,6 +6,7 @@
 //! bitmap.
 
 mod manny;
+mod orientation;
 
 use std::{
     borrow::Cow,
@@ -25,6 +26,8 @@ use crate::timeline::{
 };
 use grim_formats::SetFile;
 use grim_formats::set::Setup;
+
+pub use orientation::EntityOrientation;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MovementSample {
