@@ -4,6 +4,8 @@
 `main.rs` finishes loading assets and timeline data, it hands everything to this
 module so the wgpu pipeline, overlays, and input handling stay in sync. Think of
 this directory as the glue between scene data and pixels on screen.
+All transforms assume the game's right-handed X/Y/Z basis with Z pointing up, so
+decoded meshes, markers, and camera math share the same world axes.
 
 ## What Lives Here
 - **`init.rs`:** Asynchronously constructs the wgpu device/surface, uploads the

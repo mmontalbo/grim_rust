@@ -1,10 +1,12 @@
-<area>: <short change summary>
+<component>: <short change summary>
 
 Why:
 - Intent behind the change
 
 What:
 - path/to/file: brief description of the edit
+
+# component should be a crate name (e.g. grim_viewer, grim_engine, grim_formats), docs, or tools.
 
 # Replace the placeholder bullets with concrete notes before saving.
 # Keep the blank line between the subject line and the Why section.

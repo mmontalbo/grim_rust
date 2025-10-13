@@ -2,7 +2,7 @@
 //! The geometry lives in local space scaled to a unit-ish cube so callers can
 //! apply a single uniform scale derived from scene bounds.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::PI;
 use std::fs;
 use std::path::Path;
 
@@ -256,6 +256,9 @@ fn build_cube() -> MeshPrimitive {
 }
 
 /// Load a JSON mesh exported via `grim_formats::three_do_export` into flattened buffers.
+/// 3DO meshes already use the game's right-handed X/Y/Z basis with Z pointing up, so the
+/// viewer keeps those axes intact and lets instance transforms (rotation/scale) handle
+/// orientation in world space.
 pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
     let data = fs::read(path).with_context(|| format!("reading mesh JSON {}", path.display()))?;
     let export: ExportModel = serde_json::from_slice(&data)
@@ -268,7 +271,6 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
     let mut bounds_max = [f32::NEG_INFINITY; 3];
     let mut triangle_count = 0usize;
     let mesh_transforms = compute_mesh_transforms(&export);
-    let axis_adjust = Mat4::from_rotation_x(-FRAC_PI_2);
     let mut mesh_index = 0usize;
 
     for geoset in &export.geosets {
@@ -286,7 +288,6 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
                 .get(mesh_index)
                 .copied()
                 .unwrap_or(Mat4::IDENTITY);
-            let transform = axis_adjust * transform;
             let normal_matrix = Mat3::from_mat4(transform);
 
             let base_index = vertices.len();
@@ -345,11 +346,7 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
         bail!("mesh {} contained no geometry", label);
     }
 
-    let insert_offset = export.insert_offset.map(|offset| {
-        axis_adjust
-            .transform_point3(Vec3::from_array(offset))
-            .into()
-    });
+    let insert_offset = export.insert_offset;
 
     Ok(AssetMesh {
         name: export.name,
@@ -383,7 +380,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn load_exported_mesh_rotates_three_do_axes() -> Result<()> {
+    fn load_exported_mesh_preserves_three_do_axes() -> Result<()> {
         let model = json!({
             "name": "test",
             "radius": 0.5,
@@ -433,16 +430,16 @@ mod tests {
             .collect();
 
         assert!((positions[0][0] - 0.0).abs() < 1e-4);
-        assert!((positions[0][1] - 1.0).abs() < 1e-4);
-        assert!(positions[0][2].abs() < 1e-4);
+        assert!(positions[0][1].abs() < 1e-4);
+        assert!((positions[0][2] - 1.0).abs() < 1e-4);
         assert!((normals[0][0] - 0.0).abs() < 1e-4);
-        assert!((normals[0][1] - 1.0).abs() < 1e-4);
-        assert!(normals[0][2].abs() < 1e-4);
+        assert!(normals[0][1].abs() < 1e-4);
+        assert!((normals[0][2] - 1.0).abs() < 1e-4);
 
         let offset = mesh.insert_offset.expect("insert offset present");
         assert!((offset[0] - 0.1).abs() < 1e-6);
-        assert!((offset[1] - 0.3).abs() < 1e-6);
-        assert!((offset[2] + 0.2).abs() < 1e-6);
+        assert!((offset[1] - 0.2).abs() < 1e-6);
+        assert!((offset[2] - 0.3).abs() < 1e-6);
         Ok(())
     }
 }

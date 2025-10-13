@@ -10,7 +10,7 @@ use super::super::overlays::TextOverlay;
 use super::ViewerState;
 use super::layout;
 use bytemuck::cast_slice;
-use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
+use glam::{Mat4, Quat, Vec3, Vec4};
 use std::f32::consts::PI;
 use wgpu::SurfaceError;
 
@@ -68,8 +68,7 @@ pub(super) fn render(state: &mut ViewerState) -> Result<(), SurfaceError> {
             label: Some("grim-viewer-encoder"),
         });
 
-    state.mesh_preview_angle =
-        (state.mesh_preview_angle + PREVIEW_SPIN_RATE) % (2.0 * PI);
+    state.mesh_preview_angle = (state.mesh_preview_angle + PREVIEW_SPIN_RATE) % (2.0 * PI);
 
     draw_background(state, &view, &mut encoder);
     draw_scene_meshes(state, &view, &mut encoder);
@@ -375,19 +374,18 @@ fn build_preview_draw(rect: ViewportRect, angle: f32, manny: &super::MannyMesh) 
     let orbit_distance = (target_extent * PREVIEW_ORBIT_FACTOR).max(PREVIEW_MIN_DISTANCE);
     let eye = Vec3::new(
         orbit_distance * angle.cos(),
-        target_extent * PREVIEW_ELEVATION_FACTOR,
         orbit_distance * angle.sin(),
+        target_extent * PREVIEW_ELEVATION_FACTOR,
     );
     let target = Vec3::ZERO;
-    let up = Vec3::Y;
+    let up = Vec3::Z;
 
     let view_matrix = Mat4::look_at_rh(eye, target, up);
     let aspect = (rect.width / rect.height).max(0.1);
-    let projection =
-        Mat4::perspective_rh(32.0f32.to_radians(), aspect, 0.05, orbit_distance * 6.0);
+    let projection = Mat4::perspective_rh(32.0f32.to_radians(), aspect, 0.05, orbit_distance * 6.0);
     let uniform = view_projection_uniform(projection * view_matrix);
 
-    let rotation = Mat4::from_quat(Quat::from_rotation_y(angle));
+    let rotation = Mat4::from_quat(Quat::from_rotation_z(-angle));
     let scale_matrix = Mat4::from_scale(Vec3::splat(scale));
     let model = rotation * scale_matrix * manny.preview_center_matrix;
 
@@ -523,12 +521,15 @@ fn manny_mesh_instance(
 }
 
 fn rotation_from_degrees(rotation: [f32; 3]) -> Quat {
-    Quat::from_euler(
-        EulerRot::XYZ,
-        rotation[0].to_radians(),
-        rotation[1].to_radians(),
-        rotation[2].to_radians(),
-    )
+    // Lua snapshots store rotations as {pitch, yaw, roll} where yaw spins around the
+    // game's vertical (Z) axis. Convert to our Z-up basis before building the quaternion.
+    let pitch = rotation[0].to_radians();
+    let yaw = rotation[1].to_radians();
+    let roll = rotation[2].to_radians();
+    let yaw_z = Quat::from_rotation_z(yaw);
+    let pitch_x = Quat::from_rotation_x(pitch);
+    let roll_y = Quat::from_rotation_y(roll);
+    yaw_z * pitch_x * roll_y
 }
 
 fn manny_model_matrix(
@@ -1016,4 +1017,39 @@ fn ensure_minimap_marker_capacity(state: &mut ViewerState, required: usize) {
         mapped_at_creation: false,
     });
     state.minimap_marker_capacity = new_capacity;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+
+    const EPS: f32 = 1e-5;
+
+    #[test]
+    fn rotation_from_degrees_yaw_spins_around_z_axis() {
+        let quat = rotation_from_degrees([0.0, 90.0, 0.0]);
+        let rotated = quat * Vec3::X;
+        assert!(rotated.x.abs() < EPS);
+        assert!((rotated.y - 1.0).abs() < EPS);
+        assert!(rotated.z.abs() < EPS);
+    }
+
+    #[test]
+    fn rotation_from_degrees_pitch_spins_around_x_axis() {
+        let quat = rotation_from_degrees([90.0, 0.0, 0.0]);
+        let rotated = quat * Vec3::Z;
+        assert!(rotated.x.abs() < EPS);
+        assert!((rotated.y + 1.0).abs() < EPS);
+        assert!(rotated.z.abs() < EPS);
+    }
+
+    #[test]
+    fn rotation_from_degrees_roll_spins_around_y_axis() {
+        let quat = rotation_from_degrees([0.0, 0.0, 90.0]);
+        let rotated = quat * Vec3::Z;
+        assert!((rotated.x - 1.0).abs() < EPS);
+        assert!(rotated.y.abs() < EPS);
+        assert!(rotated.z.abs() < EPS);
+    }
 }
