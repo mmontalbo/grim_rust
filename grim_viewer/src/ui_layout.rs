@@ -28,6 +28,7 @@ pub enum PanelKind {
     Timeline,
     Scrubber,
     Minimap,
+    MeshPreview,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +68,7 @@ impl UiLayout {
         timeline: Option<PanelSize>,
         scrubber: Option<PanelSize>,
         minimap: MinimapConstraints,
+        mesh_preview: Option<PanelSize>,
     ) -> Result<Self> {
         let mut tree = TaffyTree::new();
         let mut panel_nodes: HashMap<PanelKind, NodeId> = HashMap::new();
@@ -132,6 +134,27 @@ impl UiLayout {
                 })
                 .context("creating scrubber panel node")?;
             panel_nodes.insert(PanelKind::Scrubber, node);
+            children.push(node);
+        }
+
+        if let Some(size) = mesh_preview {
+            let node = tree
+                .new_leaf(Style {
+                    position: Position::Absolute,
+                    inset: Rect {
+                        left: LengthPercentageAuto::Auto,
+                        right: LengthPercentageAuto::Length(PANEL_MARGIN * 2.0 + minimap.min_side),
+                        top: LengthPercentageAuto::Auto,
+                        bottom: LengthPercentageAuto::Length(PANEL_MARGIN),
+                    },
+                    size: Size {
+                        width: Dimension::Length(size.width),
+                        height: Dimension::Length(size.height),
+                    },
+                    ..Default::default()
+                })
+                .context("creating mesh preview panel node")?;
+            panel_nodes.insert(PanelKind::MeshPreview, node);
             children.push(node);
         }
 

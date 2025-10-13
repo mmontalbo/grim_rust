@@ -3,17 +3,21 @@ use super::super::markers::{
     MarkerProjection, TUBE_ANCHOR_PALETTE, entity_palette,
 };
 use super::super::mesh::{
-    MeshInstance, PrimitiveKind, bounds_scale, instance_transform, instance_transform_oriented,
-    view_projection_uniform,
+    MeshInstance, MeshUniforms, PrimitiveKind, bounds_scale, instance_transform,
+    instance_transform_oriented, view_projection_uniform,
 };
 use super::super::overlays::TextOverlay;
 use super::ViewerState;
 use super::layout;
 use bytemuck::cast_slice;
 use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
+use std::f32::consts::PI;
 use wgpu::SurfaceError;
 
-use crate::scene::{CameraProjector, HotspotEventKind, SceneEntityKind, event_marker_style};
+use crate::{
+    scene::{CameraProjector, HotspotEventKind, SceneEntityKind, event_marker_style},
+    ui_layout::{PanelKind, ViewportRect},
+};
 
 const MANNY_ANCHOR_SCALE: f32 = 1.35;
 const DESK_ANCHOR_SCALE: f32 = 1.20;
@@ -46,6 +50,12 @@ const COLOR_CLAMP_MIN: f32 = 0.05;
 const COLOR_CLAMP_MAX: f32 = 1.0;
 const HIGHLIGHT_BOOST_MIN: f32 = 0.4;
 const HIGHLIGHT_BOOST_MAX: f32 = 1.6;
+const PREVIEW_SPIN_RATE: f32 = 0.004;
+/// Fraction of the preview viewport we try to occupy with the mesh's bounding box.
+const PREVIEW_TARGET_EXTENT: f32 = 0.9;
+const PREVIEW_ORBIT_FACTOR: f32 = 3.6;
+const PREVIEW_ELEVATION_FACTOR: f32 = 2.4;
+const PREVIEW_MIN_DISTANCE: f32 = 2.0;
 
 pub(super) fn render(state: &mut ViewerState) -> Result<(), SurfaceError> {
     let frame = state.surface.get_current_texture()?;
@@ -58,8 +68,12 @@ pub(super) fn render(state: &mut ViewerState) -> Result<(), SurfaceError> {
             label: Some("grim-viewer-encoder"),
         });
 
+    state.mesh_preview_angle =
+        (state.mesh_preview_angle + PREVIEW_SPIN_RATE) % (2.0 * PI);
+
     draw_background(state, &view, &mut encoder);
     draw_scene_meshes(state, &view, &mut encoder);
+    draw_mesh_preview(state, &view, &mut encoder);
     draw_minimap_markers(state, &view, &mut encoder);
     draw_overlays(state, &view, &mut encoder);
 
@@ -213,6 +227,92 @@ fn draw_scene_meshes(
     }
 }
 
+fn draw_mesh_preview(
+    state: &mut ViewerState,
+    view: &wgpu::TextureView,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    let Some(mesh_resources) = state.mesh.as_ref() else {
+        return;
+    };
+    let Some(rect) = state
+        .ui_layout
+        .panel_rect(PanelKind::MeshPreview)
+        .filter(|r| r.width > 4.0 && r.height > 4.0)
+    else {
+        return;
+    };
+    let Some(scene) = state.scene.as_ref() else {
+        return;
+    };
+    let Some(selected_idx) = state.selected_entity else {
+        return;
+    };
+    let Some(entity) = scene.entities.get(selected_idx) else {
+        return;
+    };
+    if !entity.name.eq_ignore_ascii_case("manny") {
+        return;
+    }
+    let Some(manny_mesh) = mesh_resources.manny.as_ref() else {
+        return;
+    };
+
+    let preview = build_preview_draw(rect, state.mesh_preview_angle, manny_mesh);
+
+    state.queue.write_buffer(
+        &mesh_resources.preview.instance_buffer,
+        0,
+        cast_slice(&[preview.instance]),
+    );
+    state.queue.write_buffer(
+        &mesh_resources.preview.uniform_buffer,
+        0,
+        cast_slice(&[preview.uniform]),
+    );
+
+    let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
+        view: &mesh_resources.depth_view,
+        depth_ops: Some(wgpu::Operations {
+            load: wgpu::LoadOp::Clear(1.0),
+            store: wgpu::StoreOp::Store,
+        }),
+        stencil_ops: None,
+    };
+
+    let mut preview_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mesh-preview-pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(depth_attachment),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    preview_pass.set_pipeline(&mesh_resources.pipeline);
+    preview_pass.set_bind_group(0, &mesh_resources.preview.bind_group, &[]);
+    preview_pass.set_viewport(rect.x, rect.y, rect.width, rect.height, 0.0, 1.0);
+    preview_pass.set_vertex_buffer(0, manny_mesh.buffers.vertex.slice(..));
+    let instance_bytes = std::mem::size_of::<MeshInstance>() as u64;
+    preview_pass.set_vertex_buffer(
+        1,
+        mesh_resources
+            .preview
+            .instance_buffer
+            .slice(0..instance_bytes),
+    );
+    preview_pass.set_index_buffer(
+        manny_mesh.buffers.index.slice(..),
+        wgpu::IndexFormat::Uint16,
+    );
+    preview_pass.draw_indexed(0..manny_mesh.buffers.index_count, 0, 0..1);
+}
+
 fn draw_minimap_markers(
     state: &mut ViewerState,
     view: &wgpu::TextureView,
@@ -260,6 +360,44 @@ fn draw_minimap_markers(
         0..MARKER_VERTICES.len() as u32,
         0..minimap_instances.len() as u32,
     );
+}
+
+struct PreviewDraw {
+    uniform: MeshUniforms,
+    instance: MeshInstance,
+}
+
+fn build_preview_draw(rect: ViewportRect, angle: f32, manny: &super::MannyMesh) -> PreviewDraw {
+    let max_extent = manny.max_half_extent.max(0.01);
+    let scale = (PREVIEW_TARGET_EXTENT / max_extent).clamp(0.02, 50.0);
+    let target_extent = max_extent * scale;
+
+    let orbit_distance = (target_extent * PREVIEW_ORBIT_FACTOR).max(PREVIEW_MIN_DISTANCE);
+    let eye = Vec3::new(
+        orbit_distance * angle.cos(),
+        target_extent * PREVIEW_ELEVATION_FACTOR,
+        orbit_distance * angle.sin(),
+    );
+    let target = Vec3::ZERO;
+    let up = Vec3::Y;
+
+    let view_matrix = Mat4::look_at_rh(eye, target, up);
+    let aspect = (rect.width / rect.height).max(0.1);
+    let projection =
+        Mat4::perspective_rh(32.0f32.to_radians(), aspect, 0.05, orbit_distance * 6.0);
+    let uniform = view_projection_uniform(projection * view_matrix);
+
+    let rotation = Mat4::from_quat(Quat::from_rotation_y(angle));
+    let scale_matrix = Mat4::from_scale(Vec3::splat(scale));
+    let model = rotation * scale_matrix * manny.preview_center_matrix;
+
+    PreviewDraw {
+        uniform,
+        instance: MeshInstance {
+            model: model.to_cols_array_2d(),
+            color: [0.92, 0.92, 0.92, 1.0],
+        },
+    }
 }
 
 fn draw_overlays(

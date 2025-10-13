@@ -12,6 +12,7 @@ use crate::cli::LayoutPreset;
 use crate::scene::{CameraProjector, MovementScrubber, ViewerScene};
 use crate::ui_layout::UiLayout;
 use anyhow::Result;
+use glam::Mat4;
 use wgpu::SurfaceError;
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -43,6 +44,7 @@ pub struct ViewerState {
     minimap_marker_capacity: usize,
     mesh: Option<MeshResources>,
     ui_layout: UiLayout,
+    mesh_preview_angle: f32,
 }
 
 mod init;
@@ -130,6 +132,7 @@ pub(super) struct MeshResources {
     pub cone: PrimitiveBuffers,
     #[allow(dead_code)]
     pub manny: Option<MannyMesh>,
+    pub preview: MeshPreviewResources,
 }
 
 pub(super) struct PrimitiveBuffers {
@@ -138,8 +141,16 @@ pub(super) struct PrimitiveBuffers {
     pub index_count: u32,
 }
 
+pub(super) struct MeshPreviewResources {
+    pub bind_group: wgpu::BindGroup,
+    pub uniform_buffer: wgpu::Buffer,
+    pub instance_buffer: wgpu::Buffer,
+}
+
 pub(super) struct MannyMesh {
     pub buffers: PrimitiveBuffers,
     pub radius: Option<f32>,
     pub insert_offset: Option<[f32; 3]>,
+    pub preview_center_matrix: Mat4,
+    pub max_half_extent: f32,
 }

@@ -28,8 +28,8 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Immediate Focus",
             "body": [
-                "Exercise Manny’s decoded mesh alongside the desk and tube proxies so we can confirm depth/parallax and selection highlights stay consistent before swapping in additional assets.",
-                "Dial in Manny’s alignment (scale/origin/rotation) against the recovered camera and prep the render path for loading the next 3DO meshes.",
+                "Swap Manny’s exported 3DO mesh into the main viewer scene and validate the camera render now that axes line up, replacing the sphere proxy.",
+                "Carry the axis conversion across to the desk/tube exports so they drop into the viewer with the right origin and scale.",
                 "Run the Manny office interaction traces after each rendering change to ensure computer triggers and fallback handling remain stable.",
             ],
         },
@@ -43,7 +43,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Use `cargo run -p grim_formats --bin cos_dump -- <costume>` to inspect costume component lists before wiring up 3DO decoding.",
                 "After regenerating meshes or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
                 "grim_viewer now accepts `--manny-mesh-json`; otherwise it looks for artifacts/run_cache/manny_mesh/mannysuit_mesh.json when staging the mesh.",
-                "With Manny’s mesh replacing the sphere proxy, spot-check the gold selection pointer and minimap overlays so interactions stay readable.",
+                "Cross-check new 3DO exports against the axis-conversion unit test harness before wiring them into the viewer.",
                 "Leverage the in-view axis gizmo to confirm world orientation when debugging new 3D markers or meshes.",
                 "Document the primitive mesh legend (cones/spheres/cubes) and call out that overlap is expected until decoded meshes replace the proxies.",
             ],

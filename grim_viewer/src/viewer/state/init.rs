@@ -14,10 +14,10 @@ use super::layout;
 use super::overlay_updates;
 use super::panels::ViewerOverlays;
 use super::selection;
-use super::{MannyMesh, MeshResources, PrimitiveBuffers, ViewerState};
+use super::{MannyMesh, MeshPreviewResources, MeshResources, PrimitiveBuffers, ViewerState};
 use anyhow::{Context, Result};
 use bytemuck::cast_slice;
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -66,6 +66,10 @@ struct RenderResources {
 }
 
 const MESH_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const MESH_PREVIEW_PANEL_SIZE: PanelSize = PanelSize {
+    width: 220.0,
+    height: 220.0,
+};
 
 /// Overlay textures plus layout hints for the HUD panels.
 struct OverlaySetup {
@@ -187,12 +191,19 @@ pub(super) async fn new(
         minimap_constraints,
     } = overlay_setup;
 
+    let mesh_preview_panel = if mesh_resources.manny.is_some() {
+        Some(MESH_PREVIEW_PANEL_SIZE)
+    } else {
+        None
+    };
+
     let ui_layout = UiLayout::new(
         size,
         audio_panel,
         timeline_panel,
         scrubber_panel,
         minimap_constraints,
+        mesh_preview_panel,
     )?;
 
     let mut state = assemble_viewer_state(
@@ -609,6 +620,7 @@ fn assemble_viewer_state(
         minimap_marker_capacity,
         mesh,
         ui_layout,
+        mesh_preview_angle: 0.0,
     }
 }
 
@@ -639,12 +651,27 @@ fn create_mesh_resources(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
+    let preview_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mesh-preview-uniform-buffer"),
+        contents: cast_slice(&[initial_uniform]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mesh-uniform-bind-group"),
         layout: &bind_group_layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
             resource: uniform_buffer.as_entire_binding(),
+        }],
+    });
+
+    let preview_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh-preview-uniform-bind-group"),
+        layout: &bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: preview_uniform_buffer.as_entire_binding(),
         }],
     });
 
@@ -743,6 +770,13 @@ fn create_mesh_resources(
         mapped_at_creation: false,
     });
 
+    let preview_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mesh-preview-instance-buffer"),
+        size: std::mem::size_of::<MeshInstance>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     let (depth_texture, depth_view) = create_mesh_depth_texture(device, size);
 
     let manny_resources = manny_mesh.map(|asset| {
@@ -762,10 +796,40 @@ fn create_mesh_resources(
             vertex_count, triangle_count, bounds_min, bounds_max, radius, insert_offset
         );
         let buffers = upload_primitive(device, label, primitive);
+        let bounds_center = [
+            (bounds_min[0] + bounds_max[0]) * 0.5,
+            (bounds_min[1] + bounds_max[1]) * 0.5,
+            (bounds_min[2] + bounds_max[2]) * 0.5,
+        ];
+        let center_after_offset = if let Some(offset) = insert_offset {
+            [
+                bounds_center[0] - offset[0],
+                bounds_center[1] - offset[1],
+                bounds_center[2] - offset[2],
+            ]
+        } else {
+            bounds_center
+        };
+        let half_extents = [
+            (bounds_max[0] - bounds_min[0]) * 0.5,
+            (bounds_max[1] - bounds_min[1]) * 0.5,
+            (bounds_max[2] - bounds_min[2]) * 0.5,
+        ];
+        let center_matrix = Mat4::from_translation(-Vec3::from_array(center_after_offset));
+        let insert_matrix = insert_offset
+            .map(|offset| Mat4::from_translation(-Vec3::from_array(offset)))
+            .unwrap_or(Mat4::IDENTITY);
+        let preview_center_matrix = center_matrix * insert_matrix;
+        let max_half_extent = half_extents
+            .iter()
+            .copied()
+            .fold(0.0_f32, |acc, value| acc.max(value.abs()));
         MannyMesh {
             buffers,
             radius,
             insert_offset,
+            preview_center_matrix,
+            max_half_extent,
         }
     });
 
@@ -781,6 +845,11 @@ fn create_mesh_resources(
         cube: cube_buffers,
         cone: cone_buffers,
         manny: manny_resources,
+        preview: MeshPreviewResources {
+            bind_group: preview_bind_group,
+            uniform_buffer: preview_uniform_buffer,
+            instance_buffer: preview_instance_buffer,
+        },
     }
 }
 

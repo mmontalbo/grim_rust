@@ -2,7 +2,7 @@
 //! The geometry lives in local space scaled to a unit-ish cube so callers can
 //! apply a single uniform scale derived from scene bounds.
 
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::fs;
 use std::path::Path;
 
@@ -268,6 +268,7 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
     let mut bounds_max = [f32::NEG_INFINITY; 3];
     let mut triangle_count = 0usize;
     let mesh_transforms = compute_mesh_transforms(&export);
+    let axis_adjust = Mat4::from_rotation_x(-FRAC_PI_2);
     let mut mesh_index = 0usize;
 
     for geoset in &export.geosets {
@@ -285,6 +286,7 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
                 .get(mesh_index)
                 .copied()
                 .unwrap_or(Mat4::IDENTITY);
+            let transform = axis_adjust * transform;
             let normal_matrix = Mat3::from_mat4(transform);
 
             let base_index = vertices.len();
@@ -343,6 +345,12 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
         bail!("mesh {} contained no geometry", label);
     }
 
+    let insert_offset = export.insert_offset.map(|offset| {
+        axis_adjust
+            .transform_point3(Vec3::from_array(offset))
+            .into()
+    });
+
     Ok(AssetMesh {
         name: export.name,
         primitive: MeshPrimitive::new(vertices, indices),
@@ -350,7 +358,7 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
         bounds_min,
         bounds_max,
         radius: export.radius,
-        insert_offset: export.insert_offset,
+        insert_offset,
     })
 }
 
@@ -364,6 +372,79 @@ struct ExportModel {
     insert_offset: Option<[f32; 3]>,
     #[serde(default)]
     nodes: Vec<ExportNode>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use serde_json::json;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn load_exported_mesh_rotates_three_do_axes() -> Result<()> {
+        let model = json!({
+            "name": "test",
+            "radius": 0.5,
+            "insert_offset": [0.1, 0.2, 0.3],
+            "geosets": [{
+                "meshes": [{
+                    "name": "tri",
+                    "vertices": [
+                        [0.0, 0.0, 1.0],
+                        [1.0, 0.0, 1.0],
+                        [0.0, 1.0, 1.0]
+                    ],
+                    "vertex_normals": [
+                        [0.0, 0.0, 1.0],
+                        [0.0, 0.0, 1.0],
+                        [0.0, 0.0, 1.0]
+                    ],
+                    "triangles": [{ "vertex_indices": [0, 1, 2] }]
+                }]
+            }],
+            "nodes": [{
+                "mesh_index": 0,
+                "parent": null,
+                "pivot": [0.0, 0.0, 0.0],
+                "position": [0.0, 0.0, 0.0],
+                "rotation_yaw_pitch_roll": [0.0, 0.0, 0.0]
+            }]
+        });
+
+        let mut file = NamedTempFile::new()?;
+        let bytes = serde_json::to_vec(&model)?;
+        file.write_all(&bytes)?;
+
+        let mesh = load_exported_mesh(file.path())?;
+        assert_eq!(mesh.primitive.vertices.len(), 3);
+        let positions: Vec<[f32; 3]> = mesh
+            .primitive
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position)
+            .collect();
+        let normals: Vec<[f32; 3]> = mesh
+            .primitive
+            .vertices
+            .iter()
+            .map(|vertex| vertex.normal)
+            .collect();
+
+        assert!((positions[0][0] - 0.0).abs() < 1e-4);
+        assert!((positions[0][1] - 1.0).abs() < 1e-4);
+        assert!(positions[0][2].abs() < 1e-4);
+        assert!((normals[0][0] - 0.0).abs() < 1e-4);
+        assert!((normals[0][1] - 1.0).abs() < 1e-4);
+        assert!(normals[0][2].abs() < 1e-4);
+
+        let offset = mesh.insert_offset.expect("insert offset present");
+        assert!((offset[0] - 0.1).abs() < 1e-6);
+        assert!((offset[1] - 0.3).abs() < 1e-6);
+        assert!((offset[2] + 0.2).abs() < 1e-6);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,11 +512,7 @@ fn compute_node_world_transforms(nodes: &[ExportNode]) -> Vec<Mat4> {
         .collect()
 }
 
-fn resolve_node_transform(
-    idx: usize,
-    nodes: &[ExportNode],
-    cache: &mut [Option<Mat4>],
-) -> Mat4 {
+fn resolve_node_transform(idx: usize, nodes: &[ExportNode], cache: &mut [Option<Mat4>]) -> Mat4 {
     if let Some(transform) = cache[idx] {
         return transform;
     }
@@ -454,9 +531,24 @@ fn resolve_node_transform(
 fn node_local_transform(node: &ExportNode) -> Mat4 {
     let pivot = Vec3::from_array(node.pivot);
     let position = Vec3::from_array(node.position);
-    let yaw = node.rotation_yaw_pitch_roll.get(0).copied().unwrap_or(0.0).to_radians();
-    let pitch = node.rotation_yaw_pitch_roll.get(1).copied().unwrap_or(0.0).to_radians();
-    let roll = node.rotation_yaw_pitch_roll.get(2).copied().unwrap_or(0.0).to_radians();
+    let yaw = node
+        .rotation_yaw_pitch_roll
+        .get(0)
+        .copied()
+        .unwrap_or(0.0)
+        .to_radians();
+    let pitch = node
+        .rotation_yaw_pitch_roll
+        .get(1)
+        .copied()
+        .unwrap_or(0.0)
+        .to_radians();
+    let roll = node
+        .rotation_yaw_pitch_roll
+        .get(2)
+        .copied()
+        .unwrap_or(0.0)
+        .to_radians();
     let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
     Mat4::from_translation(position)
         * Mat4::from_translation(pivot)
