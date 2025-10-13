@@ -29,7 +29,8 @@ WIP_DATA: Dict[str, Any] = {
             "title": "Immediate Focus",
             "body": [
                 "Swap Manny’s exported 3DO mesh into the main viewer scene and validate the camera render now that axes line up, replacing the sphere proxy.",
-                "Carry the axis conversion across to the desk/tube exports so they drop into the viewer with the right origin and scale.",
+                "Plumb Manny/desk/tube axis conversions throughout the viewer so decoded meshes land in the correct orientation.",
+                "Capture runtime scale data (e.g. SetActorScale/SetActorCollisionScale) and expose it to the viewer so decoded meshes match in-game size.",
                 "Run the Manny office interaction traces after each rendering change to ensure computer triggers and fallback handling remain stable.",
             ],
         },
@@ -46,6 +47,7 @@ WIP_DATA: Dict[str, Any] = {
                 "Cross-check new 3DO exports against the axis-conversion unit test harness before wiring them into the viewer.",
                 "Leverage the in-view axis gizmo to confirm world orientation when debugging new 3D markers or meshes.",
                 "Document the primitive mesh legend (cones/spheres/cubes) and call out that overlap is expected until decoded meshes replace the proxies.",
+                "When committing, use python tools/format_commit.py to generate the message and python tools/lint_commit.py to validate it before pushing.",
             ],
         },
     ],
