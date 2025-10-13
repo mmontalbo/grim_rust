@@ -69,10 +69,7 @@ mod tests {
     #[test]
     fn pitch_spins_around_x_axis() {
         let orientation = EntityOrientation::from_degrees([45.0, 0.0, 0.0]);
-        approx_eq(
-            orientation.forward,
-            [0.0, 0.70710677, 0.70710677],
-        );
+        approx_eq(orientation.forward, [0.0, 0.70710677, 0.70710677]);
     }
 
     #[test]

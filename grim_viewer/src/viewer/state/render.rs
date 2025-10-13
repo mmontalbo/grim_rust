@@ -577,56 +577,75 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         .iter()
         .find(|entity| entity.name.eq_ignore_ascii_case("manny"));
 
-    if let Some(position) = scene.entity_position("manny") {
-        let palette = MANNY_ANCHOR_PALETTE;
-        let color = palette_to_color(palette.color, palette.highlight.max(0.6));
-        if let Some(mesh) = manny_mesh {
-            let orientation = manny_entity.and_then(|entity| entity.orientation);
-            let instance = manny_mesh_instance(position, orientation, base_scale, mesh, color);
-            groups.push_manny(instance);
-        } else {
+    if let Some(entity) = manny_entity {
+        if let Some(position) = entity.position {
+            let palette = MANNY_ANCHOR_PALETTE;
+            let color = palette_to_color(palette.color, palette.highlight.max(0.6));
+            if let Some(mesh) = manny_mesh {
+                let orientation = entity.orientation;
+                let instance = manny_mesh_instance(position, orientation, base_scale, mesh, color);
+                groups.push_manny(instance);
+            } else {
+                groups.push(
+                    PrimitiveKind::Sphere,
+                    MeshInstance {
+                        model: instance_transform(
+                            position,
+                            scale_for_factor(base_scale, MANNY_ANCHOR_SCALE),
+                        ),
+                        color,
+                    },
+                );
+            }
+        }
+    }
+
+    if let Some(entity) = scene
+        .entities
+        .iter()
+        .find(|entity| entity.name.eq_ignore_ascii_case("mo.computer"))
+    {
+        if let Some(position) = entity.position {
+            let palette = DESK_ANCHOR_PALETTE;
             groups.push(
-                PrimitiveKind::Sphere,
+                PrimitiveKind::Cube,
                 MeshInstance {
-                    model: instance_transform(
+                    model: instance_transform_oriented(
                         position,
-                        scale_for_factor(base_scale, MANNY_ANCHOR_SCALE),
+                        scale_for_factor(base_scale, DESK_ANCHOR_SCALE),
+                        orientation_quat(entity.orientation),
                     ),
-                    color,
+                    color: palette_to_color(palette.color, palette.highlight),
                 },
             );
         }
     }
 
-    if let Some(position) = scene.entity_position("mo.computer") {
-        let palette = DESK_ANCHOR_PALETTE;
-        groups.push(
-            PrimitiveKind::Cube,
-            MeshInstance {
-                model: instance_transform(
-                    position,
-                    scale_for_factor(base_scale, DESK_ANCHOR_SCALE),
-                ),
-                color: palette_to_color(palette.color, palette.highlight),
-            },
-        );
-    }
-
-    if let Some(position) = scene
-        .entity_position("mo.tube.anchor")
-        .or_else(|| scene.entity_position("mo.tube.interest_actor"))
+    if let Some(entity) = scene
+        .entities
+        .iter()
+        .find(|entity| entity.name.eq_ignore_ascii_case("mo.tube.anchor"))
+        .or_else(|| {
+            scene
+                .entities
+                .iter()
+                .find(|entity| entity.name.eq_ignore_ascii_case("mo.tube.interest_actor"))
+        })
     {
-        let palette = TUBE_ANCHOR_PALETTE;
-        groups.push(
-            PrimitiveKind::Cone,
-            MeshInstance {
-                model: instance_transform(
-                    position,
-                    scale_for_factor(base_scale, TUBE_ANCHOR_SCALE),
-                ),
-                color: palette_to_color(palette.color, palette.highlight),
-            },
-        );
+        if let Some(position) = entity.position {
+            let palette = TUBE_ANCHOR_PALETTE;
+            groups.push(
+                PrimitiveKind::Cone,
+                MeshInstance {
+                    model: instance_transform_oriented(
+                        position,
+                        scale_for_factor(base_scale, TUBE_ANCHOR_SCALE),
+                        orientation_quat(entity.orientation),
+                    ),
+                    color: palette_to_color(palette.color, palette.highlight),
+                },
+            );
+        }
     }
 
     let pointer_rotation = Quat::from_rotation_arc(Vec3::Y, -Vec3::Z);
@@ -655,7 +674,11 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
             groups.push(
                 mesh_kind_for_entity(entity.kind),
                 MeshInstance {
-                    model: instance_transform(position, scale),
+                    model: instance_transform_oriented(
+                        position,
+                        scale,
+                        orientation_quat(entity.orientation),
+                    ),
                     color: palette_to_color(base_palette.color, highlight),
                 },
             );
@@ -770,6 +793,12 @@ fn gizmo_origin(
     let (_, _, forward) = camera.basis();
     position += forward * forward_offset;
     Some(position)
+}
+
+fn orientation_quat(orientation: Option<EntityOrientation>) -> Quat {
+    orientation
+        .map(|basis| basis.quaternion)
+        .unwrap_or(Quat::IDENTITY)
 }
 
 /// Turn the 2D marker palette into a lit RGBA color for the mesh proxy.
