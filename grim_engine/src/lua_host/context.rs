@@ -9,6 +9,7 @@ mod audio;
 mod geometry;
 mod geometry_export;
 mod inventory;
+mod menus;
 
 use actors::{ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
@@ -18,6 +19,11 @@ use audio::{
 };
 use geometry::{ParsedSetGeometry, SectorHit, SetDescriptor, SetSnapshot, SetupInfo};
 use inventory::InventoryState;
+use menus::{
+    install_boot_warning_menu, install_dialog_scaffold, install_loading_menu, install_menu_common,
+    install_menu_dialog, install_menu_infrastructure, install_menu_prefs, install_menu_remap,
+    MenuRegistry, MenuState,
+};
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::{
@@ -113,14 +119,6 @@ struct DialogState {
 struct AchievementState {
     eligible: bool,
     established: bool,
-}
-
-#[derive(Debug, Default, Clone)]
-struct MenuState {
-    visible: bool,
-    auto_freeze: bool,
-    last_run_mode: Option<String>,
-    last_action: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,7 +241,7 @@ pub(super) struct EngineContext {
     loaded_sets: BTreeSet<String>,
     current_setups: BTreeMap<String, i32>,
     inventory: InventoryState,
-    menus: BTreeMap<String, Rc<RefCell<MenuState>>>,
+    menus: MenuRegistry,
     voice_effect: Option<String>,
     objects: BTreeMap<i64, ObjectSnapshot>,
     objects_by_name: BTreeMap<String, i64>,
@@ -304,7 +302,7 @@ impl EngineContext {
             loaded_sets: BTreeSet::new(),
             current_setups: BTreeMap::new(),
             inventory: InventoryState::new(),
-            menus: BTreeMap::new(),
+            menus: MenuRegistry::new(),
             voice_effect: None,
             objects: BTreeMap::new(),
             objects_by_name: BTreeMap::new(),
@@ -723,10 +721,7 @@ impl EngineContext {
     }
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
-        self.menus
-            .entry(name.to_string())
-            .or_insert_with(|| Rc::new(RefCell::new(MenuState::default())))
-            .clone()
+        self.menus.ensure(name)
     }
 
     fn set_achievement_eligibility(&mut self, id: &str, eligible: bool) {
@@ -1546,9 +1541,9 @@ impl EngineContext {
         label: &str,
         preferred_handle: Option<u32>,
     ) -> (String, u32) {
-        let (id, handle, newly_assigned) =
-            self.actors
-                .register_actor_with_handle(label, preferred_handle);
+        let (id, handle, newly_assigned) = self
+            .actors
+            .register_actor_with_handle(label, preferred_handle);
         if newly_assigned {
             self.log_event(format!("actor.register {} (#{handle})", label));
         }
@@ -5118,7 +5113,9 @@ fn build_actor_table<'lua>(
     Ok(actor_table)
 }
 
-fn split_self<'lua>(args: Variadic<Value<'lua>>) -> (Option<Table<'lua>>, Vec<Value<'lua>>) {
+pub(super) fn split_self<'lua>(
+    args: Variadic<Value<'lua>>,
+) -> (Option<Table<'lua>>, Vec<Value<'lua>>) {
     let mut iter = args.into_iter();
     match iter.next() {
         Some(Value::Table(table)) => (Some(table), iter.collect()),
@@ -5795,453 +5792,6 @@ pub(super) fn call_boot(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Resul
     Ok(())
 }
 
-fn install_menu_infrastructure(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    install_menu_constants(lua)?;
-    install_render_helpers(lua, context.clone())?;
-    install_game_pauser(lua, context.clone())?;
-    install_game_menu(lua, context.clone())?;
-    install_saveload_menu(lua, context)?;
-    Ok(())
-}
-
-fn install_loading_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    if matches!(globals.get::<_, Value>("loading_menu"), Ok(Value::Table(_))) {
-        return Ok(());
-    }
-
-    let menu = build_menu_instance(lua, context.clone(), Some("loading".to_string()))?;
-    menu.set("autoFreeze", false)?;
-
-    let loading_state = {
-        let mut ctx = context.borrow_mut();
-        ctx.ensure_menu_state("loading")
-    };
-
-    let run_context = context.clone();
-    let run_state = loading_state.clone();
-    let run = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, values) = split_self(args);
-        if let Some(table) = self_table {
-            let auto_freeze = values.get(0).map(value_to_bool).unwrap_or(false);
-            table.set("autoFreeze", auto_freeze)?;
-
-            if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-                if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                    pause_fn.call::<_, ()>((game_pauser.clone(), true))?;
-                }
-            }
-
-            if let Ok(show_fn) = table.get::<_, Function>("show") {
-                show_fn.call::<_, ()>((table.clone(),))?;
-            } else {
-                table.set("is_visible", true)?;
-            }
-
-            if auto_freeze {
-                if let Ok(single_start) =
-                    lua_ctx.globals().get::<_, Function>("single_start_script")
-                {
-                    let freeze_fn: Function = table.get("freeze")?;
-                    single_start.call::<_, u32>((freeze_fn, table.clone()))?;
-                }
-            }
-
-            {
-                let mut state = run_state.borrow_mut();
-                state.auto_freeze = auto_freeze;
-                state.last_run_mode = Some(if auto_freeze {
-                    "auto".to_string()
-                } else {
-                    "manual".to_string()
-                });
-                state.visible = true;
-                state.last_action = Some("run".to_string());
-            }
-
-            run_context.borrow_mut().log_event(format!(
-                "loading_menu.run {}",
-                if auto_freeze { "auto" } else { "manual" }
-            ));
-        }
-        Ok(())
-    })?;
-    menu.set("run", run)?;
-
-    let freeze_context = context.clone();
-    let freeze_state = loading_state.clone();
-    let freeze = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, _values) = split_self(args);
-        if let Some(table) = self_table {
-            if let Ok(hide_fn) = table.get::<_, Function>("hide") {
-                hide_fn.call::<_, ()>((table.clone(),))?;
-            } else {
-                table.set("is_visible", false)?;
-            }
-        }
-
-        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
-            }
-        }
-
-        if let Ok(set_mode) = lua_ctx.globals().get::<_, Function>("SetGameRenderMode") {
-            set_mode.call::<_, ()>(("exit",))?;
-        }
-
-        {
-            let mut state = freeze_state.borrow_mut();
-            state.visible = false;
-            state.last_action = Some("freeze".to_string());
-        }
-
-        freeze_context.borrow_mut().log_event("loading_menu.freeze");
-        Ok(())
-    })?;
-    menu.set("freeze", freeze)?;
-
-    let close_context = context.clone();
-    let close_state = loading_state.clone();
-    let close = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, _values) = split_self(args);
-        if let Some(table) = self_table {
-            if let Ok(hide_fn) = table.get::<_, Function>("hide") {
-                hide_fn.call::<_, ()>((table.clone(),))?;
-            } else {
-                table.set("is_visible", false)?;
-            }
-        }
-
-        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
-            }
-        }
-
-        {
-            let mut state = close_state.borrow_mut();
-            state.visible = false;
-            state.last_action = Some("close".to_string());
-        }
-
-        close_context.borrow_mut().log_event("loading_menu.close");
-        Ok(())
-    })?;
-    menu.set("close", close)?;
-
-    globals.set("loading_menu", menu)?;
-    Ok(())
-}
-
-fn install_boot_warning_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    if matches!(
-        globals.get::<_, Value>("boot_warning_menu"),
-        Ok(Value::Table(_))
-    ) {
-        return Ok(());
-    }
-
-    let menu = build_menu_instance(lua, context.clone(), Some("boot_warning".to_string()))?;
-
-    let boot_state = {
-        let mut ctx = context.borrow_mut();
-        ctx.ensure_menu_state("boot_warning")
-    };
-
-    let run_context = context.clone();
-    let run_state = boot_state.clone();
-    let run = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, _values) = split_self(args);
-        if let Some(table) = self_table {
-            table.set("is_visible", true)?;
-        }
-
-        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                pause_fn.call::<_, ()>((game_pauser.clone(), true))?;
-            }
-        }
-
-        {
-            let mut state = run_state.borrow_mut();
-            state.visible = true;
-            state.last_action = Some("run".to_string());
-        }
-
-        run_context.borrow_mut().log_event("boot_warning_menu.run");
-        Ok(())
-    })?;
-    menu.set("run", run)?;
-
-    let close_context = context.clone();
-    let close_state = boot_state.clone();
-    let close = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, _values) = split_self(args);
-        if let Some(table) = self_table {
-            table.set("is_visible", false)?;
-        }
-
-        if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-            if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
-            }
-        }
-
-        {
-            let mut state = close_state.borrow_mut();
-            state.visible = false;
-            state.last_action = Some("close".to_string());
-        }
-
-        close_context
-            .borrow_mut()
-            .log_event("boot_warning_menu.close");
-        Ok(())
-    })?;
-    menu.set("close", close)?;
-
-    let check_context = context.clone();
-    let check_state = boot_state.clone();
-    let check = lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
-        let (self_table, _values) = split_self(args);
-        if let Some(table) = self_table {
-            if let Ok(close_fn) = table.get::<_, Function>("close") {
-                close_fn.call::<_, ()>((table.clone(),))?;
-            } else {
-                table.set("is_visible", false)?;
-            }
-        }
-        {
-            let mut state = check_state.borrow_mut();
-            state.last_action = Some("check_timeout".to_string());
-        }
-        check_context
-            .borrow_mut()
-            .log_event("boot_warning_menu.check_timeout");
-        Ok(())
-    })?;
-    menu.set("check_timeout", check)?;
-
-    globals.set("boot_warning_menu", menu)?;
-    Ok(())
-}
-
-fn install_stateful_menu(
-    lua: &Lua,
-    context: Rc<RefCell<EngineContext>>,
-    global_name: &str,
-    state_name: &str,
-) -> Result<()> {
-    let globals = lua.globals();
-    if matches!(globals.get::<_, Value>(global_name), Ok(Value::Table(_))) {
-        return Ok(());
-    }
-
-    let menu_table = lua.create_table()?;
-    menu_table.set("name", state_name)?;
-    menu_table.set("is_visible", false)?;
-    menu_table.set("autoFreeze", false)?;
-
-    let menu_state = {
-        let mut ctx = context.borrow_mut();
-        let handle = ctx.ensure_menu_state(state_name);
-        {
-            let mut guard = handle.borrow_mut();
-            guard.visible = false;
-            guard.auto_freeze = false;
-            guard.last_action = Some("create".to_string());
-        }
-        ctx.log_event(format!("{global_name}.create"));
-        handle
-    };
-
-    let noop = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-
-    let show_state = menu_state.clone();
-    let show_context = context.clone();
-    let show_label = global_name.to_string();
-    let show = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, _values) = split_self(args);
-        if let Some(table) = self_table {
-            table.set("is_visible", true)?;
-        }
-        let should_pause = {
-            let mut guard = show_state.borrow_mut();
-            guard.visible = true;
-            guard.last_action = Some("show".to_string());
-            guard.auto_freeze
-        };
-        if should_pause {
-            if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-                if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                    pause_fn.call::<_, ()>((game_pauser.clone(), true))?;
-                }
-            }
-        }
-        show_context
-            .borrow_mut()
-            .log_event(format!("{show_label}.show"));
-        Ok(())
-    })?;
-    menu_table.set("show", show.clone())?;
-
-    let hide_state = menu_state.clone();
-    let hide_context = context.clone();
-    let hide_label = global_name.to_string();
-    let hide = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, _values) = split_self(args);
-        if let Some(table) = self_table {
-            table.set("is_visible", false)?;
-        }
-        let should_unpause = {
-            let mut guard = hide_state.borrow_mut();
-            guard.visible = false;
-            guard.last_action = Some("hide".to_string());
-            guard.auto_freeze
-        };
-        if should_unpause {
-            if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-                if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                    pause_fn.call::<_, ()>((game_pauser.clone(), false))?;
-                }
-            }
-        }
-        hide_context
-            .borrow_mut()
-            .log_event(format!("{hide_label}.hide"));
-        Ok(())
-    })?;
-    menu_table.set("hide", hide.clone())?;
-
-    let auto_state = menu_state.clone();
-    let auto_context = context.clone();
-    let auto_label = global_name.to_string();
-    let auto_freeze = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        let (self_table, values) = split_self(args);
-        let desired = values.get(0).map(value_to_bool).unwrap_or(false);
-        if let Some(table) = self_table {
-            table.set("autoFreeze", desired)?;
-        }
-
-        let (was_visible, previous_auto) = {
-            let guard = auto_state.borrow();
-            (guard.visible, guard.auto_freeze)
-        };
-
-        {
-            let mut guard = auto_state.borrow_mut();
-            guard.auto_freeze = desired;
-            guard.last_action = Some("auto_freeze".to_string());
-        }
-
-        if was_visible && previous_auto != desired {
-            if let Ok(game_pauser) = lua_ctx.globals().get::<_, Table>("game_pauser") {
-                if let Ok(pause_fn) = game_pauser.get::<_, Function>("pause") {
-                    pause_fn.call::<_, ()>((game_pauser.clone(), desired))?;
-                }
-            }
-        }
-
-        auto_context.borrow_mut().log_event(format!(
-            "{auto_label}.auto_freeze {}",
-            if desired { "on" } else { "off" }
-        ));
-        Ok(())
-    })?;
-    menu_table.set("auto_freeze", auto_freeze.clone())?;
-    menu_table.set("set_auto_freeze", auto_freeze.clone())?;
-    menu_table.set("setAutoFreeze", auto_freeze)?;
-
-    menu_table.set("show_menu", show.clone())?;
-    menu_table.set("open", show)?;
-
-    menu_table.set("close", hide)?;
-    menu_table.set("cleanup", noop.clone())?;
-    menu_table.set("destroy", noop.clone())?;
-    menu_table.set("refresh", noop.clone())?;
-    menu_table.set("add_image", noop.clone())?;
-    menu_table.set("add_line", noop.clone())?;
-    menu_table.set("add_button", noop.clone())?;
-    menu_table.set("add_slider", noop.clone())?;
-    menu_table.set("add_toggle", noop.clone())?;
-    menu_table.set("setup", noop.clone())?;
-
-    let fallback_context = context.clone();
-    let fallback_label = global_name.to_string();
-    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
-        if let Value::String(method) = key {
-            fallback_context
-                .borrow_mut()
-                .log_event(format!("{fallback_label}.stub {}", method.to_str()?));
-        }
-        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
-        Ok(Value::Function(noop))
-    })?;
-
-    let metatable = lua.create_table()?;
-    metatable.set("__index", fallback)?;
-    menu_table.set_metatable(Some(metatable));
-
-    globals.set(global_name, menu_table)?;
-    Ok(())
-}
-
-fn install_menu_dialog(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    install_stateful_menu(lua, context, "menu_dialog", "menu_dialog")
-}
-
-fn install_menu_common(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    install_stateful_menu(lua, context, "menu_common", "menu_common")
-}
-
-fn install_menu_remap(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    install_stateful_menu(lua, context, "menu_remap_keys", "menu_remap_keys")
-}
-
-fn install_menu_prefs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    install_stateful_menu(lua, context, "menu_prefs", "menu_prefs")
-}
-
-fn install_dialog_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    if matches!(globals.get::<_, Value>("dialog"), Ok(Value::Table(_))) {
-        return Ok(());
-    }
-
-    let dialog = lua.create_table()?;
-    let fallback_context = context.clone();
-    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
-        if let Value::String(method) = key {
-            fallback_context
-                .borrow_mut()
-                .log_event(format!("dialog.stub {}", method.to_str()?));
-        }
-        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
-        Ok(Value::Function(noop))
-    })?;
-    let metatable = lua.create_table()?;
-    metatable.set("__index", fallback)?;
-    dialog.set_metatable(Some(metatable));
-
-    globals.set("dialog", dialog.clone())?;
-
-    // Provide Sentence table placeholder so scripts referencing dialog prototypes still work.
-    if matches!(globals.get::<_, Value>("Sentence"), Ok(Value::Nil) | Err(_)) {
-        let sentence_context = context.clone();
-        let noop = lua.create_function(move |_, _: Variadic<Value>| {
-            sentence_context
-                .borrow_mut()
-                .log_event("dialog.sentence".to_string());
-            Ok(())
-        })?;
-        globals.set("Sentence", noop)?;
-    }
-
-    Ok(())
-}
-
 fn install_achievement_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
     if matches!(globals.get::<_, Value>("achievement"), Ok(Value::Table(_))) {
@@ -6708,18 +6258,7 @@ fn install_manny_scythe_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> 
     Ok(())
 }
 
-fn install_menu_constants(lua: &Lua) -> Result<()> {
-    let globals = lua.globals();
-    globals.set("CACHE_PERSISTENT", 2)?;
-    globals.set("CACHE_TEMPORARY", 1)?;
-    globals.set("CACHE_NEVER", 0)?;
-    globals.set("MENU_MOTHERDUCK", 100)?;
-    globals.set("TEXTL_MOTHERDUCK", 200)?;
-    globals.set("RENDERMODE_EXITING", "exit")?;
-    Ok(())
-}
-
-fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+pub(super) fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
     let render_context = context.clone();
     globals.set(
@@ -6753,331 +6292,6 @@ fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Res
         })?,
     )?;
     Ok(())
-}
-
-fn install_game_pauser(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    let game_pauser = lua.create_table()?;
-
-    let pause_context = context.clone();
-    game_pauser.set(
-        "pause",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let values = strip_self(args);
-            let active = values.get(0).map(value_to_bool).unwrap_or(false);
-            pause_context.borrow_mut().log_event(format!(
-                "game_pauser.pause {}",
-                if active { "on" } else { "off" }
-            ));
-            Ok(())
-        })?,
-    )?;
-
-    let resume_context = context.clone();
-    game_pauser.set(
-        "resume",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let values = strip_self(args);
-            let active = values.get(0).map(value_to_bool).unwrap_or(false);
-            resume_context.borrow_mut().log_event(format!(
-                "game_pauser.resume {}",
-                if active { "on" } else { "off" }
-            ));
-            Ok(())
-        })?,
-    )?;
-
-    globals.set("game_pauser", game_pauser)?;
-    Ok(())
-}
-
-fn install_game_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    let game_menu = lua.create_table()?;
-    let menu_context = context.clone();
-    game_menu.set(
-        "create",
-        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-            let values = strip_self(args);
-            let name = values
-                .get(0)
-                .and_then(value_to_string)
-                .or_else(|| Some("menu".to_string()));
-            build_menu_instance(lua_ctx, menu_context.clone(), name)
-        })?,
-    )?;
-    globals.set("game_menu", game_menu)?;
-    Ok(())
-}
-
-fn install_saveload_menu(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    let saveload = lua.create_table()?;
-    saveload.set("name", "SaveLoad")?;
-    saveload.set("exit_index", 1)?;
-
-    let menu = lua.create_table()?;
-    menu.set("items", lua.create_table()?)?;
-    saveload.set("menu", menu)?;
-
-    let noop = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-
-    let run_context = context.clone();
-    saveload.set(
-        "run",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let mut iter = args.into_iter();
-            let _self = iter.next();
-            let mode = iter
-                .next()
-                .as_ref()
-                .map(describe_value)
-                .unwrap_or_else(|| "<nil>".to_string());
-            run_context
-                .borrow_mut()
-                .log_event(format!("saveload_menu.run {mode}"));
-            Ok(())
-        })?,
-    )?;
-
-    let build_context = context.clone();
-    saveload.set(
-        "build_menu",
-        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-            let mut iter = args.into_iter();
-            let self_table = match iter.next() {
-                Some(Value::Table(table)) => table,
-                _ => return Ok(()),
-            };
-
-            let exit_index: i64 = self_table.get("exit_index").unwrap_or(1);
-            let menu: Table = match self_table.get("menu") {
-                Ok(table) => table,
-                Err(_) => {
-                    let table = lua_ctx.create_table()?;
-                    table.set("items", lua_ctx.create_table()?)?;
-                    self_table.set("menu", table.clone())?;
-                    table
-                }
-            };
-
-            let items: Table = match menu.get("items") {
-                Ok(table) => table,
-                Err(_) => {
-                    let table = lua_ctx.create_table()?;
-                    menu.set("items", table.clone())?;
-                    table
-                }
-            };
-
-            let item_table: Table = match items.get(exit_index) {
-                Ok(Value::Table(table)) => table,
-                _ => {
-                    let table = lua_ctx.create_table()?;
-                    items.set(exit_index, table.clone())?;
-                    table
-                }
-            };
-
-            if let Some(method) = iter.next() {
-                build_context.borrow_mut().log_event(format!(
-                    "saveload_menu.build_menu {}",
-                    describe_value(&method)
-                ));
-            }
-
-            if let Err(_) = item_table.get::<_, Value>("text") {
-                item_table.set("text", "")?;
-            }
-
-            Ok(())
-        })?,
-    )?;
-
-    saveload.set("cancel", noop.clone())?;
-    saveload.set("destroy", noop.clone())?;
-    saveload.set("set_default_focus", noop.clone())?;
-
-    let metatable = lua.create_table()?;
-    let fallback = {
-        let fallback_context = context.clone();
-        lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
-            if let Value::String(method) = key {
-                let method_name = method.to_str()?.to_string();
-                fallback_context
-                    .borrow_mut()
-                    .log_event(format!("saveload_menu.stub {method_name}"));
-            }
-            let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
-            Ok(Value::Function(noop))
-        })?
-    };
-    metatable.set("__index", fallback)?;
-    saveload.set_metatable(Some(metatable));
-
-    globals.set("saveload_menu", saveload)?;
-    Ok(())
-}
-
-fn build_menu_instance<'lua>(
-    lua_ctx: &'lua Lua,
-    context: Rc<RefCell<EngineContext>>,
-    name: Option<String>,
-) -> LuaResult<Table<'lua>> {
-    let label = name.unwrap_or_else(|| "menu".to_string());
-    let menu = lua_ctx.create_table()?;
-    menu.set("name", label.clone())?;
-    menu.set("is_visible", false)?;
-
-    let state = {
-        let mut ctx = context.borrow_mut();
-        ctx.log_event(format!("menu.create {label}"));
-        let handle = ctx.ensure_menu_state(&label);
-        {
-            let mut guard = handle.borrow_mut();
-            guard.visible = false;
-            guard.auto_freeze = false;
-            guard.last_run_mode = None;
-            guard.last_action = Some("create".to_string());
-        }
-        handle
-    };
-
-    let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
-
-    let show_state = state.clone();
-    let show_context = context.clone();
-    let show_label = label.clone();
-    menu.set(
-        "show",
-        lua_ctx.create_function(move |_, args: Variadic<Value>| {
-            let (self_table, _values) = split_self(args);
-            if let Some(table) = self_table {
-                table.set("is_visible", true)?;
-            }
-            {
-                let mut menu_state = show_state.borrow_mut();
-                menu_state.visible = true;
-                menu_state.last_action = Some("show".to_string());
-            }
-            show_context
-                .borrow_mut()
-                .log_event(format!("menu.show {show_label}"));
-            Ok(())
-        })?,
-    )?;
-
-    let hide_state = state.clone();
-    let hide_context = context.clone();
-    let hide_label = label.clone();
-    menu.set(
-        "hide",
-        lua_ctx.create_function(move |_, args: Variadic<Value>| {
-            let (self_table, _values) = split_self(args);
-            if let Some(table) = self_table {
-                table.set("is_visible", false)?;
-            }
-            {
-                let mut menu_state = hide_state.borrow_mut();
-                menu_state.visible = false;
-                menu_state.last_action = Some("hide".to_string());
-            }
-            hide_context
-                .borrow_mut()
-                .log_event(format!("menu.hide {hide_label}"));
-            Ok(())
-        })?,
-    )?;
-
-    let freeze_state = state.clone();
-    let freeze_context = context.clone();
-    let freeze_label = label.clone();
-    menu.set(
-        "freeze",
-        lua_ctx.create_function(move |_, args: Variadic<Value>| {
-            let (_self_table, _values) = split_self(args);
-            {
-                let mut menu_state = freeze_state.borrow_mut();
-                menu_state.last_action = Some("freeze".to_string());
-            }
-            freeze_context
-                .borrow_mut()
-                .log_event(format!("menu.freeze {freeze_label}"));
-            Ok(())
-        })?,
-    )?;
-
-    let close_state = state.clone();
-    let close_context = context.clone();
-    let close_label = label.clone();
-    menu.set(
-        "close",
-        lua_ctx.create_function(move |_, args: Variadic<Value>| {
-            let (self_table, _values) = split_self(args);
-            if let Some(table) = self_table {
-                table.set("is_visible", false)?;
-            }
-            {
-                let mut menu_state = close_state.borrow_mut();
-                menu_state.visible = false;
-                menu_state.last_action = Some("close".to_string());
-            }
-            close_context
-                .borrow_mut()
-                .log_event(format!("menu.close {close_label}"));
-            Ok(())
-        })?,
-    )?;
-
-    let cleanup_state = state.clone();
-    let cleanup_context = context.clone();
-    let cleanup_label = label.clone();
-    menu.set(
-        "cleanup",
-        lua_ctx.create_function(move |_, args: Variadic<Value>| {
-            let (_self_table, _values) = split_self(args);
-            {
-                let mut menu_state = cleanup_state.borrow_mut();
-                menu_state.last_action = Some("cleanup".to_string());
-            }
-            cleanup_context
-                .borrow_mut()
-                .log_event(format!("menu.cleanup {cleanup_label}"));
-            Ok(())
-        })?,
-    )?;
-
-    menu.set("add_image", noop.clone())?;
-    menu.set("add_line", noop.clone())?;
-    menu.set("setup", noop.clone())?;
-    menu.set("destroy", noop.clone())?;
-    menu.set("cancel", noop.clone())?;
-    menu.set("refresh", noop.clone())?;
-    menu.set("add_button", noop.clone())?;
-    menu.set("add_slider", noop.clone())?;
-    menu.set("add_toggle", noop.clone())?;
-    menu.set("autoFreeze", noop.clone())?;
-
-    let fallback = {
-        let fallback_context = context.clone();
-        let fallback_label = label.clone();
-        lua_ctx.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
-            if let Value::String(method) = key {
-                let method_name = method.to_str()?.to_string();
-                fallback_context
-                    .borrow_mut()
-                    .log_event(format!("menu.stub {fallback_label}.{method_name}"));
-            }
-            let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
-            Ok(Value::Function(noop))
-        })?
-    };
-
-    let metatable = lua_ctx.create_table()?;
-    metatable.set("__index", fallback)?;
-    menu.set_metatable(Some(metatable));
-
-    Ok(menu)
 }
 
 pub(super) fn dump_runtime_summary(state: &EngineContext) {
@@ -7307,7 +6521,7 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
     }
     if !state.menus.is_empty() {
         println!("  Menus:");
-        for (name, menu_state) in &state.menus {
+        for (name, menu_state) in state.menus.iter() {
             let snapshot = menu_state.borrow();
             let visibility = if snapshot.visible {
                 "visible"
@@ -7634,7 +6848,7 @@ fn extract_function<'lua>(lua: &'lua Lua, value: Value<'lua>) -> LuaResult<Optio
     }
 }
 
-fn strip_self(args: Variadic<Value>) -> Vec<Value> {
+pub(super) fn strip_self(args: Variadic<Value>) -> Vec<Value> {
     let mut iter = args.into_iter();
     match iter.next() {
         Some(Value::Table(_)) => iter.collect(),
@@ -7701,7 +6915,7 @@ fn describe_callable_label(value: &Value) -> LuaResult<String> {
     }
 }
 
-fn value_to_bool(value: &Value) -> bool {
+pub(super) fn value_to_bool(value: &Value) -> bool {
     match value {
         Value::Boolean(flag) => *flag,
         Value::Integer(i) => *i != 0,
@@ -7714,7 +6928,7 @@ fn value_to_bool(value: &Value) -> bool {
     }
 }
 
-fn value_to_string(value: &Value) -> Option<String> {
+pub(super) fn value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => text.to_str().ok().map(|s| s.to_string()),
         Value::Integer(i) => Some(i.to_string()),
@@ -7723,7 +6937,7 @@ fn value_to_string(value: &Value) -> Option<String> {
         _ => None,
     }
 }
-fn describe_value(value: &Value) -> String {
+pub(super) fn describe_value(value: &Value) -> String {
     if let Some(text) = value_to_string(value) {
         return text;
     }
@@ -7753,9 +6967,10 @@ fn distance_between(a: Vec3, b: Vec3) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::types::Vec3;
+    use super::menus::{install_game_pauser, install_menu_common};
     use super::{
-        candidate_paths, install_game_pauser, install_menu_common, value_slice_to_vec3,
-        AudioCallback, EngineContext, EngineContextHandle, ObjectSnapshot, ParsedSetGeometry,
+        candidate_paths, value_slice_to_vec3, AudioCallback, EngineContext, EngineContextHandle,
+        ObjectSnapshot, ParsedSetGeometry,
     };
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
@@ -7783,7 +6998,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn handle_resolves_actor_and_logs_events() {
         let context = Rc::new(RefCell::new(make_context()));
         let handle = EngineContextHandle::new(context.clone());
@@ -7799,7 +7013,8 @@ mod tests {
             .expect("actor handle");
         assert_eq!(resolved.0, actor_handle);
         handle.log_event("handle.test".to_string());
-        let events = context.borrow().events();
+        let guard = context.borrow();
+        let events = guard.events();
         assert!(events.iter().any(|event| event == "handle.test"));
     }
 
