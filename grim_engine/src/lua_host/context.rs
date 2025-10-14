@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::{
     LuaActorSectorSnapshot, LuaActorSnapshot, LuaCommentarySnapshot, LuaCurrentSetSnapshot,
     LuaCutSceneSnapshot, LuaGeometrySnapshot, LuaMusicCueSnapshot, LuaMusicSnapshot,
@@ -16,10 +17,9 @@ use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::{normalize_legacy_lua, ResourceGraph};
 use grim_formats::{SectorKind as SetSectorKind, SetFile as SetFileData, Vec3 as SetVec3};
 use mlua::{
-    Error as LuaError, Function, Lua, LuaOptions, MultiValue, RegistryKey, Result as LuaResult,
-    StdLib, Table, Thread, ThreadStatus, Value, Variadic,
+    Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Thread,
+    ThreadStatus, Value, Variadic,
 };
-use serde::Serialize;
 
 /// Minimal adapter for routing audio events to interested observers.
 pub trait AudioCallback {
@@ -290,171 +290,6 @@ fn ray_cast_contains(point: (f32, f32), vertices: &[(f32, f32)]) -> bool {
         j = i;
     }
     inside
-}
-
-#[derive(Debug, Copy, Clone)]
-struct Vec3 {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-const MANNY_OFFICE_SEED_POS: Vec3 = Vec3 {
-    x: 0.606_999_993,
-    y: 2.040_999_89,
-    z: 0.0,
-};
-
-const MANNY_OFFICE_SEED_ROT: Vec3 = Vec3 {
-    x: 0.0,
-    y: 222.210_007,
-    z: 0.0,
-};
-
-const WALK_SPEED_SCALE: f32 = 0.009_999_999_78;
-
-#[derive(Clone)]
-pub struct MovementPlan {
-    segments: Vec<MovementSegment>,
-}
-
-#[derive(Clone)]
-struct MovementSegment {
-    frames: u32,
-    vector: Vec3,
-}
-
-impl MovementPlan {
-    pub fn demo() -> Self {
-        Self {
-            segments: vec![
-                MovementSegment {
-                    frames: 36,
-                    vector: Vec3 {
-                        x: 0.0,
-                        y: 2.0,
-                        z: 0.0,
-                    },
-                },
-                MovementSegment {
-                    frames: 24,
-                    vector: Vec3 {
-                        x: 2.0,
-                        y: 0.0,
-                        z: 0.0,
-                    },
-                },
-                MovementSegment {
-                    frames: 24,
-                    vector: Vec3 {
-                        x: -2.0,
-                        y: 0.0,
-                        z: 0.0,
-                    },
-                },
-                MovementSegment {
-                    frames: 18,
-                    vector: Vec3 {
-                        x: 0.0,
-                        y: -2.0,
-                        z: 0.0,
-                    },
-                },
-            ],
-        }
-    }
-}
-
-pub struct MovementOptions {
-    plan: MovementPlan,
-    log_path: Option<PathBuf>,
-}
-
-impl MovementOptions {
-    pub fn demo(log_path: Option<PathBuf>) -> Self {
-        Self {
-            plan: MovementPlan::demo(),
-            log_path,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum HotspotSlug {
-    Computer,
-}
-
-impl HotspotSlug {
-    fn from_str(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "computer" => Some(HotspotSlug::Computer),
-            _ => None,
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            HotspotSlug::Computer => "computer",
-        }
-    }
-
-    fn object_field(&self) -> &'static str {
-        match self {
-            HotspotSlug::Computer => "computer",
-        }
-    }
-
-    fn approach_target(&self) -> Vec3 {
-        match self {
-            HotspotSlug::Computer => Vec3 {
-                x: 0.5,
-                y: 1.975,
-                z: 0.0,
-            },
-        }
-    }
-
-    fn approach_steps(&self) -> u32 {
-        match self {
-            HotspotSlug::Computer => 24,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct HotspotOptions {
-    slug: HotspotSlug,
-}
-
-impl HotspotOptions {
-    pub fn parse(value: &str) -> Result<Self> {
-        let slug = HotspotSlug::from_str(value)
-            .ok_or_else(|| anyhow!("unknown hotspot demo: {}", value))?;
-        Ok(Self { slug })
-    }
-
-    fn slug(&self) -> HotspotSlug {
-        self.slug
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineRunSummary {
-    events: Vec<String>,
-}
-
-impl EngineRunSummary {
-    pub fn events(&self) -> &[String] {
-        &self.events
-    }
-}
-
-#[derive(Serialize)]
-struct MovementSample {
-    frame: u32,
-    position: [f32; 3],
-    yaw: Option<f32>,
-    sector: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -846,7 +681,7 @@ impl VisibleObjectInfo {
 }
 
 #[derive(Debug)]
-struct EngineContext {
+pub(super) struct EngineContext {
     verbose: bool,
     _resources: Rc<ResourceGraph>,
     next_script_handle: u32,
@@ -888,7 +723,7 @@ struct EngineContext {
 }
 
 impl EngineContext {
-    fn new(
+    pub(super) fn new(
         resources: Rc<ResourceGraph>,
         verbose: bool,
         lab_collection: Option<Rc<LabCollection>>,
@@ -956,7 +791,7 @@ impl EngineContext {
         }
     }
 
-    fn log_event(&mut self, event: impl Into<String>) {
+    pub(super) fn log_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
     }
 
@@ -1064,7 +899,7 @@ impl EngineContext {
         record
     }
 
-    fn is_message_active(&self) -> bool {
+    pub(super) fn is_message_active(&self) -> bool {
         self.message_active
     }
 
@@ -1739,7 +1574,7 @@ impl EngineContext {
         }
     }
 
-    fn actor_costume(&self, id: &str) -> Option<&str> {
+    pub(super) fn actor_costume(&self, id: &str) -> Option<&str> {
         self.actors
             .get(id)
             .and_then(|actor| actor.costume.as_deref())
@@ -1978,7 +1813,7 @@ impl EngineContext {
         self.log_event(format!("actor.{id}.collision_scale {display}"));
     }
 
-    fn walk_actor_vector(
+    pub(super) fn walk_actor_vector(
         &mut self,
         handle: u32,
         delta: Vec3,
@@ -2714,18 +2549,35 @@ impl EngineContext {
         self.refresh_commentary_visibility();
     }
 
-    fn actor_position_by_handle(&self, handle: u32) -> Option<Vec3> {
+    pub(super) fn actor_position_by_handle(&self, handle: u32) -> Option<Vec3> {
         self.actor_handles
             .get(&handle)
             .and_then(|id| self.actors.get(id))
             .and_then(|actor| actor.position)
             .or_else(|| self.object_position_by_actor(handle))
     }
-    fn actor_rotation_by_handle(&self, handle: u32) -> Option<Vec3> {
+    pub(super) fn actor_rotation_by_handle(&self, handle: u32) -> Option<Vec3> {
         self.actor_handles
             .get(&handle)
             .and_then(|id| self.actors.get(id))
             .and_then(|actor| actor.rotation)
+    }
+
+    pub(super) fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
+        for candidate in candidates {
+            if let Some(actor) = self.actors.get(*candidate) {
+                if actor.handle == 0 {
+                    return None;
+                }
+                let id = self
+                    .actor_handles
+                    .get(&actor.handle)
+                    .cloned()
+                    .unwrap_or_else(|| actor.name.to_ascii_lowercase());
+                return Some((actor.handle, id));
+            }
+        }
+        None
     }
 
     fn actor_identity_by_handle(&self, handle: u32) -> Option<(String, String)> {
@@ -2875,6 +2727,11 @@ impl EngineContext {
         None
     }
 
+    pub(super) fn geometry_sector_name(&self, actor_id: &str, raw_kind: &str) -> Option<String> {
+        self.geometry_sector_hit(actor_id, raw_kind)
+            .map(|hit| hit.name)
+    }
+
     fn visible_sector_hit(&self, _actor_id: &str, request: &str) -> Option<SectorHit> {
         let current = self.current_set.as_ref()?;
         let geometry = self.set_geometry.get(&current.set_file)?;
@@ -2979,7 +2836,11 @@ impl EngineContext {
         }
     }
 
-    fn geometry_snapshot(&self) -> LuaGeometrySnapshot {
+    pub(super) fn events(&self) -> &[String] {
+        &self.events
+    }
+
+    pub(super) fn geometry_snapshot(&self) -> LuaGeometrySnapshot {
         let current_set = self.current_set.as_ref().map(|current| {
             let selection =
                 self.current_setups
@@ -3331,454 +3192,7 @@ fn vec3_to_array(vec: Vec3) -> [f32; 3] {
     [vec.x, vec.y, vec.z]
 }
 
-pub fn run_boot_sequence(
-    data_root: &Path,
-    lab_root: Option<&Path>,
-    verbose: bool,
-    geometry_json: Option<&Path>,
-    audio_callback: Option<Rc<dyn AudioCallback>>,
-    movement: Option<MovementOptions>,
-    hotspot: Option<HotspotOptions>,
-) -> Result<EngineRunSummary> {
-    let resources = Rc::new(
-        ResourceGraph::from_data_root(data_root)
-            .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
-    );
-
-    let lab_root_path = lab_root
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("dev-install"));
-    let lab_collection = if lab_root_path.is_dir() {
-        match LabCollection::load_from_dir(&lab_root_path) {
-            Ok(collection) => Some(Rc::new(collection)),
-            Err(err) => {
-                eprintln!(
-                    "[grim_engine] warning: failed to load LAB archives from {}: {:?}",
-                    lab_root_path.display(),
-                    err
-                );
-                None
-            }
-        }
-    } else {
-        if verbose {
-            eprintln!(
-                "[grim_engine] info: LAB root {} missing; continuing without geometry",
-                lab_root_path.display()
-            );
-        }
-        None
-    };
-
-    let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
-        .context("initialising Lua runtime with standard libraries")?;
-    let context = Rc::new(RefCell::new(EngineContext::new(
-        resources,
-        verbose,
-        lab_collection,
-        audio_callback,
-    )));
-
-    install_package_path(&lua, data_root)?;
-    install_globals(&lua, data_root, context.clone())?;
-    load_system_script(&lua, data_root)?;
-    override_boot_stubs(&lua, context.clone())?;
-    call_boot(&lua, context.clone())?;
-    drive_active_scripts(&lua, context.clone(), 8, 32)?;
-
-    if let Some(options) = movement.as_ref() {
-        simulate_movement(&lua, context.clone(), options)?;
-    }
-
-    if let Some(options) = hotspot.as_ref() {
-        simulate_hotspot_demo(&lua, context.clone(), options)?;
-    }
-
-    let snapshot = context.borrow();
-    dump_runtime_summary(&snapshot);
-    let events = snapshot.events.clone();
-    if let Some(path) = geometry_json {
-        let snapshot_data = snapshot.geometry_snapshot();
-        let json = serde_json::to_string_pretty(&snapshot_data)
-            .context("serializing Lua geometry snapshot to JSON")?;
-        fs::write(path, &json)
-            .with_context(|| format!("writing Lua geometry snapshot to {}", path.display()))?;
-        println!("Saved Lua geometry snapshot to {}", path.display());
-    }
-    Ok(EngineRunSummary { events })
-}
-
-fn simulate_movement(
-    lua: &Lua,
-    context: Rc<RefCell<EngineContext>>,
-    options: &MovementOptions,
-) -> Result<()> {
-    use anyhow::anyhow;
-
-    let globals = lua.globals();
-    let walk_vector: Table = globals
-        .get("WalkVector")
-        .context("WalkVector table missing for movement simulation")?;
-
-    let (actor_handle, actor_id) = {
-        let guard = context.borrow();
-        let snapshot = match guard
-            .actors
-            .get("manny")
-            .or_else(|| guard.actors.get("Manny"))
-        {
-            Some(actor) => actor,
-            None => return Ok(()),
-        };
-        if snapshot.handle == 0 {
-            return Ok(());
-        }
-        let id = guard
-            .actor_handles
-            .get(&snapshot.handle)
-            .cloned()
-            .unwrap_or_else(|| snapshot.name.to_ascii_lowercase());
-        (snapshot.handle, id)
-    };
-
-    let mut frame: u32 = 0;
-    let mut samples: Vec<MovementSample> = Vec::new();
-
-    if let Ok(reset_controls) = globals.get::<_, Function>("ResetMarioControls") {
-        let _: () = reset_controls.call(())?;
-    }
-    globals.set("MarioControl", true)?;
-    if let Ok(system_table) = globals.get::<_, Table>("system") {
-        let axis_stub = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-        system_table.set("axisHandler", axis_stub)?;
-    }
-    if let (Ok(single_start), Ok(walk_manny)) = (
-        globals.get::<_, Function>("single_start_script"),
-        globals.get::<_, Value>("WalkManny"),
-    ) {
-        let _: () = single_start.call((walk_manny,))?;
-    }
-
-    for segment in &options.plan.segments {
-        for _ in 0..segment.frames {
-            frame += 1;
-            walk_vector.set("x", segment.vector.x)?;
-            walk_vector.set("y", segment.vector.y)?;
-            walk_vector.set("z", segment.vector.z)?;
-            drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
-
-            if segment.vector.x.abs() + segment.vector.y.abs() + segment.vector.z.abs()
-                > f32::EPSILON
-            {
-                let delta = Vec3 {
-                    x: segment.vector.x * WALK_SPEED_SCALE,
-                    y: segment.vector.y * WALK_SPEED_SCALE,
-                    z: segment.vector.z * WALK_SPEED_SCALE,
-                };
-                {
-                    let mut guard = context.borrow_mut();
-                    guard.walk_actor_vector(actor_handle, delta, None, None);
-                }
-            }
-
-            let sample_opt = {
-                let guard = context.borrow();
-                capture_movement_sample(&guard, actor_handle, &actor_id, frame)
-            };
-            if let Some(sample) = sample_opt {
-                {
-                    let mut guard = context.borrow_mut();
-                    guard.log_event(format!(
-                        "movement.frame {} {:.3},{:.3}",
-                        frame, sample.position[0], sample.position[1]
-                    ));
-                }
-                samples.push(sample);
-            }
-        }
-    }
-
-    walk_vector.set("x", 0.0)?;
-    walk_vector.set("y", 0.0)?;
-    walk_vector.set("z", 0.0)?;
-
-    for _ in 0..12 {
-        frame += 1;
-        drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
-        {
-            let mut guard = context.borrow_mut();
-            guard.walk_actor_vector(
-                actor_handle,
-                Vec3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-                None,
-                None,
-            );
-        }
-        let sample_opt = {
-            let guard = context.borrow();
-            capture_movement_sample(&guard, actor_handle, &actor_id, frame)
-        };
-        if let Some(sample) = sample_opt {
-            {
-                let mut guard = context.borrow_mut();
-                guard.log_event(format!(
-                    "movement.frame {} {:.3},{:.3}",
-                    frame, sample.position[0], sample.position[1]
-                ));
-            }
-            samples.push(sample);
-        }
-    }
-
-    if let Some(path) = options.log_path.as_ref() {
-        let json =
-            serde_json::to_string_pretty(&samples).context("serializing movement log to JSON")?;
-        fs::write(path, json)
-            .with_context(|| format!("writing movement log to {}", path.display()))?;
-        println!("Saved movement log to {}", path.display());
-    }
-
-    Ok(())
-}
-
-fn simulate_hotspot_demo(
-    lua: &Lua,
-    context: Rc<RefCell<EngineContext>>,
-    options: &HotspotOptions,
-) -> Result<()> {
-    use anyhow::anyhow;
-
-    let slug = options.slug();
-
-    let (actor_handle, actor_id) = {
-        let guard = context.borrow();
-        let snapshot = match guard
-            .actors
-            .get("manny")
-            .or_else(|| guard.actors.get("Manny"))
-        {
-            Some(actor) => actor,
-            None => return Ok(()),
-        };
-        if snapshot.handle == 0 {
-            return Ok(());
-        }
-        let id = guard
-            .actor_handles
-            .get(&snapshot.handle)
-            .cloned()
-            .unwrap_or_else(|| snapshot.name.to_ascii_lowercase());
-        (snapshot.handle, id)
-    };
-
-    let target = slug.approach_target();
-    let steps = slug.approach_steps().max(1);
-
-    {
-        let mut guard = context.borrow_mut();
-        guard.log_event(format!("hotspot.demo.approach {}", slug.label()));
-    }
-
-    let mut frame: u32 = 0;
-    for step in 0..steps {
-        frame += 1;
-        let delta = {
-            let guard = context.borrow();
-            let current = guard
-                .actor_position_by_handle(actor_handle)
-                .unwrap_or(MANNY_OFFICE_SEED_POS);
-            let remaining = (steps - step) as f32;
-            Vec3 {
-                x: (target.x - current.x) / remaining.max(1.0),
-                y: (target.y - current.y) / remaining.max(1.0),
-                z: (target.z - current.z) / remaining.max(1.0),
-            }
-        };
-
-        {
-            let mut guard = context.borrow_mut();
-            guard.walk_actor_vector(actor_handle, delta, None, None);
-        }
-
-        drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
-
-        if let Some(sample) = {
-            let guard = context.borrow();
-            capture_movement_sample(&guard, actor_handle, &actor_id, frame)
-        } {
-            let mut guard = context.borrow_mut();
-            guard.log_event(format!(
-                "movement.frame {} {:.3},{:.3}",
-                frame, sample.position[0], sample.position[1]
-            ));
-        }
-    }
-
-    let globals = lua.globals();
-    let mo_table: Table = globals
-        .get("mo")
-        .context("mo table missing for hotspot demo")?;
-    let object: Table = mo_table
-        .get(slug.object_field())
-        .with_context(|| format!("mo.{} missing for hotspot demo", slug.object_field()))?;
-    let object_clone = object.clone();
-    let sentence: Function = globals
-        .get("Sentence")
-        .context("Sentence function missing for hotspot demo")?;
-
-    {
-        let mut guard = context.borrow_mut();
-        guard.log_event(format!("hotspot.demo.start {}", slug.label()));
-    }
-
-    sentence
-        .call::<_, ()>(("use", object.clone()))
-        .context("executing hotspot Sentence")?;
-
-    for _ in 0..32 {
-        drive_active_scripts(lua, context.clone(), 64, 4096).map_err(|err| anyhow!(err))?;
-        let costume_reset = {
-            let ctx = context.borrow();
-            match ctx.actor_costume("manny") {
-                Some(costume) => costume.eq_ignore_ascii_case("suit"),
-                None => true,
-            }
-        };
-        let message_idle = {
-            let ctx = context.borrow();
-            !ctx.is_message_active()
-        };
-        if costume_reset && message_idle {
-            break;
-        }
-    }
-    drive_active_scripts(lua, context.clone(), 32, 2048).map_err(|err| anyhow!(err))?;
-
-    let fallback_needed = {
-        let ctx = context.borrow();
-        ctx.actor_costume("manny")
-            .map(|costume| !costume.eq_ignore_ascii_case("suit"))
-            .unwrap_or(false)
-    };
-
-    if fallback_needed {
-        complete_computer_hotspot_manually(lua, context.clone(), object_clone)?;
-    }
-
-    {
-        let mut guard = context.borrow_mut();
-        guard.log_event(format!("hotspot.demo.end {}", slug.label()));
-    }
-
-    Ok(())
-}
-
-fn complete_computer_hotspot_manually(
-    lua: &Lua,
-    context: Rc<RefCell<EngineContext>>,
-    target: Table,
-) -> Result<()> {
-    let globals = lua.globals();
-    let start_sfx: Function = globals
-        .get("start_sfx")
-        .context("start_sfx not available for hotspot fallback")?;
-    let stop_sound: Function = globals
-        .get("stop_sound")
-        .context("stop_sound not available for hotspot fallback")?;
-    let wait_for_sound: Function = globals
-        .get("wait_for_sound")
-        .context("wait_for_sound not available for hotspot fallback")?;
-    let enable_head_control: Function = globals
-        .get("enable_head_control")
-        .context("enable_head_control not available for hotspot fallback")?;
-
-    let manny: Table = globals
-        .get("manny")
-        .context("manny table missing for hotspot fallback")?;
-    let say_line: Function = manny
-        .get("say_line")
-        .context("manny.say_line missing for hotspot fallback")?;
-    let wait_for_message: Function = manny
-        .get("wait_for_message")
-        .context("manny.wait_for_message missing for hotspot fallback")?;
-    let head_look_at: Function = manny
-        .get("head_look_at")
-        .context("manny.head_look_at missing for hotspot fallback")?;
-    let head_look_at_point: Function = manny
-        .get("head_look_at_point")
-        .context("manny.head_look_at_point missing for hotspot fallback")?;
-    let play_chore: Function = manny
-        .get("play_chore")
-        .context("manny.play_chore missing for hotspot fallback")?;
-    let pop_costume: Function = manny
-        .get("pop_costume")
-        .context("manny.pop_costume missing for hotspot fallback")?;
-    let set_pos: Function = manny
-        .get("setpos")
-        .context("manny.setpos missing for hotspot fallback")?;
-    let set_rot: Function = manny
-        .get("setrot")
-        .context("manny.setrot missing for hotspot fallback")?;
-    let ignore_boxes: Function = manny
-        .get("ignore_boxes")
-        .context("manny.ignore_boxes missing for hotspot fallback")?;
-
-    let _ = stop_sound.call::<_, ()>(("keyboard.imu",));
-
-    start_sfx.call::<_, Value>(("txtScrl3.WAV",))?;
-    let _ = wait_for_sound.call::<_, ()>(("txtScrl3.WAV",));
-    start_sfx.call::<_, Value>(("txtScrl2.WAV",))?;
-    start_sfx.call::<_, Value>(("compbeep.wav",))?;
-    head_look_at_point.call::<_, ()>((manny.clone(), 0.20_f32, 1.875_f32, 0.47_f32, 90_f32))?;
-    say_line.call::<_, ()>((manny.clone(), "/moma112/"))?;
-    wait_for_message.call::<_, ()>((manny.clone(),))?;
-    head_look_at.call::<_, ()>((manny.clone(), target.clone()))?;
-    say_line.call::<_, ()>((manny.clone(), "/moma113/"))?;
-
-    play_chore.call::<_, ()>((manny.clone(), "ma_note_type_type_loop", "ma_note_type.cos"))?;
-    start_sfx.call::<_, Value>(("keyboard.imu",))?;
-    start_sfx.call::<_, Value>(("txtScrl3.WAV",))?;
-    let _ = wait_for_sound.call::<_, ()>(("txtScrl3.WAV",));
-    start_sfx.call::<_, Value>(("txtScrl2.WAV",))?;
-    let _ = stop_sound.call::<_, ()>(("keyboard.imu",));
-
-    wait_for_message.call::<_, ()>((manny.clone(),))?;
-
-    ignore_boxes.call::<_, ()>((manny.clone(), false))?;
-    pop_costume.call::<_, ()>((manny.clone(),))?;
-    set_pos.call::<_, ()>((manny.clone(), 0.5_f32, 1.975_f32, 0.0_f32))?;
-    set_rot.call::<_, ()>((manny.clone(), 0.0_f32, 120.761002_f32, 0.0_f32))?;
-    enable_head_control.call::<_, ()>((true,))?;
-
-    context
-        .borrow_mut()
-        .log_event("hotspot.demo.fallback computer".to_string());
-    Ok(())
-}
-fn capture_movement_sample(
-    ctx: &EngineContext,
-    actor_handle: u32,
-    actor_id: &str,
-    frame: u32,
-) -> Option<MovementSample> {
-    let position = ctx.actor_position_by_handle(actor_handle)?;
-    let yaw = ctx.actor_rotation_by_handle(actor_handle).map(|rot| rot.y);
-    let sector = ctx
-        .geometry_sector_hit(actor_id, "walk")
-        .map(|hit| hit.name);
-    Some(MovementSample {
-        frame,
-        position: [position.x, position.y, position.z],
-        yaw,
-        sector,
-    })
-}
-
-fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
+pub(super) fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
     let globals = lua.globals();
     let package: Table = globals
         .get("package")
@@ -3792,7 +3206,11 @@ fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_globals(lua: &Lua, data_root: &Path, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+pub(super) fn install_globals(
+    lua: &Lua,
+    data_root: &Path,
+    context: Rc<RefCell<EngineContext>>,
+) -> Result<()> {
     let globals = lua.globals();
 
     let root = data_root.to_path_buf();
@@ -6814,7 +6232,7 @@ fn read_object_snapshot(_lua: &Lua, object: &Table, handle: i64) -> LuaResult<Ob
     })
 }
 
-fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
+pub(super) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
     let system_path = data_root.join("_system.decompiled.lua");
     let source = fs::read_to_string(&system_path)
         .with_context(|| format!("reading {}", system_path.display()))?;
@@ -6824,7 +6242,7 @@ fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+pub(super) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     install_parent_object_hook(lua, context.clone()).map_err(|err| anyhow!(err))?;
     install_set_scaffold(lua, context.clone()).map_err(|err| anyhow!(err))?;
     let globals = lua.globals();
@@ -7207,7 +6625,7 @@ fn wrap_wait_for_message(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Resu
     Ok(())
 }
 
-fn call_boot(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
+pub(super) fn call_boot(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
     let boot: Function = globals
         .get("BOOT")
@@ -8505,7 +7923,7 @@ fn build_menu_instance<'lua>(
     Ok(menu)
 }
 
-fn dump_runtime_summary(state: &EngineContext) {
+pub(super) fn dump_runtime_summary(state: &EngineContext) {
     println!("Lua runtime summary:");
     match &state.current_set {
         Some(set) => {
@@ -9000,7 +8418,7 @@ fn wait_for_handle(lua: &Lua, context: Rc<RefCell<EngineContext>>, handle: u32) 
     Ok(())
 }
 
-fn drive_active_scripts(
+pub(super) fn drive_active_scripts(
     lua: &Lua,
     context: Rc<RefCell<EngineContext>>,
     max_passes: usize,
@@ -9181,9 +8599,10 @@ fn distance_between(a: Vec3, b: Vec3) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::Vec3;
     use super::{
         candidate_paths, install_game_pauser, install_menu_common, value_slice_to_vec3,
-        AudioCallback, EngineContext, ObjectSnapshot, ParsedSetGeometry, Vec3,
+        AudioCallback, EngineContext, ObjectSnapshot, ParsedSetGeometry,
     };
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
