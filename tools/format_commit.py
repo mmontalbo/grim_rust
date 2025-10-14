@@ -82,6 +82,15 @@ def parse_args() -> argparse.Namespace:
 
 def format_message(component: str, summary: str, why: list[str], what: list[str]) -> str:
     root = Path(__file__).resolve().parent.parent
+
+    if not why:
+        raise ValueError("at least one --why entry is required")
+    for item in why:
+        if not item.strip():
+            raise ValueError("--why entries must be non-empty")
+
+    if not what:
+        raise ValueError("at least one --what entry is required")
     for item in what:
         if ":" not in item:
             raise ValueError(f"--what entry must include 'path: description' (got {item!r})")
