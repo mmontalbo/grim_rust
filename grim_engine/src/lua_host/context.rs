@@ -15,8 +15,8 @@ mod pause;
 use actors::{ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
 use audio::{
-    format_music_detail, MusicCueSnapshot, MusicState, SfxInstance, SfxState, FOOTSTEP_PROFILES,
-    IM_SOUND_GROUP, IM_SOUND_PAN, IM_SOUND_PLAY_COUNT, IM_SOUND_VOL,
+    install_music_scaffold, AudioRuntime, MusicState, SfxState, FOOTSTEP_PROFILES,
+    IM_SOUND_PLAY_COUNT, IM_SOUND_VOL,
 };
 use geometry::{ParsedSetGeometry, SectorHit, SetDescriptor, SetSnapshot, SetupInfo};
 use inventory::InventoryState;
@@ -28,10 +28,7 @@ use menus::{
 use pause::{PauseLabel, PauseState};
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
-use crate::geometry_snapshot::{
-    LuaGeometrySnapshot, LuaMusicCueSnapshot, LuaMusicSnapshot, LuaSfxInstanceSnapshot,
-    LuaSfxSnapshot,
-};
+use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
 use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::{normalize_legacy_lua, ResourceGraph};
@@ -258,10 +255,8 @@ pub(super) struct EngineContext {
     speaking_actor: Option<String>,
     message_active: bool,
     pause: PauseState,
-    music: MusicState,
-    sfx: SfxState,
+    audio: AudioRuntime,
     lab_collection: Option<Rc<LabCollection>>,
-    audio_callback: Option<Rc<dyn AudioCallback>>,
     set_geometry: BTreeMap<String, ParsedSetGeometry>,
     sector_states: BTreeMap<String, BTreeMap<String, bool>>,
 }
@@ -320,10 +315,8 @@ impl EngineContext {
             speaking_actor: None,
             message_active: false,
             pause: PauseState::default(),
-            music: MusicState::default(),
-            sfx: SfxState::default(),
+            audio: AudioRuntime::new(audio_callback),
             lab_collection,
-            audio_callback,
             set_geometry: BTreeMap::new(),
             sector_states: BTreeMap::new(),
         }
@@ -456,202 +449,69 @@ impl EngineContext {
     }
 
     fn play_music(&mut self, track: String, params: Vec<String>) {
-        let snapshot = MusicCueSnapshot {
-            name: track.clone(),
-            parameters: params.clone(),
-        };
-        self.music.current = Some(snapshot);
-        let detail = format_music_detail("play", &track, &params);
-        self.music.history.push(detail);
-        self.log_event(format!("music.play {}", track));
-        if let Some(callback) = self.audio_callback.as_ref() {
-            callback.music_play(&track, &params);
-        }
+        let event = self.audio.play_music(track, params);
+        self.log_event(event);
     }
 
     fn queue_music(&mut self, track: String, params: Vec<String>) {
-        let snapshot = MusicCueSnapshot {
-            name: track.clone(),
-            parameters: params.clone(),
-        };
-        self.music.queued.push(snapshot);
-        let detail = format_music_detail("queue", &track, &params);
-        self.music.history.push(detail);
-        self.log_event(format!("music.queue {}", track));
+        let event = self.audio.queue_music(track, params);
+        self.log_event(event);
     }
 
     fn stop_music(&mut self, mode: Option<String>) {
-        self.music.current = None;
-        self.music.paused = false;
-        let history_entry = match mode.as_deref() {
-            Some(value) if !value.is_empty() => format!("stop {}", value),
-            _ => "stop".to_string(),
-        };
-        self.music.history.push(history_entry.clone());
-        let event = match mode.as_deref() {
-            Some(value) if !value.is_empty() => format!("music.stop {}", value),
-            _ => "music.stop".to_string(),
-        };
+        let event = self.audio.stop_music(mode);
         self.log_event(event);
-        if let Some(callback) = self.audio_callback.as_ref() {
-            callback.music_stop(mode.as_deref());
-        }
     }
 
     fn pause_music(&mut self) {
-        if !self.music.paused {
-            self.music.paused = true;
-        }
-        self.music.history.push("pause".to_string());
-        self.log_event("music.pause");
+        let event = self.audio.pause_music();
+        self.log_event(event);
     }
 
     fn resume_music(&mut self) {
-        if self.music.paused {
-            self.music.paused = false;
-        }
-        self.music.history.push("resume".to_string());
-        self.log_event("music.resume");
+        let event = self.audio.resume_music();
+        self.log_event(event);
     }
 
     fn set_music_state(&mut self, state: Option<String>) {
-        match state {
-            Some(name) => {
-                if let Some(current) = self.music.state_stack.last_mut() {
-                    *current = name.clone();
-                }
-                self.music.current_state = Some(name.clone());
-                self.music.history.push(format!("state {}", name));
-                self.log_event(format!("music.state {}", name));
-            }
-            None => {
-                self.music.current_state = None;
-                self.music.history.push("state <nil>".to_string());
-                self.log_event("music.state <nil>".to_string());
-            }
-        }
+        let event = self.audio.set_music_state(state);
+        self.log_event(event);
     }
 
     fn push_music_state(&mut self, state: Option<String>) {
-        match state {
-            Some(name) => {
-                self.music.state_stack.push(name.clone());
-                self.music.current_state = Some(name.clone());
-                self.music.history.push(format!("state.push {}", name));
-                self.log_event(format!("music.state.push {}", name));
-            }
-            None => {
-                self.music.history.push("state.push <nil>".to_string());
-                self.log_event("music.state.push <nil>".to_string());
-            }
-        }
+        let event = self.audio.push_music_state(state);
+        self.log_event(event);
     }
 
     fn pop_music_state(&mut self) {
-        let popped = self.music.state_stack.pop();
-        self.music.current_state = self.music.state_stack.last().cloned();
-        let label = popped.as_deref().unwrap_or("<none>");
-        self.music.history.push(format!("state.pop {}", label));
-        self.log_event(format!("music.state.pop {}", label));
+        let event = self.audio.pop_music_state();
+        self.log_event(event);
     }
 
     fn mute_music_group(&mut self, group: Option<String>) {
-        match group {
-            Some(name) => {
-                self.music.muted_groups.insert(name.clone());
-                self.music.history.push(format!("mute {}", name));
-                self.log_event(format!("music.mute {}", name));
-            }
-            None => {
-                self.music.history.push("mute <nil>".to_string());
-                self.log_event("music.mute <nil>".to_string());
-            }
-        }
+        let event = self.audio.mute_music_group(group);
+        self.log_event(event);
     }
 
     fn unmute_music_group(&mut self, group: Option<String>) {
-        match group {
-            Some(name) => {
-                self.music.muted_groups.remove(&name);
-                self.music.history.push(format!("unmute {}", name));
-                self.log_event(format!("music.unmute {}", name));
-            }
-            None => {
-                self.music.history.push("unmute <nil>".to_string());
-                self.log_event("music.unmute <nil>".to_string());
-            }
-        }
+        let event = self.audio.unmute_music_group(group);
+        self.log_event(event);
     }
 
     fn set_music_volume(&mut self, volume: Option<f32>) {
-        self.music.volume = volume;
-        let detail = match self.music.volume {
-            Some(value) => format!("volume {:.3}", value),
-            None => "volume <nil>".to_string(),
-        };
-        self.music.history.push(detail.clone());
-        self.log_event(format!("music.{}", detail));
+        let event = self.audio.set_music_volume(volume);
+        self.log_event(event);
     }
 
     fn play_sound_effect(&mut self, cue: String, params: Vec<String>) -> String {
-        let numeric = self.sfx.next_handle as i64;
-        let handle = format!("sfx_{:04}", self.sfx.next_handle);
-        self.sfx.next_handle = self.sfx.next_handle.saturating_add(1);
-        let instance = SfxInstance {
-            handle: handle.clone(),
-            numeric,
-            cue: cue.clone(),
-            parameters: params.clone(),
-            group: None,
-            volume: 127,
-            pan: 64,
-            play_count: 1,
-        };
-        self.sfx.active_by_numeric.insert(numeric, handle.clone());
-        self.sfx.active.insert(handle.clone(), instance);
-        let detail = if params.is_empty() {
-            format!("sfx.play {} -> {}", cue, handle)
-        } else {
-            format!("sfx.play {} [{}] -> {}", cue, params.join(", "), handle)
-        };
-        self.sfx.history.push(detail);
-        self.log_event(format!("sfx.play {}", cue));
-        if let Some(callback) = self.audio_callback.as_ref() {
-            callback.sfx_play(&cue, &params, &handle);
-        }
+        let (handle, event) = self.audio.play_sound_effect(cue, params);
+        self.log_event(event);
         handle
     }
 
     fn stop_sound_effect(&mut self, target: Option<String>) {
-        let requested = target.clone();
-        let mut label = String::from("sfx.stop");
-        if let Some(spec) = target {
-            if let Some(instance) = self.sfx.active.remove(&spec) {
-                self.sfx.active_by_numeric.remove(&instance.numeric);
-                label = format!("sfx.stop {}", spec);
-            } else if let Some((handle, numeric)) = self
-                .sfx
-                .active
-                .iter()
-                .find(|(_, instance)| instance.cue.eq_ignore_ascii_case(&spec))
-                .map(|(handle, instance)| (handle.clone(), instance.numeric))
-            {
-                self.sfx.active.remove(&handle);
-                self.sfx.active_by_numeric.remove(&numeric);
-                label = format!("sfx.stop {}", spec);
-            } else {
-                label = format!("sfx.stop {}", spec);
-            }
-        } else {
-            self.sfx.active.clear();
-            self.sfx.active_by_numeric.clear();
-            label.push_str(" all");
-        }
-        self.sfx.history.push(label.clone());
-        self.log_event(label);
-        if let Some(callback) = self.audio_callback.as_ref() {
-            callback.sfx_stop(requested.as_deref());
-        }
+        let event = self.audio.stop_sound_effect(target);
+        self.log_event(event);
     }
 
     fn start_imuse_sound(&mut self, cue: String, priority: Option<i32>, group: Option<i32>) -> i64 {
@@ -663,7 +523,7 @@ impl EngineContext {
             params.push(format!("group={value}"));
         }
         let handle = self.play_sound_effect(cue, params);
-        if let Some(instance) = self.sfx.active.get_mut(&handle) {
+        if let Some(instance) = self.audio.sfx_mut().active.get_mut(&handle) {
             instance.group = group;
             instance.play_count = 1;
             instance.numeric
@@ -673,65 +533,26 @@ impl EngineContext {
     }
 
     fn stop_sound_effect_by_numeric(&mut self, numeric: i64) {
-        if let Some(handle) = self.sfx.active_by_numeric.get(&numeric).cloned() {
-            self.stop_sound_effect(Some(handle));
-        } else {
-            self.stop_sound_effect(Some(numeric.to_string()));
-        }
+        let event = self.audio.stop_sound_effect_by_numeric(numeric);
+        self.log_event(event);
     }
 
     fn set_sound_param(&mut self, numeric: i64, param: i32, value: i32) {
-        let Some(handle) = self.sfx.active_by_numeric.get(&numeric).cloned() else {
-            return;
-        };
-
-        let log_message = if let Some(instance) = self.sfx.active.get_mut(&handle) {
-            let cue_label = instance.cue.clone();
-            match param {
-                IM_SOUND_VOL => {
-                    instance.volume = value;
-                    Some(format!("sfx.param {} volume {}", cue_label, value))
-                }
-                IM_SOUND_PAN => {
-                    instance.pan = value;
-                    Some(format!("sfx.param {} pan {}", cue_label, value))
-                }
-                IM_SOUND_PLAY_COUNT => {
-                    instance.play_count = value.max(0) as u32;
-                    Some(format!(
-                        "sfx.param {} play_count {}",
-                        cue_label, instance.play_count
-                    ))
-                }
-                IM_SOUND_GROUP => {
-                    instance.group = Some(value);
-                    Some(format!("sfx.param {} group {}", cue_label, value))
-                }
-                _ => Some(format!(
-                    "sfx.param {} code {} value {}",
-                    cue_label, param, value
-                )),
-            }
-        } else {
-            None
-        };
-
-        if let Some(entry) = log_message {
-            self.log_event(entry);
+        if let Some(event) = self.audio.set_sound_param(numeric, param, value) {
+            self.log_event(event);
         }
     }
 
     fn get_sound_param(&self, numeric: i64, param: i32) -> Option<i32> {
-        let handle = self.sfx.active_by_numeric.get(&numeric)?;
-        let instance = self.sfx.active.get(handle)?;
-        let value = match param {
-            IM_SOUND_PLAY_COUNT => instance.play_count as i32,
-            IM_SOUND_VOL => instance.volume,
-            IM_SOUND_PAN => instance.pan,
-            IM_SOUND_GROUP => instance.group.unwrap_or(0),
-            _ => return None,
-        };
-        Some(value)
+        self.audio.get_sound_param(numeric, param)
+    }
+
+    fn music_state(&self) -> &MusicState {
+        self.audio.music()
+    }
+
+    fn sfx_state(&self) -> &SfxState {
+        self.audio.sfx()
     }
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
@@ -2293,67 +2114,13 @@ impl EngineContext {
             inventory_rooms: self.inventory.clone_rooms(),
             commentary: self.commentary.clone(),
             cut_scene_stack: self.cut_scene_stack.clone(),
-            music: self.music.clone(),
-            sfx: self.sfx.clone(),
+            music: self.audio.music().clone(),
+            sfx: self.audio.sfx().clone(),
             events: self.events.clone(),
         }
     }
 }
 
-impl MusicState {
-    fn to_snapshot(&self) -> LuaMusicSnapshot {
-        let current = self.current.as_ref().map(|cue| cue.to_snapshot());
-        let queued = self
-            .queued
-            .iter()
-            .map(|cue| cue.to_snapshot())
-            .collect::<Vec<_>>();
-        let muted_groups = self.muted_groups.iter().cloned().collect::<Vec<_>>();
-        LuaMusicSnapshot {
-            current,
-            queued,
-            current_state: self.current_state.clone(),
-            state_stack: self.state_stack.clone(),
-            paused: self.paused,
-            muted_groups,
-            volume: self.volume,
-            history: self.history.clone(),
-        }
-    }
-}
-
-impl MusicCueSnapshot {
-    fn to_snapshot(&self) -> LuaMusicCueSnapshot {
-        LuaMusicCueSnapshot {
-            name: self.name.clone(),
-            parameters: self.parameters.clone(),
-        }
-    }
-}
-
-impl SfxState {
-    fn to_snapshot(&self) -> LuaSfxSnapshot {
-        let active = self
-            .active
-            .values()
-            .map(|instance| instance.to_snapshot())
-            .collect::<Vec<_>>();
-        LuaSfxSnapshot {
-            active,
-            history: self.history.clone(),
-        }
-    }
-}
-
-impl SfxInstance {
-    fn to_snapshot(&self) -> LuaSfxInstanceSnapshot {
-        LuaSfxInstanceSnapshot {
-            handle: self.handle.clone(),
-            cue: self.cue.clone(),
-            parameters: self.parameters.clone(),
-        }
-    }
-}
 fn vec3_to_array(vec: Vec3) -> [f32; 3] {
     [vec.x, vec.y, vec.z]
 }
@@ -5897,175 +5664,6 @@ fn install_achievement_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) 
     Ok(())
 }
 
-fn install_music_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    if matches!(globals.get::<_, Value>("music"), Ok(Value::Table(_))) {
-        return Ok(());
-    }
-
-    let music = lua.create_table()?;
-
-    let play_context = context.clone();
-    music.set(
-        "play",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            if values.is_empty() {
-                return Ok(());
-            }
-            let track = values
-                .get(0)
-                .and_then(value_to_string)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let params = values
-                .iter()
-                .skip(1)
-                .map(|value| describe_value(value))
-                .collect::<Vec<_>>();
-            play_context.borrow_mut().play_music(track, params);
-            Ok(())
-        })?,
-    )?;
-
-    let queue_context = context.clone();
-    music.set(
-        "queue",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            if values.is_empty() {
-                return Ok(());
-            }
-            let track = values
-                .get(0)
-                .and_then(value_to_string)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let params = values
-                .iter()
-                .skip(1)
-                .map(|value| describe_value(value))
-                .collect::<Vec<_>>();
-            queue_context.borrow_mut().queue_music(track, params);
-            Ok(())
-        })?,
-    )?;
-
-    let stop_context = context.clone();
-    music.set(
-        "stop",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            let mode = values.get(0).and_then(|value| value_to_string(value));
-            stop_context.borrow_mut().stop_music(mode);
-            Ok(())
-        })?,
-    )?;
-
-    let pause_context = context.clone();
-    music.set(
-        "pause",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            pause_context.borrow_mut().pause_music();
-            Ok(())
-        })?,
-    )?;
-
-    let resume_context = context.clone();
-    music.set(
-        "resume",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            resume_context.borrow_mut().resume_music();
-            Ok(())
-        })?,
-    )?;
-
-    let set_state_context = context.clone();
-    music.set(
-        "set_state",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            let state = values.get(0).and_then(|value| value_to_string(value));
-            set_state_context.borrow_mut().set_music_state(state);
-            Ok(())
-        })?,
-    )?;
-
-    let push_state_context = context.clone();
-    music.set(
-        "push_state",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            let state = values.get(0).and_then(|value| value_to_string(value));
-            push_state_context.borrow_mut().push_music_state(state);
-            Ok(())
-        })?,
-    )?;
-
-    let pop_state_context = context.clone();
-    music.set(
-        "pop_state",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            pop_state_context.borrow_mut().pop_music_state();
-            Ok(())
-        })?,
-    )?;
-
-    let mute_context = context.clone();
-    music.set(
-        "mute_group",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            let group = values.get(0).and_then(|value| value_to_string(value));
-            mute_context.borrow_mut().mute_music_group(group);
-            Ok(())
-        })?,
-    )?;
-
-    let unmute_context = context.clone();
-    music.set(
-        "unmute_group",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            let group = values.get(0).and_then(|value| value_to_string(value));
-            unmute_context.borrow_mut().unmute_music_group(group);
-            Ok(())
-        })?,
-    )?;
-
-    let volume_context = context.clone();
-    music.set(
-        "set_volume",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (_, values) = split_self(args);
-            let volume = values.get(0).and_then(|value| value_to_f32(value));
-            volume_context.borrow_mut().set_music_volume(volume);
-            Ok(())
-        })?,
-    )?;
-
-    let fallback_context = context.clone();
-    let fallback = lua.create_function(move |lua_ctx, (_table, key): (Table, Value)| {
-        if let Value::String(method) = key {
-            fallback_context
-                .borrow_mut()
-                .log_event(format!("music.stub {}", method.to_str()?));
-        }
-        let noop = lua_ctx.create_function(|_, _: Variadic<Value>| Ok(()))?;
-        Ok(Value::Function(noop))
-    })?;
-    let metatable = lua.create_table()?;
-    metatable.set("__index", fallback)?;
-    music.set_metatable(Some(metatable));
-
-    globals.set("music", music.clone())?;
-    if matches!(
-        globals.get::<_, Value>("music_state"),
-        Ok(Value::Nil) | Err(_)
-    ) {
-        globals.set("music_state", music)?;
-    }
-    Ok(())
-}
-
 fn install_mouse_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
     if matches!(globals.get::<_, Value>("mouse"), Ok(Value::Table(_))) {
@@ -6328,7 +5926,8 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
     if let Some(effect) = &state.voice_effect {
         println!("  Voice effect: {}", effect);
     }
-    if let Some(current) = &state.music.current {
+    let music = state.music_state();
+    if let Some(current) = &music.current {
         if current.parameters.is_empty() {
             println!("  Music playing: {}", current.name);
         } else {
@@ -6341,45 +5940,41 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
     } else {
         println!("  Music playing: <none>");
     }
-    if !state.music.queued.is_empty() {
-        let queued: Vec<_> = state
-            .music
+    if !music.queued.is_empty() {
+        let queued: Vec<_> = music
             .queued
             .iter()
             .map(|entry| entry.name.as_str())
             .collect();
         println!("  Music queued: {}", queued.join(", "));
     }
-    if state.music.paused {
+    if music.paused {
         println!("  Music paused");
     }
     if state.pause_state().active {
         println!("  Game paused");
     }
-    if let Some(state_name) = &state.music.current_state {
+    if let Some(state_name) = &music.current_state {
         println!("  Music state: {}", state_name);
     }
-    if !state.music.state_stack.is_empty() {
-        println!(
-            "  Music state stack: {}",
-            state.music.state_stack.join(" -> ")
-        );
+    if !music.state_stack.is_empty() {
+        println!("  Music state stack: {}", music.state_stack.join(" -> "));
     }
-    if !state.music.muted_groups.is_empty() {
-        let groups: Vec<_> = state
-            .music
+    if !music.muted_groups.is_empty() {
+        let groups: Vec<_> = music
             .muted_groups
             .iter()
             .map(|group| group.as_str())
             .collect();
         println!("  Music muted groups: {}", groups.join(", "));
     }
-    if let Some(volume) = state.music.volume {
+    if let Some(volume) = music.volume {
         println!("  Music volume: {:.3}", volume);
     }
-    if !state.sfx.active.is_empty() {
+    let sfx = state.sfx_state();
+    if !sfx.active.is_empty() {
         println!("  Active SFX:");
-        for instance in state.sfx.active.values() {
+        for instance in sfx.active.values() {
             if instance.parameters.is_empty() {
                 println!("    - {} ({})", instance.cue, instance.handle);
             } else {
@@ -7036,6 +6631,7 @@ mod tests {
         assert!(events.iter().any(|event| event == "handle.test"));
     }
 
+    #[test]
     fn achievement_flags_are_tracked() {
         let mut ctx = make_context();
         assert!(!ctx.achievement_has_been_established("ACHIEVE_CLASSIC_DRIVER"));
@@ -7331,18 +6927,21 @@ mod tests {
 
         ctx.play_music("intro".to_string(), vec!["loop=true".to_string()]);
         assert_eq!(
-            ctx.music.current.as_ref().map(|cue| cue.name.as_str()),
+            ctx.music_state()
+                .current
+                .as_ref()
+                .map(|cue| cue.name.as_str()),
             Some("intro")
         );
 
         ctx.stop_music(Some("immediate".to_string()));
-        assert!(ctx.music.current.is_none());
+        assert!(ctx.music_state().current.is_none());
 
         let handle = ctx.play_sound_effect("doorbell".to_string(), Vec::new());
-        assert!(ctx.sfx.active.contains_key(&handle));
+        assert!(ctx.sfx_state().active.contains_key(&handle));
 
         ctx.stop_sound_effect(Some(handle.clone()));
-        assert!(!ctx.sfx.active.contains_key(&handle));
+        assert!(!ctx.sfx_state().active.contains_key(&handle));
 
         let events = callback.events();
         assert_eq!(
@@ -7356,22 +6955,22 @@ mod tests {
         );
 
         assert!(ctx
-            .music
+            .music_state()
             .history
             .iter()
             .any(|entry| entry.starts_with("play intro")));
         assert!(ctx
-            .music
+            .music_state()
             .history
             .iter()
             .any(|entry| entry == "stop immediate"));
         assert!(ctx
-            .sfx
+            .sfx_state()
             .history
             .iter()
             .any(|entry| entry.starts_with("sfx.play doorbell")));
         assert!(ctx
-            .sfx
+            .sfx_state()
             .history
             .iter()
             .any(|entry| entry.starts_with("sfx.stop")));
@@ -7442,51 +7041,54 @@ mod tests {
         let mut ctx = make_context();
         ctx.play_music("intro".to_string(), vec!["loop=true".to_string()]);
         assert_eq!(
-            ctx.music.current.as_ref().map(|cue| cue.name.as_str()),
+            ctx.music_state()
+                .current
+                .as_ref()
+                .map(|cue| cue.name.as_str()),
             Some("intro")
         );
         assert!(ctx
-            .music
+            .music_state()
             .history
             .last()
             .expect("music history entry")
             .starts_with("play intro"));
 
         ctx.queue_music("next".to_string(), Vec::new());
-        assert_eq!(ctx.music.queued.len(), 1);
+        assert_eq!(ctx.music_state().queued.len(), 1);
 
         ctx.pause_music();
-        assert!(ctx.music.paused);
+        assert!(ctx.music_state().paused);
         ctx.resume_music();
-        assert!(!ctx.music.paused);
+        assert!(!ctx.music_state().paused);
 
         ctx.set_music_state(Some("office".to_string()));
-        assert_eq!(ctx.music.current_state.as_deref(), Some("office"));
+        assert_eq!(ctx.music_state().current_state.as_deref(), Some("office"));
         ctx.push_music_state(Some("alert".to_string()));
         assert_eq!(
-            ctx.music.state_stack.last().map(|s| s.as_str()),
+            ctx.music_state().state_stack.last().map(|s| s.as_str()),
             Some("alert")
         );
         ctx.pop_music_state();
-        assert!(ctx.music.state_stack.is_empty());
+        assert!(ctx.music_state().state_stack.is_empty());
 
         ctx.stop_music(Some("immediate".to_string()));
-        assert!(ctx.music.current.is_none());
+        assert!(ctx.music_state().current.is_none());
     }
 
     #[test]
     fn sfx_state_registers_and_clears_instances() {
         let mut ctx = make_context();
         let handle = ctx.play_sound_effect("door_knock".to_string(), vec!["loop=0".to_string()]);
-        assert!(ctx.sfx.active.contains_key(&handle));
+        assert!(ctx.sfx_state().active.contains_key(&handle));
         ctx.stop_sound_effect(Some(handle.clone()));
-        assert!(!ctx.sfx.active.contains_key(&handle));
+        assert!(!ctx.sfx_state().active.contains_key(&handle));
 
         ctx.play_sound_effect("ambient".to_string(), Vec::new());
         ctx.play_sound_effect("buzz".to_string(), Vec::new());
-        assert!(!ctx.sfx.active.is_empty());
+        assert!(!ctx.sfx_state().active.is_empty());
         ctx.stop_sound_effect(None);
-        assert!(ctx.sfx.active.is_empty());
+        assert!(ctx.sfx_state().active.is_empty());
     }
 
     #[test]
