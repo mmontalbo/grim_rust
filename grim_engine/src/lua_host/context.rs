@@ -12,6 +12,7 @@ mod geometry_export;
 mod inventory;
 mod menus;
 mod pause;
+mod scripts;
 
 use actors::{ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
@@ -28,6 +29,7 @@ use menus::{
     MenuRegistry, MenuState,
 };
 use pause::{PauseLabel, PauseState};
+use scripts::{ScriptCleanup, ScriptRuntime};
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
@@ -39,20 +41,6 @@ use mlua::{
     Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Thread,
     ThreadStatus, Value, Variadic,
 };
-
-#[derive(Debug)]
-struct ScriptRecord {
-    label: String,
-    thread: Option<RegistryKey>,
-    yields: u32,
-    callable: Option<RegistryKey>,
-}
-
-#[derive(Debug, Default)]
-struct ScriptCleanup {
-    thread: Option<RegistryKey>,
-    callable: Option<RegistryKey>,
-}
 #[derive(Debug)]
 enum SectorToggleResult {
     Applied {
@@ -185,8 +173,7 @@ impl EngineContextHandle {
 pub(super) struct EngineContext {
     verbose: bool,
     _resources: Rc<ResourceGraph>,
-    next_script_handle: u32,
-    scripts: BTreeMap<u32, ScriptRecord>,
+    scripts: ScriptRuntime,
     events: Vec<String>,
     current_set: Option<SetSnapshot>,
     actors: ActorStore,
@@ -240,8 +227,7 @@ impl EngineContext {
         EngineContext {
             verbose,
             _resources: resources,
-            next_script_handle: 1,
-            scripts: BTreeMap::new(),
+            scripts: ScriptRuntime::new(),
             events: Vec::new(),
             current_set: None,
             actors: ActorStore::new(1100),
@@ -506,70 +492,49 @@ impl EngineContext {
     }
 
     fn start_script(&mut self, label: String, callable: Option<RegistryKey>) -> u32 {
-        let handle = self.next_script_handle;
-        self.next_script_handle += 1;
-        self.scripts.insert(
-            handle,
-            ScriptRecord {
-                label: label.clone(),
-                thread: None,
-                yields: 0,
-                callable,
-            },
-        );
-        self.log_event(format!("script.start {label} (#{handle})"));
+        let (handle, event) = self.scripts.start_script(label, callable);
+        self.log_event(event);
         handle
     }
 
     fn has_script_with_label(&self, label: &str) -> bool {
-        self.scripts.values().any(|record| record.label == label)
+        self.scripts.has_label(label)
     }
 
     fn attach_script_thread(&mut self, handle: u32, key: RegistryKey) {
-        if let Some(record) = self.scripts.get_mut(&handle) {
-            record.thread = Some(key);
-        }
+        self.scripts.attach_thread(handle, key);
     }
 
     fn script_thread_key(&self, handle: u32) -> Option<&RegistryKey> {
-        self.scripts
-            .get(&handle)
-            .and_then(|record| record.thread.as_ref())
+        self.scripts.thread_key(handle)
     }
 
     fn increment_script_yield(&mut self, handle: u32) {
-        if let Some(record) = self.scripts.get_mut(&handle) {
-            record.yields = record.yields.saturating_add(1);
-        }
+        self.scripts.increment_yield(handle);
     }
 
     fn script_yield_count(&self, handle: u32) -> Option<u32> {
-        self.scripts.get(&handle).map(|record| record.yields)
+        self.scripts.yield_count(handle)
     }
 
     fn script_label(&self, handle: u32) -> Option<&str> {
-        self.scripts
-            .get(&handle)
-            .map(|record| record.label.as_str())
+        self.scripts.label(handle)
     }
 
     fn active_script_handles(&self) -> Vec<u32> {
-        self.scripts.keys().copied().collect()
+        self.scripts.active_handles()
     }
 
     fn is_script_running(&self, handle: u32) -> bool {
-        self.scripts.contains_key(&handle)
+        self.scripts.is_running(handle)
     }
 
     fn complete_script(&mut self, handle: u32) -> ScriptCleanup {
-        if let Some(record) = self.scripts.remove(&handle) {
-            self.log_event(format!("script.complete {} (#{handle})", record.label));
-            return ScriptCleanup {
-                thread: record.thread,
-                callable: record.callable,
-            };
+        let (cleanup, event) = self.scripts.complete_script(handle);
+        if let Some(message) = event {
+            self.log_event(message);
         }
-        ScriptCleanup::default()
+        cleanup
     }
 
     fn ensure_actor_mut(&mut self, id: &str, label: &str) -> &mut ActorSnapshot {
@@ -1287,9 +1252,7 @@ impl EngineContext {
     }
 
     fn find_script_handle(&self, label: &str) -> Option<u32> {
-        self.scripts
-            .iter()
-            .find_map(|(handle, record)| (record.label == label).then_some(*handle))
+        self.scripts.find_handle(label)
     }
 
     fn register_actor_with_handle(
@@ -6023,10 +5986,11 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
     }
     if !state.scripts.is_empty() {
         println!("  Pending scripts:");
-        for (handle, record) in &state.scripts {
+        for (handle, record) in state.scripts.iter() {
             println!(
                 "    - {} (#{handle}) yields={}",
-                record.label, record.yields
+                record.label(),
+                record.yields()
             );
         }
     }
