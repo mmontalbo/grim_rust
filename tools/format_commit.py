@@ -18,13 +18,37 @@ import re
 import sys
 from pathlib import Path
 
-COMPONENT_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+def _load_workspace_members() -> set[str]:
+    root = Path(__file__).resolve().parent.parent
+    cargo_toml = root / "Cargo.toml"
+    try:
+        cargo_text = cargo_toml.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+
+    members_block = re.search(r"members\s*=\s*\[(?P<body>[^]]*)\]", cargo_text, re.S)
+    if not members_block:
+        return set()
+
+    members: set[str] = set()
+    for line in members_block.group("body").splitlines():
+        entry = line.strip().rstrip(",").strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if entry.startswith('"') and entry.endswith('"'):
+            members.add(entry[1:-1])
+    return members
+
+
+ALLOWED_COMPONENTS = _load_workspace_members().union({"tools", "docs"})
 
 
 def validate_component(value: str) -> str:
-    if not COMPONENT_PATTERN.match(value):
+    if value not in ALLOWED_COMPONENTS:
+        allowed = ", ".join(sorted(ALLOWED_COMPONENTS))
         raise argparse.ArgumentTypeError(
-            "component must be lowercase alphanumeric/underscore (e.g. grim_viewer, docs, tools)"
+            f"component must be one of: {allowed} (got {value!r})"
         )
     return value
 
@@ -57,6 +81,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def format_message(component: str, summary: str, why: list[str], what: list[str]) -> str:
+    root = Path(__file__).resolve().parent.parent
+    for item in what:
+        if ":" not in item:
+            raise ValueError(f"--what entry must include 'path: description' (got {item!r})")
+        path_label, description = item.split(":", 1)
+        path = path_label.strip()
+        if not path:
+            raise ValueError(f"--what entry missing path before colon (got {item!r})")
+        if not description.strip():
+            raise ValueError(f"--what entry missing description after colon (got {item!r})")
+        file_path = (root / path).resolve()
+        try:
+            file_path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"--what path must be within repo: {path}") from exc
+        if not file_path.exists():
+            raise ValueError(f"--what path does not exist: {path}")
+
     lines = [f"{component}: {summary}", "", "Why:"]
     lines.extend(f"- {item}" for item in why)
     lines.append("")

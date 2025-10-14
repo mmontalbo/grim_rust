@@ -699,7 +699,9 @@
           "transform": {
             "position": null,
             "rotation": null,
-            "facing_target": null
+            "facing_target": null,
+            "scale": null,
+            "collision_scale": null
           },
           "chore_state": {
             "last_played": null,
@@ -739,7 +741,9 @@
           "transform": {
             "position": null,
             "rotation": null,
-            "facing_target": null
+            "facing_target": null,
+            "scale": null,
+            "collision_scale": null
           },
           "chore_state": {
             "last_played": null,
@@ -841,7 +845,9 @@
           "transform": {
             "position": null,
             "rotation": null,
-            "facing_target": null
+            "facing_target": null,
+            "scale": null,
+            "collision_scale": null
           },
           "chore_state": {
             "last_played": null,
@@ -913,7 +919,9 @@
           "transform": {
             "position": null,
             "rotation": null,
-            "facing_target": null
+            "facing_target": null,
+            "scale": null,
+            "collision_scale": null
           },
           "chore_state": {
             "last_played": null,
@@ -6164,7 +6172,9 @@
           "transform": {
             "position": null,
             "rotation": null,
-            "facing_target": null
+            "facing_target": null,
+            "scale": null,
+            "collision_scale": null
           },
           "chore_state": {
             "last_played": null,
@@ -6266,7 +6276,9 @@
           "transform": {
             "position": null,
             "rotation": null,
-            "facing_target": null
+            "facing_target": null,
+            "scale": null,
+            "collision_scale": null
           },
           "chore_state": {
             "last_played": null,
@@ -6338,7 +6350,9 @@
           "transform": {
             "position": null,
             "rotation": null,
-            "facing_target": null
+            "facing_target": null,
+            "scale": null,
+            "collision_scale": null
           },
           "chore_state": {
             "last_played": null,

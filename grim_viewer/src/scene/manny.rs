@@ -86,6 +86,12 @@ pub(super) fn apply_geometry_overrides(
                 entity.rotation = Some(rotation);
                 entity.orientation = Some(EntityOrientation::from_degrees(rotation));
             }
+            if let Some(scale) = pose.scale {
+                entity.actor_scale = Some(scale);
+            }
+            if let Some(scale) = pose.collision_scale {
+                entity.collision_scale = Some(scale);
+            }
         }
     }
 }
@@ -156,6 +162,8 @@ mod tests {
             last_played: None,
             last_looping: None,
             last_completed: None,
+            actor_scale: None,
+            collision_scale: None,
         }
     }
 
@@ -198,6 +206,9 @@ mod tests {
                 name: Some("Manny".to_string()),
                 position: Some([1.0, 2.0, 3.0]),
                 rotation: Some([0.0, 90.0, 0.0]),
+                scale: Some(1.2),
+                collision_scale: Some(0.35),
+                ..Default::default()
             },
         );
         snapshot.objects.push(LuaObjectSnapshot {
@@ -217,6 +228,8 @@ mod tests {
         assert!((orientation.forward[0] + 1.0).abs() < 1e-6);
         assert!(orientation.forward[1].abs() < 1e-6);
         assert!(orientation.forward[2].abs() < 1e-6);
+        assert_eq!(entities[0].actor_scale, Some(1.2));
+        assert_eq!(entities[0].collision_scale, Some(0.35));
         assert_eq!(entities[1].position, Some([4.0, 5.0, 6.0]));
     }
 }

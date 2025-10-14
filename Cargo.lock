@@ -1043,6 +1043,7 @@ dependencies = [
  "glam",
  "grim_formats",
  "image",
+ "log",
  "once_cell",
  "pollster",
  "rodio",

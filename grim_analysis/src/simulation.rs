@@ -359,6 +359,10 @@ fn analyze_function_call(builder: &mut FunctionSimulationBuilder, call: &Functio
             }
             _ => {}
         }
+
+        if let Some((subsystem, target, arguments)) = classify_stateful_global(&lower, call) {
+            builder.record_stateful_call(subsystem, target, name.clone(), arguments);
+        }
     }
 
     if let Prefix::Expression(expr) = call.prefix() {
@@ -400,6 +404,15 @@ fn global_function_name(call: &FunctionCall) -> Option<String> {
     }
 }
 
+fn function_call_arguments(call: &FunctionCall) -> Option<Vec<String>> {
+    for suffix in call.suffixes() {
+        if let Suffix::Call(Call::AnonymousCall(args)) = suffix {
+            return Some(function_args_to_strings(args));
+        }
+    }
+    None
+}
+
 fn first_argument_expression(call: &FunctionCall) -> Option<&Expression> {
     for suffix in call.suffixes() {
         if let Suffix::Call(Call::AnonymousCall(args)) = suffix {
@@ -435,6 +448,50 @@ fn strip_matching_quotes(value: String) -> String {
         return value[1..value.len() - 1].to_string();
     }
     value
+}
+
+fn classify_stateful_global(
+    lower: &str,
+    call: &FunctionCall,
+) -> Option<(StateSubsystem, String, Vec<String>)> {
+    let arguments = function_call_arguments(call)?;
+    if arguments.is_empty() {
+        return None;
+    }
+    let target = normalize_actor_target(&arguments[0])?;
+
+    let subsystem = match lower {
+        "setactorscale" | "setscale" | "scale" | "set_actor_scale" => StateSubsystem::Actors,
+        "setactorcollisionscale"
+        | "setcollisionscale"
+        | "collision_scale"
+        | "set_actor_collision_scale" => StateSubsystem::Actors,
+        _ => return None,
+    };
+
+    Some((subsystem, target, arguments))
+}
+
+fn normalize_actor_target(label: &str) -> Option<String> {
+    let mut value = label
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    if value.is_empty() || value == "<expr>" {
+        return None;
+    }
+    if let Some(stripped) = value.strip_suffix(".hActor") {
+        value = stripped.to_string();
+    } else if let Some(stripped) = value.strip_suffix(".hactor") {
+        value = stripped.to_string();
+    }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn analyze_function_args(builder: &mut FunctionSimulationBuilder, args: &FunctionArgs) {
@@ -694,6 +751,14 @@ fn classify_stateful_method(target: &str, method: &str) -> Option<StateSubsystem
         "free",
         "stop_drifting",
         "drive_in",
+        "setactorscale",
+        "setactorcollisionscale",
+        "setscale",
+        "setcollisionscale",
+        "set_actor_scale",
+        "set_actor_collision_scale",
+        "scale",
+        "collision_scale",
     ];
 
     const AUDIO_METHODS: &[&str] = &[
@@ -1043,6 +1108,18 @@ mod tests {
             classify_stateful_method("bd", "drive_in"),
             Some(StateSubsystem::Actors)
         );
+        assert_eq!(
+            classify_stateful_method("manny", "SetActorScale"),
+            Some(StateSubsystem::Actors)
+        );
+        assert_eq!(
+            classify_stateful_method("manny", "SetActorCollisionScale"),
+            Some(StateSubsystem::Actors)
+        );
+        assert_eq!(
+            classify_stateful_method("manny", "scale"),
+            Some(StateSubsystem::Actors)
+        );
     }
 
     #[test]
@@ -1096,6 +1173,8 @@ mod tests {
                 self.objects.box:set_object_state("open")
                 interest_actor:play_chore_looping("loop")
                 Manny:set_turn_rate(45)
+                SetActorScale(manny.hActor, 1.25)
+                SetActorCollisionScale(manny.hActor, 0.4)
                 return flag
             end
             "#,
@@ -1145,6 +1224,9 @@ mod tests {
             actors.get("Manny").and_then(|m| m.get("set_turn_rate")),
             Some(&1)
         );
+        let manny_handle = actors.get("manny").expect("manny handle bucket present");
+        assert_eq!(manny_handle.get("SetActorScale"), Some(&1));
+        assert_eq!(manny_handle.get("SetActorCollisionScale"), Some(&1));
     }
 
     #[test]

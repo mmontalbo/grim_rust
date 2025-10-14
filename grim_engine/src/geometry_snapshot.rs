@@ -102,7 +102,7 @@ pub struct LuaSectorSnapshot {
     pub centroid: [f32; 2],
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct LuaActorSnapshot {
     pub name: String,
     pub costume: Option<String>,
@@ -111,6 +111,8 @@ pub struct LuaActorSnapshot {
     pub at_interest: bool,
     pub position: Option<[f32; 3]>,
     pub rotation: Option<[f32; 3]>,
+    pub scale: Option<f32>,
+    pub collision_scale: Option<f32>,
     pub is_selected: bool,
     pub is_visible: bool,
     pub handle: u32,

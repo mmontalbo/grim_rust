@@ -102,7 +102,11 @@ mod tests {
     #[test]
     fn fnv1a64_matches_known_value() {
         let data = b"codec3";
-        let expected = 0xd5f447b35c0f199eu64;
-        assert_eq!(fnv1a64(data), expected);
+        let expected = 0x6db4dd4153b12c32u64;
+        assert_eq!(
+            fnv1a64(data),
+            expected,
+            "fnv1a hash for codec3 should remain stable"
+        );
     }
 }

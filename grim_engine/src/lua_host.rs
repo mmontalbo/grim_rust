@@ -546,6 +546,8 @@ struct ActorSnapshot {
     at_interest: bool,
     position: Option<Vec3>,
     rotation: Option<Vec3>,
+    scale: Option<f32>,
+    collision_scale: Option<f32>,
     is_selected: bool,
     is_visible: bool,
     handle: u32,
@@ -1954,6 +1956,28 @@ impl EngineContext {
         ));
     }
 
+    fn set_actor_scale(&mut self, id: &str, label: &str, scale: Option<f32>) {
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.scale = scale;
+        }
+        let display = scale
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "<nil>".to_string());
+        self.log_event(format!("actor.{id}.scale {display}"));
+    }
+
+    fn set_actor_collision_scale(&mut self, id: &str, label: &str, scale: Option<f32>) {
+        {
+            let actor = self.ensure_actor_mut(id, label);
+            actor.collision_scale = scale;
+        }
+        let display = scale
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "<nil>".to_string());
+        self.log_event(format!("actor.{id}.collision_scale {display}"));
+    }
+
     fn walk_actor_vector(
         &mut self,
         handle: u32,
@@ -2723,6 +2747,24 @@ impl EngineContext {
         true
     }
 
+    fn set_actor_scale_by_handle(&mut self, handle: u32, scale: Option<f32>) -> bool {
+        let Some((id, label)) = self.actor_identity_by_handle(handle) else {
+            self.log_event(format!("actor.scale.unknown_handle #{handle}"));
+            return false;
+        };
+        self.set_actor_scale(&id, &label, scale);
+        true
+    }
+
+    fn set_actor_collision_scale_by_handle(&mut self, handle: u32, scale: Option<f32>) -> bool {
+        let Some((id, label)) = self.actor_identity_by_handle(handle) else {
+            self.log_event(format!("actor.collision_scale.unknown_handle #{handle}"));
+            return false;
+        };
+        self.set_actor_collision_scale(&id, &label, scale);
+        true
+    }
+
     fn set_actor_moving(&mut self, handle: u32, moving: bool) {
         if moving {
             self.moving_actors.insert(handle);
@@ -3064,6 +3106,8 @@ impl EngineContext {
                         at_interest: actor.at_interest,
                         position: actor.position.map(vec3_to_array),
                         rotation: actor.rotation.map(vec3_to_array),
+                        scale: actor.scale,
+                        collision_scale: actor.collision_scale,
                         is_selected: actor.is_selected,
                         is_visible: actor.is_visible,
                         handle: actor.handle,
@@ -5063,6 +5107,42 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         })?,
     )?;
 
+    let set_actor_scale_ctx = context.clone();
+    globals.set(
+        "SetActorScale",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut values = args.into_iter();
+            let handle = values
+                .next()
+                .and_then(|value| value_to_actor_handle(&value));
+            let Some(handle) = handle else {
+                return Ok(());
+            };
+            let scale = values.next().and_then(|value| value_to_f32(&value));
+            let mut ctx = set_actor_scale_ctx.borrow_mut();
+            ctx.set_actor_scale_by_handle(handle, scale);
+            Ok(())
+        })?,
+    )?;
+
+    let set_actor_collision_scale_ctx = context.clone();
+    globals.set(
+        "SetActorCollisionScale",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut values = args.into_iter();
+            let handle = values
+                .next()
+                .and_then(|value| value_to_actor_handle(&value));
+            let Some(handle) = handle else {
+                return Ok(());
+            };
+            let scale = values.next().and_then(|value| value_to_f32(&value));
+            let mut ctx = set_actor_collision_scale_ctx.borrow_mut();
+            ctx.set_actor_collision_scale_by_handle(handle, scale);
+            Ok(())
+        })?,
+    )?;
+
     let angle_between_ctx = context.clone();
     globals.set(
         "GetAngleBetweenActors",
@@ -5535,6 +5615,38 @@ fn install_actor_methods(
                         .borrow_mut()
                         .set_actor_rotation(&id, &name, rotation);
                 }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let scale_context = context.clone();
+    actor.set(
+        "scale",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, name) = actor_identity(&table)?;
+                let scale = values.get(0).and_then(|value| value_to_f32(value));
+                scale_context
+                    .borrow_mut()
+                    .set_actor_scale(&id, &name, scale);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let set_scale_context = context.clone();
+    actor.set(
+        "set_scale",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, name) = actor_identity(&table)?;
+                let scale = values.get(0).and_then(|value| value_to_f32(value));
+                set_scale_context
+                    .borrow_mut()
+                    .set_actor_scale(&id, &name, scale);
             }
             Ok(())
         })?,
@@ -9232,6 +9344,38 @@ mod tests {
         ctx.put_actor_in_set(&id, "Manny", "mo.set");
         ctx.switch_to_set("mo.set");
         ctx.set_actor_position(&id, "Manny", position);
+    }
+
+    #[test]
+    fn actor_scale_updates_snapshot_and_events() {
+        let mut ctx = make_context();
+        let (_id, handle) = ctx.register_actor_with_handle("manny", Some(1001));
+        assert!(ctx.set_actor_scale_by_handle(handle, Some(1.25)));
+        assert!(ctx.set_actor_collision_scale_by_handle(handle, Some(0.35)));
+
+        let actor = ctx
+            .actors
+            .get("manny")
+            .expect("actor registered with scale");
+        assert_eq!(actor.scale, Some(1.25));
+        assert_eq!(actor.collision_scale, Some(0.35));
+
+        assert!(ctx
+            .events
+            .iter()
+            .any(|event| event == "actor.manny.scale 1.250"));
+        assert!(ctx
+            .events
+            .iter()
+            .any(|event| event == "actor.manny.collision_scale 0.350"));
+
+        let snapshot = ctx.geometry_snapshot();
+        let manny = snapshot
+            .actors
+            .get("manny")
+            .expect("geometry snapshot actor");
+        assert_eq!(manny.scale, Some(1.25));
+        assert_eq!(manny.collision_scale, Some(0.35));
     }
 
     #[derive(Default)]

@@ -11,12 +11,14 @@ use super::ViewerState;
 use super::layout;
 use bytemuck::cast_slice;
 use glam::{Mat4, Quat, Vec3, Vec4};
-use std::f32::consts::PI;
+use once_cell::sync::Lazy;
+use std::{f32::consts::PI, sync::Mutex};
 use wgpu::SurfaceError;
 
 use crate::{
     scene::{
-        CameraProjector, EntityOrientation, HotspotEventKind, SceneEntityKind, event_marker_style,
+        CameraProjector, EntityOrientation, HotspotEventKind, SceneEntity, SceneEntityKind,
+        event_marker_style,
     },
     ui_layout::{PanelKind, ViewportRect},
 };
@@ -58,6 +60,33 @@ const PREVIEW_TARGET_EXTENT: f32 = 0.9;
 const PREVIEW_ORBIT_FACTOR: f32 = 3.6;
 const PREVIEW_ELEVATION_FACTOR: f32 = 2.4;
 const PREVIEW_MIN_DISTANCE: f32 = 2.0;
+
+static MANNY_SCALE_LOG: Lazy<Mutex<Option<(Option<f32>, Option<f32>, Option<f32>)>>> =
+    Lazy::new(|| Mutex::new(None));
+
+fn log_manny_scale_state(entity: &SceneEntity) {
+    let actor_scale = entity.actor_scale;
+    let collision_scale = entity.collision_scale;
+    let viewer_scale = entity.scale_multiplier();
+    let latest = Some((viewer_scale, actor_scale, collision_scale));
+
+    let mut last = MANNY_SCALE_LOG
+        .lock()
+        .expect("manny scale log mutex poisoned");
+    if last.as_ref() != latest.as_ref() {
+        let format_scale = |value: Option<f32>| match value {
+            Some(scale) => format!("{scale:.3}"),
+            None => String::from("-"),
+        };
+        log::info!(
+            "[viewer] Manny scale resolved -> viewer={} actor={} collision={}",
+            format_scale(viewer_scale),
+            format_scale(actor_scale),
+            format_scale(collision_scale)
+        );
+        *last = latest;
+    }
+}
 
 pub(super) fn render(state: &mut ViewerState) -> Result<(), SurfaceError> {
     let frame = state.surface.get_current_texture()?;
@@ -500,8 +529,14 @@ fn manny_mesh_instance(
     base_scale: f32,
     mesh: &super::MannyMesh,
     color: [f32; 4],
+    scale_multiplier: f32,
 ) -> MeshInstance {
-    let anchor_scale = scale_for_factor(base_scale, MANNY_ANCHOR_SCALE);
+    let clamped_multiplier = if scale_multiplier.is_finite() && scale_multiplier > 0.0 {
+        scale_multiplier
+    } else {
+        1.0
+    };
+    let anchor_scale = scale_for_factor(base_scale, MANNY_ANCHOR_SCALE * clamped_multiplier);
     let radius = mesh.radius.unwrap_or(0.0).abs();
     let mut scale = if radius > 1e-4 {
         anchor_scale / radius
@@ -578,12 +613,21 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         .find(|entity| entity.name.eq_ignore_ascii_case("manny"));
 
     if let Some(entity) = manny_entity {
+        log_manny_scale_state(entity);
         if let Some(position) = entity.position {
             let palette = MANNY_ANCHOR_PALETTE;
             let color = palette_to_color(palette.color, palette.highlight.max(0.6));
+            let scale_multiplier = entity.scale_multiplier().unwrap_or(1.0);
             if let Some(mesh) = manny_mesh {
                 let orientation = entity.orientation;
-                let instance = manny_mesh_instance(position, orientation, base_scale, mesh, color);
+                let instance = manny_mesh_instance(
+                    position,
+                    orientation,
+                    base_scale,
+                    mesh,
+                    color,
+                    scale_multiplier,
+                );
                 groups.push_manny(instance);
             } else {
                 groups.push(
@@ -591,7 +635,7 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
                     MeshInstance {
                         model: instance_transform(
                             position,
-                            scale_for_factor(base_scale, MANNY_ANCHOR_SCALE),
+                            scale_for_factor(base_scale, MANNY_ANCHOR_SCALE * scale_multiplier),
                         ),
                         color,
                     },
@@ -607,12 +651,13 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
     {
         if let Some(position) = entity.position {
             let palette = DESK_ANCHOR_PALETTE;
+            let scale_multiplier = entity.scale_multiplier().unwrap_or(1.0);
             groups.push(
                 PrimitiveKind::Cube,
                 MeshInstance {
                     model: instance_transform_oriented(
                         position,
-                        scale_for_factor(base_scale, DESK_ANCHOR_SCALE),
+                        scale_for_factor(base_scale, DESK_ANCHOR_SCALE * scale_multiplier),
                         orientation_quat(entity.orientation),
                     ),
                     color: palette_to_color(palette.color, palette.highlight),
@@ -634,12 +679,13 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
     {
         if let Some(position) = entity.position {
             let palette = TUBE_ANCHOR_PALETTE;
+            let scale_multiplier = entity.scale_multiplier().unwrap_or(1.0);
             groups.push(
                 PrimitiveKind::Cone,
                 MeshInstance {
                     model: instance_transform_oriented(
                         position,
-                        scale_for_factor(base_scale, TUBE_ANCHOR_SCALE),
+                        scale_for_factor(base_scale, TUBE_ANCHOR_SCALE * scale_multiplier),
                         orientation_quat(entity.orientation),
                     ),
                     color: palette_to_color(palette.color, palette.highlight),
@@ -656,10 +702,12 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         };
         let is_selected = state.selected_entity == Some(idx);
         let base_palette = entity_palette(entity.kind, false);
-        let mut scale = scale_for_factor(base_scale, ENTITY_SCALE_BASE);
+        let scale_multiplier = entity.scale_multiplier().unwrap_or(1.0);
+        let mut scale_factor = ENTITY_SCALE_BASE;
         if is_selected {
-            scale = scale_for_factor(base_scale, ENTITY_SCALE_SELECTED);
+            scale_factor = ENTITY_SCALE_SELECTED;
         }
+        let scale = scale_for_factor(base_scale, scale_factor * scale_multiplier);
         let highlight = if is_selected {
             base_palette.highlight.max(0.9)
         } else {
@@ -685,7 +733,8 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         }
 
         if is_selected {
-            let pointer_scale = scale_for_factor(base_scale, SELECTION_POINTER_SCALE);
+            let pointer_scale =
+                scale_for_factor(base_scale, SELECTION_POINTER_SCALE * scale_multiplier);
             let apex_height = position[2]
                 + pointer_scale * SELECTION_POINTER_APEX_LIFT
                 + SELECTION_POINTER_CLEARANCE;

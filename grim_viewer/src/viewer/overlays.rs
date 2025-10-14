@@ -657,6 +657,13 @@ pub(super) fn timeline_overlay_lines(
     scene: Option<&ViewerScene>,
     selected_index: Option<usize>,
 ) -> Vec<String> {
+    fn format_scale(value: Option<f32>) -> String {
+        match value {
+            Some(scale) => format!("{scale:.3}"),
+            None => "-".to_string(),
+        }
+    }
+
     const MAX_LINE: usize = 84;
 
     let scene = match scene {
@@ -670,21 +677,36 @@ pub(super) fn timeline_overlay_lines(
 
     let stage_count = summary.stages.len();
     let hook_count = summary.hooks.len();
-    let selected_entity = selected_index.and_then(|idx| scene.entities.get(idx));
+    let mut focus_entity = selected_index.and_then(|idx| scene.entities.get(idx));
+    let mut focus_is_default = false;
+    if focus_entity.is_none() {
+        if let Some(manny) = scene
+            .entities
+            .iter()
+            .find(|entity| entity.name.eq_ignore_ascii_case("manny"))
+        {
+            focus_entity = Some(manny);
+            focus_is_default = true;
+        }
+    }
     let has_trace = scene.movement_trace().is_some();
     let has_events = !scene.hotspot_events().is_empty();
-    if selected_entity.is_none() && !has_trace && !has_events {
+    if focus_entity.is_none() && !has_trace && !has_events {
         return Vec::new();
     }
 
     let mut lines = Vec::new();
     lines.push("Entity Focus".to_string());
 
-    if let Some(entity) = selected_entity {
+    if let Some(entity) = focus_entity {
+        let prefix = if selected_index.is_some() { ">" } else { "-" };
         lines.push(truncate_line(
-            &format!("> [{}] {}", entity.kind.label(), entity.name),
+            &format!("{prefix} [{}] {}", entity.kind.label(), entity.name),
             MAX_LINE,
         ));
+        if focus_is_default && selected_index.is_none() {
+            lines.push(truncate_line("  (default focus: Manny)", MAX_LINE));
+        }
         if let Some(stage_index) = entity.timeline_stage_index {
             let label = summary
                 .stages
@@ -767,6 +789,22 @@ pub(super) fn timeline_overlay_lines(
         if let Some(played) = entity.last_played.as_deref() {
             lines.push(truncate_line(&format!("Chore: {played}"), MAX_LINE));
         }
+        let viewer_scale = entity.scale_multiplier();
+        let scale_source = match (entity.actor_scale, entity.collision_scale) {
+            (Some(_), _) => "actor",
+            (None, Some(_)) => "collision",
+            _ => "none",
+        };
+        lines.push(truncate_line(
+            &format!(
+                "Scale: viewer={} [{scale_source}] actor={} collision={}",
+                format_scale(viewer_scale),
+                format_scale(entity.actor_scale),
+                format_scale(entity.collision_scale)
+            ),
+            MAX_LINE,
+        ));
+        lines.push(String::new());
     } else {
         lines.push("  (Use Left/Right arrows to select a marker)".to_string());
         lines.push(truncate_line(

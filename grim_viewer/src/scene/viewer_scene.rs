@@ -219,6 +219,8 @@ struct SceneEntityBuilder {
     last_played: Option<String>,
     last_looping: Option<String>,
     last_completed: Option<String>,
+    actor_scale: Option<f32>,
+    collision_scale: Option<f32>,
 }
 
 impl SceneEntityBuilder {
@@ -239,6 +241,8 @@ impl SceneEntityBuilder {
             last_played: None,
             last_looping: None,
             last_completed: None,
+            actor_scale: None,
+            collision_scale: None,
         }
     }
 
@@ -267,6 +271,20 @@ impl SceneEntityBuilder {
             }
             if let Some(rotation) = transform.get("rotation") {
                 self.rotation = parse_vec3_object(rotation);
+            }
+            if let Some(scale) = transform
+                .get("scale")
+                .and_then(|v| v.as_f64())
+                .map(|value| value as f32)
+            {
+                self.actor_scale = Some(scale);
+            }
+            if let Some(scale) = transform
+                .get("collision_scale")
+                .and_then(|v| v.as_f64())
+                .map(|value| value as f32)
+            {
+                self.collision_scale = Some(scale);
             }
             if let Some(facing) = transform
                 .get("facing_target")
@@ -406,6 +424,20 @@ impl SceneEntityBuilder {
                     self.last_completed = Some(name.clone());
                 }
             }
+            "scale" | "setactorscale" | "set_actor_scale" | "setscale" | "set_scale" => {
+                if let Some(value) = parse_last_f32_arg(args) {
+                    self.actor_scale = Some(value);
+                }
+            }
+            "collision_scale"
+            | "setactorcollisionscale"
+            | "set_actor_collision_scale"
+            | "setcollisionscale"
+            | "set_collision_scale" => {
+                if let Some(value) = parse_last_f32_arg(args) {
+                    self.collision_scale = Some(value);
+                }
+            }
             _ => {}
         }
     }
@@ -432,6 +464,8 @@ impl SceneEntityBuilder {
             last_played: self.last_played,
             last_looping: self.last_looping,
             last_completed: self.last_completed,
+            actor_scale: self.actor_scale,
+            collision_scale: self.collision_scale,
         }
     }
 
@@ -470,6 +504,8 @@ pub struct SceneEntity {
     pub last_played: Option<String>,
     pub last_looping: Option<String>,
     pub last_completed: Option<String>,
+    pub actor_scale: Option<f32>,
+    pub collision_scale: Option<f32>,
 }
 
 impl SceneEntity {
@@ -496,6 +532,14 @@ impl SceneEntity {
             label.push_str(&format!(", +{} more", method_list.len() - preview_len));
         }
         Cow::Owned(label)
+    }
+
+    /// Latest scripted scale applied to this entity, preferring visual scale
+    /// over collision tweaks when both are present.
+    pub fn scale_multiplier(&self) -> Option<f32> {
+        self.actor_scale
+            .or(self.collision_scale)
+            .filter(|value| value.is_finite() && *value > 0.0)
     }
 }
 
@@ -636,5 +680,75 @@ mod bounds_tests {
         };
         let (horizontal, vertical) = bounds.top_down_axes();
         assert_ne!(horizontal, vertical);
+    }
+}
+
+#[cfg(test)]
+mod entity_scale_tests {
+    use super::{SceneEntityBuilder, SceneEntityKind};
+    use crate::timeline::HookLookup;
+    use serde_json::json;
+
+    #[test]
+    fn builder_records_actor_scale_commands() {
+        let mut builder = SceneEntityBuilder::new(SceneEntityKind::Actor, "manny".to_string());
+        let hooks = HookLookup::new(None);
+        builder.apply_event(
+            "SetActorScale",
+            &["manny.hActor".to_string(), "1.25".to_string()],
+            None,
+            &hooks,
+        );
+        let entity = builder.build();
+        assert_eq!(entity.actor_scale, Some(1.25));
+        assert_eq!(entity.scale_multiplier(), Some(1.25));
+    }
+
+    #[test]
+    fn builder_records_scale_method_calls() {
+        let mut builder = SceneEntityBuilder::new(SceneEntityKind::Actor, "manny".to_string());
+        let hooks = HookLookup::new(None);
+        builder.apply_event("scale", &["1.4".to_string()], None, &hooks);
+        let entity = builder.build();
+        assert_eq!(entity.actor_scale, Some(1.4));
+        assert_eq!(entity.scale_multiplier(), Some(1.4));
+    }
+
+    #[test]
+    fn actor_snapshot_applies_scale_fields() {
+        let mut builder = SceneEntityBuilder::new(SceneEntityKind::Actor, "manny".to_string());
+        let hooks = HookLookup::new(None);
+        let snapshot = json!({
+            "transform": {
+                "scale": 1.15,
+                "collision_scale": 0.4
+            }
+        });
+        builder.apply_actor_snapshot(&snapshot, &hooks);
+        let entity = builder.build();
+        assert_eq!(entity.actor_scale, Some(1.15));
+        assert_eq!(entity.collision_scale, Some(0.4));
+    }
+
+    #[test]
+    fn scale_multiplier_prefers_visual_scale_over_collision() {
+        let mut builder = SceneEntityBuilder::new(SceneEntityKind::Actor, "manny".to_string());
+        let hooks = HookLookup::new(None);
+        builder.apply_event(
+            "SetActorCollisionScale",
+            &["manny.hActor".to_string(), "0.5".to_string()],
+            None,
+            &hooks,
+        );
+        builder.apply_event(
+            "SetActorScale",
+            &["manny.hActor".to_string(), "1.1".to_string()],
+            None,
+            &hooks,
+        );
+        let entity = builder.build();
+        assert_eq!(entity.collision_scale, Some(0.5));
+        assert_eq!(entity.actor_scale, Some(1.1));
+        assert_eq!(entity.scale_multiplier(), Some(1.1));
     }
 }

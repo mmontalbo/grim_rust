@@ -240,6 +240,8 @@ pub struct ActorTransform {
     pub position: Option<Vector3>,
     pub rotation: Option<Vector3>,
     pub facing_target: Option<String>,
+    pub scale: Option<f32>,
+    pub collision_scale: Option<f32>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -636,6 +638,20 @@ fn process_actor_detail(
                 actor.transform.rotation = Some(rotation);
             }
         }
+        "setactorscale" | "set_actor_scale" | "setscale" | "set_scale" | "scale" => {
+            if let Some(scale) = parse_last_f32_arg(args) {
+                actor.transform.scale = Some(scale);
+            }
+        }
+        "setactorcollisionscale"
+        | "set_actor_collision_scale"
+        | "setcollisionscale"
+        | "set_collision_scale"
+        | "collision_scale" => {
+            if let Some(scale) = parse_last_f32_arg(args) {
+                actor.transform.collision_scale = Some(scale);
+            }
+        }
         "set_face_target" | "set_facing" | "look_at" => {
             if let Some(target) = args.first() {
                 let target = target.trim();
@@ -722,6 +738,13 @@ fn vector3_from_arguments(args: &[String]) -> Option<Vector3> {
 fn parse_f32_arg(value: &str) -> Option<f32> {
     let trimmed = value.trim();
     f32::from_str(trimmed).ok()
+}
+
+fn parse_last_f32_arg(args: &[String]) -> Option<f32> {
+    args.iter()
+        .rev()
+        .filter_map(|value| parse_f32_arg(value))
+        .next()
 }
 
 fn apply_subsystem_mutation(state: &mut SubsystemState, mutation: &SubsystemMutation) {

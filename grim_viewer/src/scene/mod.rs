@@ -348,6 +348,8 @@ pub fn load_scene_from_timeline(
 pub(super) struct GeometryPose {
     position: [f32; 3],
     rotation: Option<[f32; 3]>,
+    scale: Option<f32>,
+    collision_scale: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -363,6 +365,8 @@ struct LuaActorSnapshot {
     name: Option<String>,
     position: Option<[f32; 3]>,
     rotation: Option<[f32; 3]>,
+    scale: Option<f32>,
+    collision_scale: Option<f32>,
 }
 
 impl LuaActorSnapshot {
@@ -370,6 +374,8 @@ impl LuaActorSnapshot {
         self.position.map(|position| GeometryPose {
             position,
             rotation: self.rotation,
+            scale: self.scale,
+            collision_scale: self.collision_scale,
         })
     }
 }
@@ -388,6 +394,8 @@ impl LuaObjectSnapshot {
         self.position.map(|position| GeometryPose {
             position,
             rotation: None,
+            scale: None,
+            collision_scale: None,
         })
     }
 }
@@ -706,6 +714,17 @@ fn parse_vec3_args(args: &[String]) -> Option<[f32; 3]> {
         *slot = parse_f32(value)?;
     }
     Some(values)
+}
+
+fn parse_last_f32_arg(args: &[String]) -> Option<f32> {
+    for value in args.iter().rev() {
+        if let Some(parsed) = parse_f32(value) {
+            if parsed.is_finite() && parsed > 0.0 {
+                return Some(parsed);
+            }
+        }
+    }
+    None
 }
 
 fn parse_f32(value: &str) -> Option<f32> {
