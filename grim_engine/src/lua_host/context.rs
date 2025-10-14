@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 mod actors;
 mod audio;
+mod cutscenes;
 mod geometry;
 mod geometry_export;
 mod inventory;
@@ -18,6 +19,7 @@ use audio::{
     install_music_scaffold, AudioRuntime, MusicState, SfxState, FOOTSTEP_PROFILES,
     IM_SOUND_PLAY_COUNT, IM_SOUND_VOL,
 };
+use cutscenes::{CommentaryRecord, CutsceneRuntime, DialogState};
 use geometry::{ParsedSetGeometry, SectorHit, SetDescriptor, SetSnapshot, SetupInfo};
 use inventory::InventoryState;
 use menus::{
@@ -64,54 +66,6 @@ enum SectorToggleResult {
         known_sector: bool,
     },
     NoSet,
-}
-
-#[derive(Debug, Clone)]
-struct CutSceneRecord {
-    label: Option<String>,
-    #[allow(dead_code)]
-    flags: Vec<String>,
-    set_file: Option<String>,
-    sector: Option<String>,
-    suppressed: bool,
-}
-
-impl CutSceneRecord {
-    fn display_label(&self) -> &str {
-        self.label
-            .as_deref()
-            .filter(|label| !label.is_empty())
-            .unwrap_or("<unnamed>")
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CommentaryRecord {
-    label: Option<String>,
-    object_handle: Option<i64>,
-    active: bool,
-    suppressed_reason: Option<String>,
-}
-
-impl CommentaryRecord {
-    fn display_label(&self) -> &str {
-        self.label
-            .as_deref()
-            .filter(|label| !label.is_empty())
-            .unwrap_or("<none>")
-    }
-}
-
-#[derive(Debug, Clone)]
-struct OverrideRecord {
-    description: String,
-}
-
-#[derive(Debug, Clone)]
-struct DialogState {
-    actor_id: String,
-    actor_label: String,
-    line: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -248,12 +202,7 @@ pub(super) struct EngineContext {
     achievements: BTreeMap<String, AchievementState>,
     visible_objects: Vec<VisibleObjectInfo>,
     hotlist_handles: Vec<i64>,
-    cut_scene_stack: Vec<CutSceneRecord>,
-    override_stack: Vec<OverrideRecord>,
-    commentary: Option<CommentaryRecord>,
-    active_dialog: Option<DialogState>,
-    speaking_actor: Option<String>,
-    message_active: bool,
+    cutscenes: CutsceneRuntime,
     pause: PauseState,
     audio: AudioRuntime,
     lab_collection: Option<Rc<LabCollection>>,
@@ -308,12 +257,7 @@ impl EngineContext {
             achievements: BTreeMap::new(),
             visible_objects: Vec::new(),
             hotlist_handles: Vec::new(),
-            cut_scene_stack: Vec::new(),
-            override_stack: Vec::new(),
-            commentary: None,
-            active_dialog: None,
-            speaking_actor: None,
-            message_active: false,
+            cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
             audio: AudioRuntime::new(audio_callback),
             lab_collection,
@@ -337,7 +281,6 @@ impl EngineContext {
     }
 
     fn push_cut_scene(&mut self, label: Option<String>, flags: Vec<String>) {
-        let display = label.clone().unwrap_or_else(|| "<unnamed>".to_string());
         let set_file = self
             .current_set
             .as_ref()
@@ -347,78 +290,57 @@ impl EngineContext {
                 .or_else(|| self.geometry_sector_hit("manny", "walk"))
         });
         let sector = sector_hit.as_ref().map(|hit| hit.name.clone());
-        let suppressed = if let (Some(set), Some(name)) = (&set_file, &sector) {
-            !self.is_sector_active(set, name)
-        } else {
-            false
+        let suppressed = match (&set_file, &sector) {
+            (Some(set), Some(name)) => !self.is_sector_active(set, name),
+            _ => false,
         };
-        let flag_list = if flags.is_empty() {
-            None
-        } else {
-            Some(flags.join(", "))
-        };
-        let mut message = if let Some(flags) = flag_list.as_ref() {
-            format!("cut_scene.start {} [{}]", display, flags)
-        } else {
-            format!("cut_scene.start {}", display)
-        };
-        if suppressed {
-            let sector_name = sector.as_deref().unwrap_or("<unknown>");
-            message.push_str(&format!(" (sector {} inactive)", sector_name));
-        }
+        let message = self
+            .cutscenes
+            .push_cut_scene(label, flags, set_file, sector, suppressed);
         self.log_event(message);
-        self.cut_scene_stack.push(CutSceneRecord {
-            label,
-            flags,
-            set_file,
-            sector,
-            suppressed,
-        });
     }
 
-    fn pop_cut_scene(&mut self) -> Option<CutSceneRecord> {
-        let record = self.cut_scene_stack.pop();
-        if let Some(record) = &record {
-            let display = record.display_label();
-            if record.suppressed {
-                self.log_event(format!("cut_scene.end {} (suppressed)", display));
-            } else {
-                self.log_event(format!("cut_scene.end {}", display));
-            }
+    fn pop_cut_scene(&mut self) {
+        if let Some(message) = self.cutscenes.pop_cut_scene() {
+            self.log_event(message);
         }
-        record
     }
 
     fn push_override(&mut self, description: String) {
-        self.log_event(format!("cut_scene.override.push {}", description));
-        self.override_stack.push(OverrideRecord { description });
+        let message = self.cutscenes.push_override(description);
+        self.log_event(message);
     }
 
-    fn pop_override(&mut self) -> Option<OverrideRecord> {
-        let record = self.override_stack.pop();
-        if let Some(record) = &record {
-            self.log_event(format!("cut_scene.override.pop {}", record.description));
+    fn pop_override(&mut self) -> bool {
+        if let Some(message) = self.cutscenes.pop_override() {
+            self.log_event(message);
+            true
+        } else {
+            false
         }
-        record
+    }
+
+    fn clear_overrides(&mut self) {
+        for message in self.cutscenes.take_all_overrides() {
+            self.log_event(message);
+        }
     }
 
     fn begin_dialog_line(&mut self, id: &str, label: &str, line: &str) {
         let actor = self.ensure_actor_mut(id, label);
         actor.speaking = true;
         actor.last_line = Some(line.to_string());
-        self.speaking_actor = Some(id.to_string());
-        self.message_active = true;
         let record = DialogState {
             actor_id: id.to_string(),
             actor_label: label.to_string(),
             line: line.to_string(),
         };
         self.log_event(format!("dialog.begin {} {}", id, line));
-        self.active_dialog = Some(record);
+        self.cutscenes.set_dialog_state(record);
     }
 
     fn finish_dialog_line(&mut self, expected_actor: Option<&str>) -> Option<DialogState> {
-        let should_finish = match (self.active_dialog.as_ref(), expected_actor) {
+        let should_finish = match (self.cutscenes.active_dialog(), expected_actor) {
             (None, _) => false,
             (Some(state), Some(expected)) => state.actor_id.eq_ignore_ascii_case(expected),
             (Some(_), None) => true,
@@ -426,7 +348,7 @@ impl EngineContext {
         if !should_finish {
             return None;
         }
-        let record = self.active_dialog.take();
+        let record = self.cutscenes.take_active_dialog();
         if let Some(state) = &record {
             if let Some(actor) = self.actors.get_mut(&state.actor_id) {
                 actor.speaking = false;
@@ -435,17 +357,16 @@ impl EngineContext {
         } else {
             self.log_event("dialog.end <none>".to_string());
         }
-        self.speaking_actor = None;
-        self.message_active = false;
+        self.cutscenes.clear_dialog_flags();
         record
     }
 
     pub(super) fn is_message_active(&self) -> bool {
-        self.message_active
+        self.cutscenes.is_message_active()
     }
 
     fn speaking_actor(&self) -> Option<&str> {
-        self.speaking_actor.as_deref()
+        self.cutscenes.speaking_actor()
     }
 
     fn play_music(&mut self, track: String, params: Vec<String>) {
@@ -1741,40 +1662,22 @@ impl EngineContext {
     }
 
     fn refresh_commentary_visibility(&mut self) {
-        let Some(mut record) = self.commentary.take() else {
+        let Some(record) = self.cutscenes.commentary().cloned() else {
             return;
         };
         let visible = self.commentary_object_visible(&record);
-        let mut log_message = None;
-        match (record.active, visible) {
-            (true, false) => {
-                record.active = false;
-                record.suppressed_reason = Some("not_visible".to_string());
-                let label = record.display_label().to_string();
-                log_message = Some(format!("commentary.suspend {label}"));
-            }
-            (false, true) => {
-                record.active = true;
-                record.suppressed_reason = None;
-                let label = record.display_label().to_string();
-                log_message = Some(format!("commentary.resume {label}"));
-            }
-            _ => {}
-        }
-        if let Some(message) = log_message {
+        if let Some(message) = self
+            .cutscenes
+            .update_commentary_visibility(visible, "not_visible")
+        {
             self.log_event(message);
         }
-        self.commentary = Some(record);
     }
 
     fn set_commentary_active(&mut self, enabled: bool, label: Option<String>) {
         if !enabled {
-            if let Some(record) = self.commentary.take() {
-                let display = record.display_label().to_string();
-                self.log_event(format!("commentary.active off ({display})"));
-            } else {
-                self.log_event("commentary.active off".to_string());
-            }
+            let message = self.cutscenes.disable_commentary();
+            self.log_event(message);
             return;
         }
 
@@ -1790,51 +1693,16 @@ impl EngineContext {
             record.suppressed_reason = Some("not_visible".to_string());
         }
 
-        let log_needed = match self.commentary.as_ref() {
-            Some(existing) => {
-                existing.label != record.label
-                    || existing.object_handle != record.object_handle
-                    || existing.active != record.active
-                    || existing.suppressed_reason != record.suppressed_reason
-            }
-            None => true,
-        };
-
-        let display = record.display_label().to_string();
-        if log_needed {
-            if record.active {
-                self.log_event(format!("commentary.active {display}"));
-            } else {
-                self.log_event(format!("commentary.suppressed {display}"));
-            }
+        if let Some(message) = self.cutscenes.set_commentary(record) {
+            self.log_event(message);
         }
-        self.commentary = Some(record);
     }
 
     fn handle_sector_dependents(&mut self, set_file: &str, sector: &str, active: bool) {
-        let mut log_messages = Vec::new();
-        for record in self.cut_scene_stack.iter_mut() {
-            let matches_set = record
-                .set_file
-                .as_ref()
-                .map(|file| file.eq_ignore_ascii_case(set_file))
-                .unwrap_or(false);
-            if !matches_set {
-                continue;
-            }
-            if let Some(record_sector) = record.sector.as_ref() {
-                if record_sector.eq_ignore_ascii_case(sector) {
-                    if active && record.suppressed {
-                        record.suppressed = false;
-                        log_messages.push(format!("cut_scene.unblock {}", record.display_label()));
-                    } else if !active && !record.suppressed {
-                        record.suppressed = true;
-                        log_messages.push(format!("cut_scene.block {}", record.display_label()));
-                    }
-                }
-            }
-        }
-        for message in log_messages {
+        let messages = self
+            .cutscenes
+            .handle_sector_activation(set_file, sector, active);
+        for message in messages {
             self.log_event(message);
         }
         self.refresh_commentary_visibility();
@@ -2112,8 +1980,8 @@ impl EngineContext {
             hotlist_handles: self.hotlist_handles.clone(),
             inventory: self.inventory.clone_items(),
             inventory_rooms: self.inventory.clone_rooms(),
-            commentary: self.commentary.clone(),
-            cut_scene_stack: self.cut_scene_stack.clone(),
+            commentary: self.cutscenes.clone_commentary(),
+            cut_scene_stack: self.cutscenes.clone_cut_scene_stack(),
             music: self.audio.music().clone(),
             sfx: self.audio.sfx().clone(),
             events: self.events.clone(),
@@ -3316,7 +3184,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         "kill_override",
         lua.create_function(move |_, _: Variadic<Value>| {
             let mut ctx = kill_override_context.borrow_mut();
-            while ctx.pop_override().is_some() {}
+            ctx.clear_overrides();
             Ok(())
         })?,
     )?;
@@ -5523,7 +5391,7 @@ fn wrap_kill_override(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<
             let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
             {
                 let mut ctx = ctx.borrow_mut();
-                while ctx.pop_override().is_some() {}
+                ctx.clear_overrides();
             }
             Ok(result)
         },
@@ -6012,7 +5880,7 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
             }
         }
     }
-    if let Some(commentary) = &state.commentary {
+    if let Some(commentary) = state.cutscenes.commentary() {
         let status = if commentary.active {
             "active".to_string()
         } else {
@@ -6024,32 +5892,27 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
         };
         println!("  Commentary: {} ({})", commentary.display_label(), status);
     }
-    if !state.cut_scene_stack.is_empty() {
+    let cut_scenes = state.cutscenes.cut_scene_stack();
+    if !cut_scenes.is_empty() {
         println!("  Cut scenes:");
-        for record in &state.cut_scene_stack {
+        for record in cut_scenes {
             let status = if record.suppressed {
                 "blocked"
             } else {
                 "active"
             };
+            let label = if record.flags.is_empty() {
+                record.display_label().to_string()
+            } else {
+                format!("{} ({})", record.display_label(), record.flags.join(", "))
+            };
             match (&record.set_file, &record.sector) {
-                (Some(set), Some(sector)) => println!(
-                    "    {} [{}] {}:{}",
-                    record.display_label(),
-                    status,
-                    set,
-                    sector
-                ),
-                (Some(set), None) => {
-                    println!("    {} [{}] {}", record.display_label(), status, set)
+                (Some(set), Some(sector)) => {
+                    println!("    {} [{}] {}:{}", label, status, set, sector)
                 }
-                (None, Some(sector)) => println!(
-                    "    {} [{}] sector={}",
-                    record.display_label(),
-                    status,
-                    sector
-                ),
-                (None, None) => println!("    {} [{}]", record.display_label(), status),
+                (Some(set), None) => println!("    {} [{}] {}", label, status, set),
+                (None, Some(sector)) => println!("    {} [{}] sector={}", label, status, sector),
+                (None, None) => println!("    {} [{}]", label, status),
             }
         }
     }
@@ -7191,17 +7054,17 @@ mod tests {
         });
         ctx.record_visible_objects(&[object_handle]);
         ctx.set_commentary_active(true, Some("Year1MannysOfficeDesign".to_string()));
-        let commentary = ctx.commentary.as_ref().expect("commentary state");
+        let commentary = ctx.cutscenes.commentary().expect("commentary state");
         assert!(commentary.active, "commentary should start active");
         let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
-        let commentary = ctx.commentary.as_ref().expect("commentary state");
+        let commentary = ctx.cutscenes.commentary().expect("commentary state");
         assert!(
             !commentary.active,
             "commentary should suspend when sector is inactive"
         );
         assert_eq!(commentary.suppressed_reason.as_deref(), Some("not_visible"));
         let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
-        let commentary = ctx.commentary.as_ref().expect("commentary state");
+        let commentary = ctx.cutscenes.commentary().expect("commentary state");
         assert!(
             commentary.active,
             "commentary should resume once the sector is reactivated"
@@ -7228,14 +7091,30 @@ mod tests {
             },
         );
         ctx.push_cut_scene(Some("demo".to_string()), Vec::new());
-        let record = ctx.cut_scene_stack.last().expect("cut scene record");
+        let record = ctx
+            .cutscenes
+            .cut_scene_stack()
+            .last()
+            .expect("cut scene record");
         assert_eq!(record.set_file.as_deref(), Some("mo.set"));
         assert_eq!(record.sector.as_deref(), Some("desk_walk"));
         assert!(!record.suppressed, "cut scene should start active");
         let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
-        assert!(ctx.cut_scene_stack.last().expect("cut scene").suppressed);
+        assert!(
+            ctx.cutscenes
+                .cut_scene_stack()
+                .last()
+                .expect("cut scene")
+                .suppressed
+        );
         let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
-        assert!(!ctx.cut_scene_stack.last().expect("cut scene").suppressed);
+        assert!(
+            !ctx.cutscenes
+                .cut_scene_stack()
+                .last()
+                .expect("cut scene")
+                .suppressed
+        );
     }
 
     #[test]
