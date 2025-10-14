@@ -78,6 +78,7 @@ pub fn run_boot_sequence(
         lab_collection,
         audio_callback,
     )));
+    let context_handle = context::EngineContextHandle::new(context.clone());
 
     context::install_package_path(&lua, data_root)?;
     context::install_globals(&lua, data_root, context.clone())?;
@@ -87,11 +88,11 @@ pub fn run_boot_sequence(
     context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
 
     if let Some(options) = movement.as_ref() {
-        movement::simulate_movement(&lua, context.clone(), options)?;
+        movement::simulate_movement(&lua, &context_handle, options)?;
     }
 
     if let Some(options) = hotspot.as_ref() {
-        hotspot::simulate_hotspot_demo(&lua, context.clone(), options)?;
+        hotspot::simulate_hotspot_demo(&lua, &context_handle, options)?;
     }
 
     let snapshot = context.borrow();

@@ -1,13 +1,11 @@
-use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use anyhow::{Context, Result};
 use mlua::{Function, Lua, Table, Value, Variadic};
 use serde::Serialize;
 
-use super::context::{drive_active_scripts, EngineContext};
+use super::context::EngineContextHandle;
 use super::types::Vec3;
 
 const WALK_SPEED_SCALE: f32 = 0.009_999_999_78;
@@ -88,7 +86,7 @@ pub(crate) struct MovementSample {
 
 pub(crate) fn simulate_movement(
     lua: &Lua,
-    context: Rc<RefCell<EngineContext>>,
+    context: &EngineContextHandle,
     options: &MovementOptions,
 ) -> Result<()> {
     use anyhow::anyhow;
@@ -98,12 +96,9 @@ pub(crate) fn simulate_movement(
         .get("WalkVector")
         .context("WalkVector table missing for movement simulation")?;
 
-    let (actor_handle, actor_id) = {
-        let guard = context.borrow();
-        match guard.resolve_actor_handle(&["manny", "Manny"]) {
-            Some(pair) => pair,
-            None => return Ok(()),
-        }
+    let (actor_handle, actor_id) = match context.resolve_actor_handle(&["manny", "Manny"]) {
+        Some(pair) => pair,
+        None => return Ok(()),
     };
 
     let mut frame: u32 = 0;
@@ -130,7 +125,9 @@ pub(crate) fn simulate_movement(
             walk_vector.set("x", segment.vector.x)?;
             walk_vector.set("y", segment.vector.y)?;
             walk_vector.set("z", segment.vector.z)?;
-            drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
+            context
+                .run_scripts(lua, 4, 32)
+                .map_err(|err| anyhow!(err))?;
 
             if segment.vector.x.abs() + segment.vector.y.abs() + segment.vector.z.abs()
                 > f32::EPSILON
@@ -140,24 +137,15 @@ pub(crate) fn simulate_movement(
                     y: segment.vector.y * WALK_SPEED_SCALE,
                     z: segment.vector.z * WALK_SPEED_SCALE,
                 };
-                {
-                    let mut guard = context.borrow_mut();
-                    guard.walk_actor_vector(actor_handle, delta, None, None);
-                }
+                context.walk_actor_vector(actor_handle, delta, None, None);
             }
 
-            let sample_opt = {
-                let guard = context.borrow();
-                capture_movement_sample(&guard, actor_handle, &actor_id, frame)
-            };
+            let sample_opt = capture_movement_sample(context, actor_handle, &actor_id, frame);
             if let Some(sample) = sample_opt {
-                {
-                    let mut guard = context.borrow_mut();
-                    guard.log_event(format!(
-                        "movement.frame {} {:.3},{:.3}",
-                        frame, sample.position[0], sample.position[1]
-                    ));
-                }
+                context.log_event(format!(
+                    "movement.frame {} {:.3},{:.3}",
+                    frame, sample.position[0], sample.position[1]
+                ));
                 samples.push(sample);
             }
         }
@@ -169,32 +157,25 @@ pub(crate) fn simulate_movement(
 
     for _ in 0..12 {
         frame += 1;
-        drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
-        {
-            let mut guard = context.borrow_mut();
-            guard.walk_actor_vector(
-                actor_handle,
-                Vec3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-                None,
-                None,
-            );
-        }
-        let sample_opt = {
-            let guard = context.borrow();
-            capture_movement_sample(&guard, actor_handle, &actor_id, frame)
-        };
+        context
+            .run_scripts(lua, 4, 32)
+            .map_err(|err| anyhow!(err))?;
+        context.walk_actor_vector(
+            actor_handle,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            None,
+            None,
+        );
+        let sample_opt = capture_movement_sample(context, actor_handle, &actor_id, frame);
         if let Some(sample) = sample_opt {
-            {
-                let mut guard = context.borrow_mut();
-                guard.log_event(format!(
-                    "movement.frame {} {:.3},{:.3}",
-                    frame, sample.position[0], sample.position[1]
-                ));
-            }
+            context.log_event(format!(
+                "movement.frame {} {:.3},{:.3}",
+                frame, sample.position[0], sample.position[1]
+            ));
             samples.push(sample);
         }
     }
@@ -211,13 +192,13 @@ pub(crate) fn simulate_movement(
 }
 
 pub(crate) fn capture_movement_sample(
-    ctx: &EngineContext,
+    ctx: &EngineContextHandle,
     actor_handle: u32,
     actor_id: &str,
     frame: u32,
 ) -> Option<MovementSample> {
-    let position = ctx.actor_position_by_handle(actor_handle)?;
-    let yaw = ctx.actor_rotation_by_handle(actor_handle).map(|rot| rot.y);
+    let position = ctx.actor_position(actor_handle)?;
+    let yaw = ctx.actor_rotation_y(actor_handle);
     let sector = ctx.geometry_sector_name(actor_id, "walk");
     Some(MovementSample {
         frame,
@@ -225,4 +206,30 @@ pub(crate) fn capture_movement_sample(
         yaw,
         sector,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lua_host::context::{EngineContext, EngineContextHandle};
+    use grim_analysis::resources::ResourceGraph;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn demo_plan_contains_segments() {
+        let plan = MovementPlan::demo();
+        assert_eq!(plan.segments.len(), 4);
+    }
+
+    #[test]
+    fn capture_sample_without_actor_returns_none() {
+        let resources = Rc::new(ResourceGraph::default());
+        let context = Rc::new(RefCell::new(EngineContext::new(
+            resources, false, None, None,
+        )));
+        let handle = EngineContextHandle::new(context);
+        let sample = capture_movement_sample(&handle, 9999, "manny", 0);
+        assert!(sample.is_none());
+    }
 }

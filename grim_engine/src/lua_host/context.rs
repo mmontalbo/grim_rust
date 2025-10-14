@@ -4,36 +4,30 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+mod audio;
+mod geometry;
+mod geometry_export;
+
+pub use audio::AudioCallback;
+use audio::{
+    format_music_detail, MusicCueSnapshot, MusicState, SfxInstance, SfxState, FOOTSTEP_PROFILES,
+    IM_SOUND_GROUP, IM_SOUND_PAN, IM_SOUND_PLAY_COUNT, IM_SOUND_VOL,
+};
+use geometry::{ParsedSetGeometry, SectorHit, SetDescriptor, SetSnapshot, SetupInfo};
+
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::{
-    LuaActorSectorSnapshot, LuaActorSnapshot, LuaCommentarySnapshot, LuaCurrentSetSnapshot,
-    LuaCutSceneSnapshot, LuaGeometrySnapshot, LuaMusicCueSnapshot, LuaMusicSnapshot,
-    LuaObjectActorLink, LuaObjectSectorSnapshot, LuaObjectSnapshot, LuaSectorSnapshot,
-    LuaSetSelectionSnapshot, LuaSetSnapshot, LuaSetupSnapshot, LuaSfxInstanceSnapshot,
-    LuaSfxSnapshot, LuaVisibleObjectSnapshot,
+    LuaGeometrySnapshot, LuaMusicCueSnapshot, LuaMusicSnapshot, LuaSfxInstanceSnapshot,
+    LuaSfxSnapshot,
 };
 use crate::lab_collection::LabCollection;
 use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::{normalize_legacy_lua, ResourceGraph};
-use grim_formats::{SectorKind as SetSectorKind, SetFile as SetFileData, Vec3 as SetVec3};
+use grim_formats::{SectorKind as SetSectorKind, SetFile as SetFileData};
 use mlua::{
     Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Thread,
     ThreadStatus, Value, Variadic,
 };
-
-/// Minimal adapter for routing audio events to interested observers.
-pub trait AudioCallback {
-    fn music_play(&self, _cue: &str, _params: &[String]) {}
-    fn music_stop(&self, _mode: Option<&str>) {}
-    fn sfx_play(&self, _cue: &str, _params: &[String], _handle: &str) {}
-    fn sfx_stop(&self, _target: Option<&str>) {}
-}
-
-impl std::fmt::Debug for dyn AudioCallback {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AudioCallback")
-    }
-}
 
 #[derive(Debug)]
 struct ScriptRecord {
@@ -48,267 +42,6 @@ struct ScriptCleanup {
     thread: Option<RegistryKey>,
     callable: Option<RegistryKey>,
 }
-
-#[derive(Debug, Clone)]
-struct SetupInfo {
-    label: String,
-    index: i32,
-}
-
-#[derive(Debug, Clone)]
-struct SetDescriptor {
-    variable_name: String,
-    display_name: Option<String>,
-    setups: Vec<SetupInfo>,
-}
-
-impl SetDescriptor {
-    fn setup_index(&self, label: &str) -> Option<i32> {
-        self.setups.iter().find_map(|slot| {
-            if slot.label.eq_ignore_ascii_case(label) {
-                Some(slot.index)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn setup_label_for_index(&self, index: i32) -> Option<&str> {
-        self.setups
-            .iter()
-            .find(|slot| slot.index == index)
-            .map(|slot| slot.label.as_str())
-    }
-
-    fn first_setup(&self) -> Option<&SetupInfo> {
-        self.setups.first()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SetSnapshot {
-    set_file: String,
-    variable_name: String,
-    display_name: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct SectorPolygon {
-    name: String,
-    id: i32,
-    kind: SetSectorKind,
-    vertices: Vec<(f32, f32)>,
-    centroid: (f32, f32),
-    default_active: bool,
-}
-
-impl SectorPolygon {
-    fn new(
-        name: String,
-        id: i32,
-        kind: SetSectorKind,
-        vertices: Vec<(f32, f32)>,
-        default_active: bool,
-    ) -> Self {
-        let centroid = if vertices.is_empty() {
-            (0.0, 0.0)
-        } else {
-            let (sum_x, sum_y) = vertices
-                .iter()
-                .fold((0.0, 0.0), |acc, (x, y)| (acc.0 + x, acc.1 + y));
-            let count = vertices.len() as f32;
-            (sum_x / count, sum_y / count)
-        };
-        Self {
-            name,
-            id,
-            kind,
-            vertices,
-            centroid,
-            default_active,
-        }
-    }
-
-    fn contains(&self, point: (f32, f32)) -> bool {
-        if self.vertices.len() < 3 {
-            return false;
-        }
-        if point_on_polygon_edge(point, &self.vertices) {
-            return true;
-        }
-        ray_cast_contains(point, &self.vertices)
-    }
-
-    fn distance_squared(&self, point: (f32, f32)) -> f32 {
-        let dx = point.0 - self.centroid.0;
-        let dy = point.1 - self.centroid.1;
-        dx * dx + dy * dy
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ParsedSetup {
-    name: String,
-    interest: Option<(f32, f32)>,
-    position: Option<(f32, f32)>,
-}
-
-impl ParsedSetup {
-    fn target_point(&self) -> Option<(f32, f32)> {
-        self.interest.or(self.position)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ParsedSetGeometry {
-    sectors: Vec<SectorPolygon>,
-    setups: Vec<ParsedSetup>,
-}
-
-impl ParsedSetGeometry {
-    fn from_set_file(file: SetFileData) -> Self {
-        let sectors = file
-            .sectors
-            .into_iter()
-            .map(|sector| {
-                let vertices = sector
-                    .vertices
-                    .into_iter()
-                    .map(|SetVec3 { x, y, .. }| (x, y))
-                    .collect();
-                let default_active = sector
-                    .default_visibility
-                    .as_ref()
-                    .map(|value| match value.to_ascii_lowercase().as_str() {
-                        "hidden" | "invisible" | "false" | "off" => false,
-                        _ => true,
-                    })
-                    .unwrap_or(true);
-                SectorPolygon::new(
-                    sector.name,
-                    sector.id,
-                    sector.kind,
-                    vertices,
-                    default_active,
-                )
-            })
-            .collect();
-
-        let setups = file
-            .setups
-            .into_iter()
-            .map(|setup| ParsedSetup {
-                name: setup.name,
-                interest: setup.interest.map(|SetVec3 { x, y, .. }| (x, y)),
-                position: setup.position.map(|SetVec3 { x, y, .. }| (x, y)),
-            })
-            .collect();
-
-        ParsedSetGeometry { sectors, setups }
-    }
-
-    fn has_geometry(&self) -> bool {
-        !self.sectors.is_empty() || !self.setups.is_empty()
-    }
-
-    fn find_polygon(&self, kind: SetSectorKind, point: (f32, f32)) -> Option<&SectorPolygon> {
-        let mut fallback = None;
-        let mut fallback_dist = f32::MAX;
-        for sector in self.sectors.iter().filter(|sector| sector.kind == kind) {
-            if sector.contains(point) {
-                return Some(sector);
-            }
-            let dist = sector.distance_squared(point);
-            if dist < fallback_dist {
-                fallback_dist = dist;
-                fallback = Some(sector);
-            }
-        }
-        fallback
-    }
-
-    fn best_setup_for_point(&self, point: (f32, f32)) -> Option<&ParsedSetup> {
-        let mut best = None;
-        let mut best_dist = f32::MAX;
-        for setup in &self.setups {
-            if let Some(target) = setup.target_point() {
-                let dx = point.0 - target.0;
-                let dy = point.1 - target.1;
-                let dist = dx * dx + dy * dy;
-                if dist < best_dist {
-                    best_dist = dist;
-                    best = Some(setup);
-                }
-            }
-        }
-        best.or_else(|| self.setups.first())
-    }
-}
-
-fn point_on_polygon_edge(point: (f32, f32), vertices: &[(f32, f32)]) -> bool {
-    if vertices.len() < 2 {
-        return false;
-    }
-    let mut prev = vertices.last().copied().unwrap();
-    for &current in vertices {
-        if point_on_segment(point, prev, current) {
-            return true;
-        }
-        prev = current;
-    }
-    false
-}
-
-fn point_on_segment(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> bool {
-    let (px, py) = point;
-    let (ax, ay) = a;
-    let (bx, by) = b;
-    let cross = (py - ay) * (bx - ax) - (px - ax) * (by - ay);
-    if cross.abs() > 1e-4 {
-        return false;
-    }
-    let dot = (px - ax) * (px - bx) + (py - ay) * (py - by);
-    dot <= 0.0
-}
-
-fn ray_cast_contains(point: (f32, f32), vertices: &[(f32, f32)]) -> bool {
-    let (px, py) = point;
-    let mut inside = false;
-    let mut j = vertices.len() - 1;
-    for i in 0..vertices.len() {
-        let (xi, yi) = vertices[i];
-        let (xj, yj) = vertices[j];
-        if (yi > py) != (yj > py) {
-            let denom = yj - yi;
-            if denom.abs() > 1e-6 {
-                let xinters = (py - yi) * (xj - xi) / denom + xi;
-                if xinters > px {
-                    inside = !inside;
-                }
-            }
-        }
-        j = i;
-    }
-    inside
-}
-
-#[derive(Debug, Clone)]
-struct SectorHit {
-    id: i32,
-    name: String,
-    kind: String,
-}
-
-impl SectorHit {
-    fn new(id: i32, name: impl Into<String>, kind: impl Into<String>) -> Self {
-        SectorHit {
-            id,
-            name: name.into(),
-            kind: kind.into(),
-        }
-    }
-}
-
 #[derive(Debug)]
 enum SectorToggleResult {
     Applied {
@@ -418,230 +151,6 @@ struct MenuState {
 }
 
 #[derive(Debug, Clone)]
-struct MusicCueSnapshot {
-    name: String,
-    parameters: Vec<String>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct MusicState {
-    current: Option<MusicCueSnapshot>,
-    queued: Vec<MusicCueSnapshot>,
-    current_state: Option<String>,
-    state_stack: Vec<String>,
-    paused: bool,
-    muted_groups: BTreeSet<String>,
-    volume: Option<f32>,
-    history: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct SfxInstance {
-    handle: String,
-    numeric: i64,
-    cue: String,
-    parameters: Vec<String>,
-    group: Option<i32>,
-    volume: i32,
-    pan: i32,
-    play_count: u32,
-}
-
-#[derive(Debug, Default, Clone)]
-struct SfxState {
-    next_handle: u32,
-    active: BTreeMap<String, SfxInstance>,
-    active_by_numeric: BTreeMap<i64, String>,
-    history: Vec<String>,
-}
-
-#[derive(Clone, Copy)]
-struct FootstepProfile {
-    key: &'static str,
-    prefix: &'static str,
-    left_walk: u8,
-    right_walk: u8,
-    left_run: Option<u8>,
-    right_run: Option<u8>,
-}
-
-const FOOTSTEP_PROFILES: &[FootstepProfile] = &[
-    FootstepProfile {
-        key: "concrete",
-        prefix: "fscon",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "dirt",
-        prefix: "fsdrt",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "gravel",
-        prefix: "fsgrv",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "creak",
-        prefix: "fscrk",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: Some(2),
-        right_run: Some(2),
-    },
-    FootstepProfile {
-        key: "marble",
-        prefix: "fsmar",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: Some(2),
-        right_run: Some(2),
-    },
-    FootstepProfile {
-        key: "metal",
-        prefix: "fsmet",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "pavement",
-        prefix: "fspav",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "rug",
-        prefix: "fsrug",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "sand",
-        prefix: "fssnd",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "snow",
-        prefix: "fssno",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "trapdoor",
-        prefix: "fstrp",
-        left_walk: 1,
-        right_walk: 1,
-        left_run: Some(1),
-        right_run: Some(1),
-    },
-    FootstepProfile {
-        key: "echo",
-        prefix: "fseko",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(4),
-        right_run: Some(4),
-    },
-    FootstepProfile {
-        key: "reverb",
-        prefix: "fsrvb",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: Some(2),
-        right_run: Some(2),
-    },
-    FootstepProfile {
-        key: "metal2",
-        prefix: "fs3mt",
-        left_walk: 4,
-        right_walk: 4,
-        left_run: Some(2),
-        right_run: Some(2),
-    },
-    FootstepProfile {
-        key: "wet",
-        prefix: "fswet",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: Some(2),
-        right_run: Some(2),
-    },
-    FootstepProfile {
-        key: "flowers",
-        prefix: "fsflw",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: Some(2),
-        right_run: Some(2),
-    },
-    FootstepProfile {
-        key: "glottis",
-        prefix: "fsglt",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: None,
-        right_run: None,
-    },
-    FootstepProfile {
-        key: "jello",
-        prefix: "fsjll",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: None,
-        right_run: None,
-    },
-    FootstepProfile {
-        key: "nick_virago",
-        prefix: "fsnic",
-        left_walk: 2,
-        right_walk: 2,
-        left_run: None,
-        right_run: None,
-    },
-    FootstepProfile {
-        key: "underwater",
-        prefix: "fswtr",
-        left_walk: 3,
-        right_walk: 3,
-        left_run: Some(2),
-        right_run: Some(2),
-    },
-    FootstepProfile {
-        key: "velasco",
-        prefix: "fsbcn",
-        left_walk: 3,
-        right_walk: 2,
-        left_run: None,
-        right_run: None,
-    },
-];
-
-const IM_SOUND_PLAY_COUNT: i32 = 256;
-const IM_SOUND_GROUP: i32 = 1024;
-const IM_SOUND_VOL: i32 = 1536;
-const IM_SOUND_PAN: i32 = 1792;
-
-#[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct ObjectSectorRef {
     name: String,
@@ -680,7 +189,75 @@ impl VisibleObjectInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
+pub struct EngineContextHandle {
+    inner: Rc<RefCell<EngineContext>>,
+}
+
+impl EngineContextHandle {
+    pub fn new(inner: Rc<RefCell<EngineContext>>) -> Self {
+        Self { inner }
+    }
+
+    pub fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
+        self.inner
+            .borrow()
+            .resolve_actor_handle(candidates)
+            .map(|(handle, id)| (handle, id.clone()))
+    }
+
+    pub fn walk_actor_vector(
+        &self,
+        handle: u32,
+        delta: Vec3,
+        adjust_y: Option<f32>,
+        heading_offset: Option<f32>,
+    ) -> bool {
+        self.inner
+            .borrow_mut()
+            .walk_actor_vector(handle, delta, adjust_y, heading_offset)
+    }
+
+    pub fn log_event(&self, event: impl Into<String>) {
+        self.inner.borrow_mut().log_event(event);
+    }
+
+    pub fn actor_position(&self, handle: u32) -> Option<Vec3> {
+        self.inner.borrow().actor_position_by_handle(handle)
+    }
+
+    pub fn actor_rotation_y(&self, handle: u32) -> Option<f32> {
+        self.inner
+            .borrow()
+            .actor_rotation_by_handle(handle)
+            .map(|rot| rot.y)
+    }
+
+    pub fn geometry_sector_name(&self, actor_id: &str, kind: &str) -> Option<String> {
+        self.inner.borrow().geometry_sector_name(actor_id, kind)
+    }
+
+    pub fn actor_costume(&self, actor: &str) -> Option<String> {
+        self.inner
+            .borrow()
+            .actor_costume(actor)
+            .map(|costume| costume.to_string())
+    }
+
+    pub fn is_message_active(&self) -> bool {
+        self.inner.borrow().is_message_active()
+    }
+
+    pub fn run_scripts(
+        &self,
+        lua: &Lua,
+        max_passes: usize,
+        max_yields_per_script: u32,
+    ) -> LuaResult<()> {
+        drive_active_scripts(lua, self.inner.clone(), max_passes, max_yields_per_script)
+    }
+}
+
 pub(super) struct EngineContext {
     verbose: bool,
     _resources: Rc<ResourceGraph>,
@@ -2841,284 +2418,30 @@ impl EngineContext {
     }
 
     pub(super) fn geometry_snapshot(&self) -> LuaGeometrySnapshot {
-        let current_set = self.current_set.as_ref().map(|current| {
-            let selection =
-                self.current_setups
-                    .get(&current.set_file)
-                    .map(|index| LuaSetSelectionSnapshot {
-                        index: *index,
-                        label: self
-                            .available_sets
-                            .get(&current.set_file)
-                            .and_then(|descriptor| descriptor.setup_label_for_index(*index))
-                            .map(|label| label.to_string()),
-                    });
-            LuaCurrentSetSnapshot {
-                set_file: current.set_file.clone(),
-                variable_name: current.variable_name.clone(),
-                display_name: current.display_name.clone(),
-                selection,
-            }
-        });
+        geometry_export::build_snapshot(self.snapshot_state())
+    }
 
-        let mut set_keys = BTreeSet::new();
-        set_keys.extend(self.set_geometry.keys().cloned());
-        set_keys.extend(self.sector_states.keys().cloned());
-
-        let mut sets = Vec::new();
-        for set_file in set_keys {
-            let descriptor = self.available_sets.get(&set_file);
-            let geometry = self.set_geometry.get(&set_file);
-            let states = self.sector_states.get(&set_file);
-
-            let current_setup =
-                self.current_setups
-                    .get(&set_file)
-                    .map(|index| LuaSetSelectionSnapshot {
-                        index: *index,
-                        label: descriptor
-                            .and_then(|desc| desc.setup_label_for_index(*index))
-                            .map(|label| label.to_string()),
-                    });
-
-            let setups = geometry
-                .map(|geometry| {
-                    geometry
-                        .setups
-                        .iter()
-                        .map(|setup| LuaSetupSnapshot {
-                            name: setup.name.clone(),
-                            interest: setup.interest.map(|(x, y)| [x, y]),
-                            position: setup.position.map(|(x, y)| [x, y]),
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(Vec::new);
-
-            let sectors = geometry
-                .map(|geometry| {
-                    geometry
-                        .sectors
-                        .iter()
-                        .map(|sector| LuaSectorSnapshot {
-                            id: sector.id,
-                            name: sector.name.clone(),
-                            kind: sector_kind_label(sector.kind).to_string(),
-                            default_active: sector.default_active,
-                            active: states
-                                .and_then(|map| map.get(&sector.name).copied())
-                                .unwrap_or(sector.default_active),
-                            vertices: sector
-                                .vertices
-                                .iter()
-                                .map(|(x, y)| [*x, *y])
-                                .collect::<Vec<_>>(),
-                            centroid: [sector.centroid.0, sector.centroid.1],
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(Vec::new);
-
-            let active_sectors = states
-                .map(|map| {
-                    map.iter()
-                        .map(|(name, active)| (name.clone(), *active))
-                        .collect::<BTreeMap<_, _>>()
-                })
-                .unwrap_or_else(BTreeMap::new);
-
-            sets.push(LuaSetSnapshot {
-                set_file: set_file.clone(),
-                variable_name: descriptor.map(|desc| desc.variable_name.clone()),
-                display_name: descriptor.and_then(|desc| desc.display_name.clone()),
-                has_geometry: geometry.is_some(),
-                current_setup,
-                setups,
-                sectors,
-                active_sectors,
-            });
-        }
-
-        let actors = self
-            .actors
-            .iter()
-            .map(|(id, actor)| {
-                let sectors = actor
-                    .sectors
-                    .iter()
-                    .map(|(kind, hit)| {
-                        (
-                            kind.clone(),
-                            LuaActorSectorSnapshot {
-                                id: hit.id,
-                                name: hit.name.clone(),
-                                kind: hit.kind.clone(),
-                            },
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                (
-                    id.clone(),
-                    LuaActorSnapshot {
-                        name: actor.name.clone(),
-                        costume: actor.costume.clone(),
-                        base_costume: actor.base_costume.clone(),
-                        current_set: actor.current_set.clone(),
-                        at_interest: actor.at_interest,
-                        position: actor.position.map(vec3_to_array),
-                        rotation: actor.rotation.map(vec3_to_array),
-                        scale: actor.scale,
-                        collision_scale: actor.collision_scale,
-                        is_selected: actor.is_selected,
-                        is_visible: actor.is_visible,
-                        handle: actor.handle,
-                        sectors,
-                        costume_stack: actor.costume_stack.clone(),
-                        current_chore: actor.current_chore.clone(),
-                        walk_chore: actor.walk_chore.clone(),
-                        talk_chore: actor.talk_chore.clone(),
-                        talk_drop_chore: actor.talk_drop_chore.clone(),
-                        mumble_chore: actor.mumble_chore.clone(),
-                        talk_color: actor.talk_color.clone(),
-                        head_target: actor.head_target.clone(),
-                        head_look_rate: actor.head_look_rate,
-                        collision_mode: actor.collision_mode.clone(),
-                        ignoring_boxes: actor.ignoring_boxes,
-                        last_chore_costume: actor.last_chore_costume.clone(),
-                        speaking: actor.speaking,
-                        last_line: actor.last_line.clone(),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        let mut objects: Vec<LuaObjectSnapshot> = self
-            .objects
-            .values()
-            .map(|object| {
-                let interest_actor = object.interest_actor.map(|handle| {
-                    let actor_id = self.actor_handles.get(&handle).cloned();
-                    let actor_label = actor_id
-                        .as_ref()
-                        .and_then(|id| self.actors.get(id))
-                        .map(|actor| actor.name.clone());
-                    LuaObjectActorLink {
-                        handle,
-                        actor_id,
-                        actor_label,
-                    }
-                });
-                let sectors = object
-                    .sectors
-                    .iter()
-                    .map(|sector| LuaObjectSectorSnapshot {
-                        name: sector.name.clone(),
-                        kind: sector_kind_label(sector.kind).to_string(),
-                    })
-                    .collect::<Vec<_>>();
-                let in_active_sector = object
-                    .set_file
-                    .as_deref()
-                    .map(|set_file| self.object_is_in_active_sector(set_file, object));
-                LuaObjectSnapshot {
-                    handle: object.handle,
-                    name: object.name.clone(),
-                    string_name: object.string_name.clone(),
-                    set_file: object.set_file.clone(),
-                    position: object.position.map(vec3_to_array),
-                    range: object.range,
-                    touchable: object.touchable,
-                    visible: object.visible,
-                    interest_actor,
-                    sectors,
-                    in_active_sector,
-                }
-            })
-            .collect();
-        objects.sort_by_key(|entry| entry.handle);
-
-        let visible_objects = self
-            .visible_objects
-            .iter()
-            .map(|info| LuaVisibleObjectSnapshot {
-                handle: info.handle,
-                name: info.name.clone(),
-                string_name: info.string_name.clone(),
-                display_name: info.display_name().to_string(),
-                range: info.range,
-                distance: info.distance,
-                angle: info.angle,
-                within_range: info.within_range,
-                in_hotlist: info.in_hotlist,
-            })
-            .collect::<Vec<_>>();
-
-        let mut loaded_sets: Vec<String> = self.loaded_sets.iter().cloned().collect();
-        loaded_sets.sort();
-
-        let inventory: Vec<String> = self.inventory.iter().cloned().collect();
-        let inventory_rooms: Vec<String> = self.inventory_rooms.iter().cloned().collect();
-
-        let current_setups = self
-            .current_setups
-            .iter()
-            .map(|(set_file, index)| {
-                let label = self
-                    .available_sets
-                    .get(set_file)
-                    .and_then(|desc| desc.setup_label_for_index(*index))
-                    .map(|value| value.to_string());
-                (
-                    set_file.clone(),
-                    LuaSetSelectionSnapshot {
-                        index: *index,
-                        label,
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        let commentary = self
-            .commentary
-            .as_ref()
-            .map(|record| LuaCommentarySnapshot {
-                label: record.label.clone(),
-                object_handle: record.object_handle,
-                active: record.active,
-                suppressed_reason: record.suppressed_reason.clone(),
-            });
-
-        let cut_scenes = self
-            .cut_scene_stack
-            .iter()
-            .map(|record| LuaCutSceneSnapshot {
-                label: record.label.clone(),
-                set_file: record.set_file.clone(),
-                sector: record.sector.clone(),
-                suppressed: record.suppressed,
-            })
-            .collect::<Vec<_>>();
-
-        let music = self.music.to_snapshot();
-        let sfx = self.sfx.to_snapshot();
-
-        LuaGeometrySnapshot {
-            current_set,
+    fn snapshot_state(&self) -> geometry_export::SnapshotState {
+        geometry_export::SnapshotState {
+            current_set: self.current_set.clone(),
             selected_actor: self.selected_actor.clone(),
             voice_effect: self.voice_effect.clone(),
-            loaded_sets,
-            current_setups,
-            sets,
-            actors,
-            objects,
-            visible_objects,
+            loaded_sets: self.loaded_sets.clone(),
+            current_setups: self.current_setups.clone(),
+            available_sets: self.available_sets.clone(),
+            set_geometry: self.set_geometry.clone(),
+            sector_states: self.sector_states.clone(),
+            actors: self.actors.clone(),
+            objects: self.objects.clone(),
+            actor_handles: self.actor_handles.clone(),
+            visible_objects: self.visible_objects.clone(),
             hotlist_handles: self.hotlist_handles.clone(),
-            inventory,
-            inventory_rooms,
-            commentary,
-            cut_scenes,
-            music,
-            sfx,
+            inventory: self.inventory.clone(),
+            inventory_rooms: self.inventory_rooms.clone(),
+            commentary: self.commentary.clone(),
+            cut_scene_stack: self.cut_scene_stack.clone(),
+            music: self.music.clone(),
+            sfx: self.sfx.clone(),
             events: self.events.clone(),
         }
     }
@@ -3178,16 +2501,6 @@ impl SfxInstance {
         }
     }
 }
-
-fn sector_kind_label(kind: SetSectorKind) -> &'static str {
-    match kind {
-        SetSectorKind::Walk => "walk",
-        SetSectorKind::Camera => "camera",
-        SetSectorKind::Special => "special",
-        SetSectorKind::Other => "other",
-    }
-}
-
 fn vec3_to_array(vec: Vec3) -> [f32; 3] {
     [vec.x, vec.y, vec.z]
 }
@@ -8562,14 +7875,6 @@ fn value_to_string(value: &Value) -> Option<String> {
         _ => None,
     }
 }
-fn format_music_detail(action: &str, cue: &str, params: &[String]) -> String {
-    if params.is_empty() {
-        format!("{} {}", action, cue)
-    } else {
-        format!("{} {} [{}]", action, cue, params.join(", "))
-    }
-}
-
 fn describe_value(value: &Value) -> String {
     if let Some(text) = value_to_string(value) {
         return text;
@@ -8602,7 +7907,7 @@ mod tests {
     use super::super::types::Vec3;
     use super::{
         candidate_paths, install_game_pauser, install_menu_common, value_slice_to_vec3,
-        AudioCallback, EngineContext, ObjectSnapshot, ParsedSetGeometry,
+        AudioCallback, EngineContext, EngineContextHandle, ObjectSnapshot, ParsedSetGeometry,
     };
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
@@ -8630,6 +7935,26 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn handle_resolves_actor_and_logs_events() {
+        let context = Rc::new(RefCell::new(make_context()));
+        let handle = EngineContextHandle::new(context.clone());
+        let actor_handle = {
+            let mut ctx = context.borrow_mut();
+            let (actor_id, handle_id) = ctx.register_actor_with_handle("Manny", Some(1400));
+            ctx.put_actor_in_set(&actor_id, "Manny", "mo.set");
+            ctx.switch_to_set("mo.set");
+            handle_id
+        };
+        let resolved = handle
+            .resolve_actor_handle(&["Manny", "manny"])
+            .expect("actor handle");
+        assert_eq!(resolved.0, actor_handle);
+        handle.log_event("handle.test".to_string());
+        let events = context.borrow().events();
+        assert!(events.iter().any(|event| event == "handle.test"));
+    }
+
     fn achievement_flags_are_tracked() {
         let mut ctx = make_context();
         assert!(!ctx.achievement_has_been_established("ACHIEVE_CLASSIC_DRIVER"));

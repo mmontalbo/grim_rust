@@ -1,14 +1,11 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use anyhow::{anyhow, Context, Result};
 use mlua::{Function, Lua, Table, Value};
 
-use super::context::{drive_active_scripts, EngineContext};
+use super::context::EngineContextHandle;
 use super::movement::capture_movement_sample;
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HotspotSlug {
     Computer,
 }
@@ -69,56 +66,41 @@ impl HotspotOptions {
 
 pub(crate) fn simulate_hotspot_demo(
     lua: &Lua,
-    context: Rc<RefCell<EngineContext>>,
+    context: &EngineContextHandle,
     options: &HotspotOptions,
 ) -> Result<()> {
     let slug = options.slug();
 
-    let (actor_handle, actor_id) = {
-        let guard = context.borrow();
-        match guard.resolve_actor_handle(&["manny", "Manny"]) {
-            Some(pair) => pair,
-            None => return Ok(()),
-        }
+    let (actor_handle, actor_id) = match context.resolve_actor_handle(&["manny", "Manny"]) {
+        Some(pair) => pair,
+        None => return Ok(()),
     };
 
     let target = slug.approach_target();
     let steps = slug.approach_steps().max(1);
 
-    {
-        let mut guard = context.borrow_mut();
-        guard.log_event(format!("hotspot.demo.approach {}", slug.label()));
-    }
+    context.log_event(format!("hotspot.demo.approach {}", slug.label()));
 
     let mut frame: u32 = 0;
     for step in 0..steps {
         frame += 1;
-        let delta = {
-            let guard = context.borrow();
-            let current = guard
-                .actor_position_by_handle(actor_handle)
-                .unwrap_or(MANNY_OFFICE_SEED_POS);
-            let remaining = (steps - step) as f32;
-            Vec3 {
-                x: (target.x - current.x) / remaining.max(1.0),
-                y: (target.y - current.y) / remaining.max(1.0),
-                z: (target.z - current.z) / remaining.max(1.0),
-            }
+        let current = context
+            .actor_position(actor_handle)
+            .unwrap_or(MANNY_OFFICE_SEED_POS);
+        let remaining = (steps - step) as f32;
+        let delta = Vec3 {
+            x: (target.x - current.x) / remaining.max(1.0),
+            y: (target.y - current.y) / remaining.max(1.0),
+            z: (target.z - current.z) / remaining.max(1.0),
         };
 
-        {
-            let mut guard = context.borrow_mut();
-            guard.walk_actor_vector(actor_handle, delta, None, None);
-        }
+        context.walk_actor_vector(actor_handle, delta, None, None);
+        context
+            .run_scripts(lua, 4, 32)
+            .map_err(|err| anyhow!(err))?;
 
-        drive_active_scripts(lua, context.clone(), 4, 32).map_err(|err| anyhow!(err))?;
-
-        if let Some(sample) = {
-            let guard = context.borrow();
-            capture_movement_sample(&guard, actor_handle, &actor_id, frame)
-        } {
-            let mut guard = context.borrow_mut();
-            guard.log_event(format!(
+        if let Some(sample) = capture_movement_sample(context, actor_handle, &actor_id, frame) {
+            context.log_event(format!(
                 "movement.frame {} {:.3},{:.3}",
                 frame, sample.position[0], sample.position[1]
             ));
@@ -137,56 +119,46 @@ pub(crate) fn simulate_hotspot_demo(
         .get("Sentence")
         .context("Sentence function missing for hotspot demo")?;
 
-    {
-        let mut guard = context.borrow_mut();
-        guard.log_event(format!("hotspot.demo.start {}", slug.label()));
-    }
+    context.log_event(format!("hotspot.demo.start {}", slug.label()));
 
     sentence
         .call::<_, ()>(("use", object.clone()))
         .context("executing hotspot Sentence")?;
 
     for _ in 0..32 {
-        drive_active_scripts(lua, context.clone(), 64, 4096).map_err(|err| anyhow!(err))?;
-        let costume_reset = {
-            let ctx = context.borrow();
-            match ctx.actor_costume("manny") {
-                Some(costume) => costume.eq_ignore_ascii_case("suit"),
-                None => true,
-            }
-        };
-        let message_idle = {
-            let ctx = context.borrow();
-            !ctx.is_message_active()
-        };
+        context
+            .run_scripts(lua, 64, 4096)
+            .map_err(|err| anyhow!(err))?;
+        let costume_reset = context
+            .actor_costume("manny")
+            .map(|costume| costume.eq_ignore_ascii_case("suit"))
+            .unwrap_or(true);
+        let message_idle = !context.is_message_active();
         if costume_reset && message_idle {
             break;
         }
     }
-    drive_active_scripts(lua, context.clone(), 32, 2048).map_err(|err| anyhow!(err))?;
+    context
+        .run_scripts(lua, 32, 2048)
+        .map_err(|err| anyhow!(err))?;
 
-    let fallback_needed = {
-        let ctx = context.borrow();
-        ctx.actor_costume("manny")
-            .map(|costume| !costume.eq_ignore_ascii_case("suit"))
-            .unwrap_or(false)
-    };
+    let fallback_needed = context
+        .actor_costume("manny")
+        .map(|costume| !costume.eq_ignore_ascii_case("suit"))
+        .unwrap_or(false);
 
     if fallback_needed {
-        complete_computer_hotspot_manually(lua, context.clone(), object_clone)?;
+        complete_computer_hotspot_manually(lua, context, object_clone)?;
     }
 
-    {
-        let mut guard = context.borrow_mut();
-        guard.log_event(format!("hotspot.demo.end {}", slug.label()));
-    }
+    context.log_event(format!("hotspot.demo.end {}", slug.label()));
 
     Ok(())
 }
 
 fn complete_computer_hotspot_manually(
     lua: &Lua,
-    context: Rc<RefCell<EngineContext>>,
+    context: &EngineContextHandle,
     target: Table,
 ) -> Result<()> {
     let globals = lua.globals();
@@ -261,8 +233,22 @@ fn complete_computer_hotspot_manually(
     set_rot.call::<_, ()>((manny.clone(), 0.0_f32, 120.761002_f32, 0.0_f32))?;
     enable_head_control.call::<_, ()>((true,))?;
 
-    context
-        .borrow_mut()
-        .log_event("hotspot.demo.fallback computer".to_string());
+    context.log_event("hotspot.demo.fallback computer".to_string());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hotspot_options_parse_computer() {
+        let options = HotspotOptions::parse("computer").expect("parse");
+        assert_eq!(options.slug(), HotspotSlug::Computer);
+    }
+
+    #[test]
+    fn hotspot_options_rejects_unknown() {
+        assert!(HotspotOptions::parse("unknown").is_err());
+    }
 }
