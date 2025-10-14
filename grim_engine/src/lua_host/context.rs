@@ -10,6 +10,7 @@ mod geometry;
 mod geometry_export;
 mod inventory;
 mod menus;
+mod pause;
 
 use actors::{ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
@@ -24,6 +25,7 @@ use menus::{
     install_menu_dialog, install_menu_infrastructure, install_menu_prefs, install_menu_remap,
     MenuRegistry, MenuState,
 };
+use pause::{PauseLabel, PauseState};
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::{
@@ -255,6 +257,7 @@ pub(super) struct EngineContext {
     active_dialog: Option<DialogState>,
     speaking_actor: Option<String>,
     message_active: bool,
+    pause: PauseState,
     music: MusicState,
     sfx: SfxState,
     lab_collection: Option<Rc<LabCollection>>,
@@ -316,6 +319,7 @@ impl EngineContext {
             active_dialog: None,
             speaking_actor: None,
             message_active: false,
+            pause: PauseState::default(),
             music: MusicState::default(),
             sfx: SfxState::default(),
             lab_collection,
@@ -327,6 +331,16 @@ impl EngineContext {
 
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
+    }
+
+    pub(super) fn pause_state(&self) -> &PauseState {
+        &self.pause
+    }
+
+    pub(super) fn handle_pause_request(&mut self, label: PauseLabel, active: bool) {
+        self.pause.record(label, active);
+        let verb = if active { "on" } else { "off" };
+        self.log_event(format!("game_pauser.{} {}", label.as_str(), verb));
     }
 
     fn push_cut_scene(&mut self, label: Option<String>, flags: Vec<String>) {
@@ -6339,6 +6353,9 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
     if state.music.paused {
         println!("  Music paused");
     }
+    if state.pause_state().active {
+        println!("  Game paused");
+    }
     if let Some(state_name) = &state.music.current_state {
         println!("  Music state: {}", state_name);
     }
@@ -6967,7 +6984,8 @@ fn distance_between(a: Vec3, b: Vec3) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::types::Vec3;
-    use super::menus::{install_game_pauser, install_menu_common};
+    use super::menus::install_menu_common;
+    use super::pause::{install_game_pauser, PauseEvent, PauseLabel};
     use super::{
         candidate_paths, value_slice_to_vec3, AudioCallback, EngineContext, EngineContextHandle,
         ObjectSnapshot, ParsedSetGeometry,
@@ -7140,10 +7158,36 @@ mod tests {
         let hide: Function = menu.get("hide").expect("hide function");
         hide.call::<_, ()>((menu.clone(),)).expect("hide executes");
 
-        let events = &context.borrow().events;
-        assert!(events.iter().any(|e| e == "game_pauser.pause on"));
-        assert!(events.iter().any(|e| e == "game_pauser.pause off"));
-        assert!(events.iter().any(|e| e == "menu_common.auto_freeze on"));
+        {
+            let guard = context.borrow();
+            assert!(guard.events.iter().any(|e| e == "game_pauser.pause on"));
+            assert!(guard.events.iter().any(|e| e == "game_pauser.pause off"));
+            assert!(guard
+                .events
+                .iter()
+                .any(|e| e == "menu_common.auto_freeze on"));
+
+            let history = &guard.pause_state().history;
+            assert_eq!(history.len(), 2);
+            assert_eq!(
+                history[0],
+                PauseEvent {
+                    label: PauseLabel::Pause,
+                    active: true
+                }
+            );
+            assert_eq!(
+                history[1],
+                PauseEvent {
+                    label: PauseLabel::Pause,
+                    active: false
+                }
+            );
+            assert!(
+                !guard.pause_state().active,
+                "auto-freeze should return game to unpaused state"
+            );
+        }
     }
 
     fn prepare_manny(ctx: &mut EngineContext, position: Vec3) {

@@ -5,6 +5,7 @@ use std::rc::Rc;
 use anyhow::Result;
 use mlua::{Error as LuaError, Function, Lua, Table, Value, Variadic};
 
+use super::pause::install_game_pauser;
 use super::{
     describe_value, install_render_helpers, split_self, strip_self, value_to_bool, value_to_string,
     EngineContext,
@@ -516,42 +517,6 @@ fn install_menu_constants(lua: &Lua) -> Result<()> {
     globals.set("createMenuLayout", lua.create_table()?)?;
     globals.set("LoadingMenuAllocator", lua.create_table()?)?;
     globals.set("MenuCommon", lua.create_table()?)?;
-    Ok(())
-}
-
-pub(super) fn install_game_pauser(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    let game_pauser = lua.create_table()?;
-
-    let pause_context = context.clone();
-    game_pauser.set(
-        "pause",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let values = strip_self(args);
-            let active = values.get(0).map(value_to_bool).unwrap_or(false);
-            pause_context.borrow_mut().log_event(format!(
-                "game_pauser.pause {}",
-                if active { "on" } else { "off" }
-            ));
-            Ok(())
-        })?,
-    )?;
-
-    let resume_context = context.clone();
-    game_pauser.set(
-        "resume",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let values = strip_self(args);
-            let active = values.get(0).map(value_to_bool).unwrap_or(false);
-            resume_context.borrow_mut().log_event(format!(
-                "game_pauser.resume {}",
-                if active { "on" } else { "off" }
-            ));
-            Ok(())
-        })?,
-    )?;
-
-    globals.set("game_pauser", game_pauser)?;
     Ok(())
 }
 
