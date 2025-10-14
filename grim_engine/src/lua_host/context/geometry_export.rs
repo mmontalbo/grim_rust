@@ -7,10 +7,11 @@ use crate::geometry_snapshot::{
     LuaSetupSnapshot, LuaVisibleObjectSnapshot,
 };
 
+use super::actors::ActorSnapshot;
 use super::geometry::{sector_kind_label, ParsedSetGeometry, SetDescriptor, SetSnapshot};
 use super::{
-    vec3_to_array, ActorSnapshot, CommentaryRecord, CutSceneRecord, MusicState, ObjectSnapshot,
-    SfxState, VisibleObjectInfo,
+    vec3_to_array, CommentaryRecord, CutSceneRecord, MusicState, ObjectSnapshot, SfxState,
+    VisibleObjectInfo,
 };
 
 #[derive(Clone)]

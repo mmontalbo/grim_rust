@@ -4,16 +4,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+mod actors;
 mod audio;
 mod geometry;
 mod geometry_export;
+mod inventory;
 
+use actors::{ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
 use audio::{
     format_music_detail, MusicCueSnapshot, MusicState, SfxInstance, SfxState, FOOTSTEP_PROFILES,
     IM_SOUND_GROUP, IM_SOUND_PAN, IM_SOUND_PLAY_COUNT, IM_SOUND_VOL,
 };
 use geometry::{ParsedSetGeometry, SectorHit, SetDescriptor, SetSnapshot, SetupInfo};
+use inventory::InventoryState;
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::{
@@ -103,37 +107,6 @@ struct DialogState {
     actor_id: String,
     actor_label: String,
     line: String,
-}
-
-#[derive(Debug, Default, Clone)]
-struct ActorSnapshot {
-    name: String,
-    costume: Option<String>,
-    base_costume: Option<String>,
-    current_set: Option<String>,
-    at_interest: bool,
-    position: Option<Vec3>,
-    rotation: Option<Vec3>,
-    scale: Option<f32>,
-    collision_scale: Option<f32>,
-    is_selected: bool,
-    is_visible: bool,
-    handle: u32,
-    sectors: BTreeMap<String, SectorHit>,
-    costume_stack: Vec<String>,
-    current_chore: Option<String>,
-    walk_chore: Option<String>,
-    talk_chore: Option<String>,
-    talk_drop_chore: Option<String>,
-    mumble_chore: Option<String>,
-    talk_color: Option<String>,
-    head_target: Option<String>,
-    head_look_rate: Option<f32>,
-    collision_mode: Option<String>,
-    ignoring_boxes: bool,
-    last_chore_costume: Option<String>,
-    speaking: bool,
-    last_line: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -265,18 +238,12 @@ pub(super) struct EngineContext {
     scripts: BTreeMap<u32, ScriptRecord>,
     events: Vec<String>,
     current_set: Option<SetSnapshot>,
-    selected_actor: Option<String>,
-    actors: BTreeMap<String, ActorSnapshot>,
+    actors: ActorStore,
     available_sets: BTreeMap<String, SetDescriptor>,
     loaded_sets: BTreeSet<String>,
     current_setups: BTreeMap<String, i32>,
-    inventory: BTreeSet<String>,
-    inventory_rooms: BTreeSet<String>,
+    inventory: InventoryState,
     menus: BTreeMap<String, Rc<RefCell<MenuState>>>,
-    actor_labels: BTreeMap<String, String>,
-    actor_handles: BTreeMap<u32, String>,
-    next_actor_handle: u32,
-    actors_installed: bool,
     voice_effect: Option<String>,
     objects: BTreeMap<i64, ObjectSnapshot>,
     objects_by_name: BTreeMap<String, i64>,
@@ -296,7 +263,6 @@ pub(super) struct EngineContext {
     audio_callback: Option<Rc<dyn AudioCallback>>,
     set_geometry: BTreeMap<String, ParsedSetGeometry>,
     sector_states: BTreeMap<String, BTreeMap<String, bool>>,
-    moving_actors: BTreeSet<u32>,
 }
 
 impl EngineContext {
@@ -333,18 +299,12 @@ impl EngineContext {
             scripts: BTreeMap::new(),
             events: Vec::new(),
             current_set: None,
-            selected_actor: None,
-            actors: BTreeMap::new(),
+            actors: ActorStore::new(1100),
             available_sets,
             loaded_sets: BTreeSet::new(),
             current_setups: BTreeMap::new(),
-            inventory: BTreeSet::new(),
-            inventory_rooms: BTreeSet::new(),
+            inventory: InventoryState::new(),
             menus: BTreeMap::new(),
-            actor_labels: BTreeMap::new(),
-            actor_handles: BTreeMap::new(),
-            next_actor_handle: 1100,
-            actors_installed: false,
             voice_effect: None,
             objects: BTreeMap::new(),
             objects_by_name: BTreeMap::new(),
@@ -364,7 +324,6 @@ impl EngineContext {
             audio_callback,
             set_geometry: BTreeMap::new(),
             sector_states: BTreeMap::new(),
-            moving_actors: BTreeSet::new(),
         }
     }
 
@@ -863,28 +822,11 @@ impl EngineContext {
     }
 
     fn ensure_actor_mut(&mut self, id: &str, label: &str) -> &mut ActorSnapshot {
-        let entry = self.actors.entry(id.to_string()).or_insert_with(|| {
-            let mut actor = ActorSnapshot::default();
-            actor.name = label.to_string();
-            actor.is_visible = true;
-            actor
-        });
-        entry.name = label.to_string();
-        self.actor_labels
-            .entry(label.to_string())
-            .or_insert_with(|| id.to_string());
-        entry
+        self.actors.ensure_actor_mut(id, label)
     }
 
     fn select_actor(&mut self, id: &str, label: &str) {
-        if let Some(previous) = self.selected_actor.take() {
-            if let Some(actor) = self.actors.get_mut(&previous) {
-                actor.is_selected = false;
-            }
-        }
-        let actor = self.ensure_actor_mut(id, label);
-        actor.is_selected = true;
-        self.selected_actor = Some(id.to_string());
+        self.actors.select_actor(id, label);
         self.log_event(format!("actor.select {id}"));
     }
 
@@ -1397,7 +1339,7 @@ impl EngineContext {
         adjust_y: Option<f32>,
         heading_offset: Option<f32>,
     ) -> bool {
-        let Some(actor_id) = self.actor_handles.get(&handle).cloned() else {
+        let Some(actor_id) = self.actors.actor_id_for_handle(handle).cloned() else {
             self.log_event(format!("walk.delta unknown_handle #{handle}"));
             return false;
         };
@@ -1470,13 +1412,13 @@ impl EngineContext {
     }
 
     fn add_inventory_item(&mut self, name: &str) {
-        if self.inventory.insert(name.to_string()) {
+        if self.inventory.add_item(name) {
             self.log_event(format!("inventory.add {name}"));
         }
     }
 
     fn register_inventory_room(&mut self, name: &str) {
-        if self.inventory_rooms.insert(name.to_string()) {
+        if self.inventory.register_room(name) {
             self.log_event(format!("inventory.room {name}"));
         }
     }
@@ -1599,83 +1541,26 @@ impl EngineContext {
             .find_map(|(handle, record)| (record.label == label).then_some(*handle))
     }
 
-    fn canonicalize_actor_label(label: &str) -> String {
-        let mut id = String::new();
-        for ch in label.chars() {
-            if ch.is_ascii_alphanumeric() {
-                id.push(ch.to_ascii_lowercase());
-            } else if ch.is_ascii_whitespace() || matches!(ch, '.' | '-' | '_' | ':') {
-                if !id.ends_with('_') {
-                    id.push('_');
-                }
-            }
-        }
-        if id.is_empty() {
-            id.push_str("actor");
-        }
-        while id.ends_with('_') {
-            id.pop();
-        }
-        if id.is_empty() {
-            id.push_str("actor");
-        }
-        id
-    }
-
     fn register_actor_with_handle(
         &mut self,
         label: &str,
         preferred_handle: Option<u32>,
     ) -> (String, u32) {
-        let id = self
-            .actor_labels
-            .get(label)
-            .cloned()
-            .unwrap_or_else(|| Self::canonicalize_actor_label(label));
-
-        let entry = self.actors.entry(id.clone()).or_insert_with(|| {
-            let mut actor = ActorSnapshot::default();
-            actor.name = label.to_string();
-            actor.is_visible = true;
-            actor
-        });
-        entry.name = label.to_string();
-
-        if let Some(existing) = self.actor_labels.get(label) {
-            if existing != &id {
-                self.actor_labels.insert(label.to_string(), id.clone());
-            }
-        } else {
-            self.actor_labels.insert(label.to_string(), id.clone());
-        }
-
-        let mut newly_assigned = None;
-        if entry.handle == 0 {
-            let handle = preferred_handle.unwrap_or_else(|| {
-                let handle = self.next_actor_handle;
-                self.next_actor_handle += 1;
-                handle
-            });
-            entry.handle = handle;
-            self.actor_handles.insert(handle, id.clone());
-            newly_assigned = Some(handle);
-        }
-
-        let handle = entry.handle;
-
-        if let Some(handle) = newly_assigned {
+        let (id, handle, newly_assigned) =
+            self.actors
+                .register_actor_with_handle(label, preferred_handle);
+        if newly_assigned {
             self.log_event(format!("actor.register {} (#{handle})", label));
         }
-
         (id, handle)
     }
 
     fn mark_actors_installed(&mut self) {
-        self.actors_installed = true;
+        self.actors.mark_actors_installed();
     }
 
     fn actors_installed(&self) -> bool {
-        self.actors_installed
+        self.actors.actors_installed()
     }
 
     fn compute_object_sectors(&mut self, set_file: &str, position: Vec3) -> Vec<ObjectSectorRef> {
@@ -1729,7 +1614,7 @@ impl EngineContext {
         }
         if snapshot.set_file.is_none() {
             if let Some(actor_handle) = snapshot.interest_actor {
-                if let Some(actor_id) = self.actor_handles.get(&actor_handle) {
+                if let Some(actor_id) = self.actors.actor_id_for_handle(actor_handle) {
                     if let Some(actor) = self.actors.get(actor_id) {
                         if let Some(set_file) = actor.current_set.clone() {
                             snapshot.set_file = Some(set_file);
@@ -1814,9 +1699,8 @@ impl EngineContext {
         }
 
         let actor_snapshot = self
-            .selected_actor
-            .as_ref()
-            .and_then(|id| self.actors.get(id))
+            .actors
+            .selected_actor_snapshot()
             .cloned()
             .or_else(|| self.actors.get("manny").cloned());
         let actor_position = actor_snapshot.as_ref().and_then(|actor| actor.position);
@@ -1927,8 +1811,8 @@ impl EngineContext {
     fn update_object_position_for_actor(&mut self, actor_handle: u32, position: Vec3) {
         if let Some(object_handle) = self.objects_by_actor.get(&actor_handle).copied() {
             let actor_set = self
-                .actor_handles
-                .get(&actor_handle)
+                .actors
+                .actor_id_for_handle(actor_handle)
                 .and_then(|id| self.actors.get(id))
                 .and_then(|actor| actor.current_set.clone())
                 .or_else(|| {
@@ -2127,44 +2011,20 @@ impl EngineContext {
     }
 
     pub(super) fn actor_position_by_handle(&self, handle: u32) -> Option<Vec3> {
-        self.actor_handles
-            .get(&handle)
-            .and_then(|id| self.actors.get(id))
-            .and_then(|actor| actor.position)
+        self.actors
+            .actor_position_by_handle(handle)
             .or_else(|| self.object_position_by_actor(handle))
     }
     pub(super) fn actor_rotation_by_handle(&self, handle: u32) -> Option<Vec3> {
-        self.actor_handles
-            .get(&handle)
-            .and_then(|id| self.actors.get(id))
-            .and_then(|actor| actor.rotation)
+        self.actors.actor_rotation_by_handle(handle)
     }
 
     pub(super) fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
-        for candidate in candidates {
-            if let Some(actor) = self.actors.get(*candidate) {
-                if actor.handle == 0 {
-                    return None;
-                }
-                let id = self
-                    .actor_handles
-                    .get(&actor.handle)
-                    .cloned()
-                    .unwrap_or_else(|| actor.name.to_ascii_lowercase());
-                return Some((actor.handle, id));
-            }
-        }
-        None
+        self.actors.resolve_actor_handle(candidates)
     }
 
     fn actor_identity_by_handle(&self, handle: u32) -> Option<(String, String)> {
-        let id = self.actor_handles.get(&handle)?.clone();
-        let label = self
-            .actors
-            .get(&id)
-            .map(|actor| actor.name.clone())
-            .unwrap_or_else(|| id.clone());
-        Some((id, label))
+        self.actors.actor_identity_by_handle(handle)
     }
 
     fn set_actor_rotation_by_handle(&mut self, handle: u32, rotation: Vec3) -> bool {
@@ -2195,15 +2055,11 @@ impl EngineContext {
     }
 
     fn set_actor_moving(&mut self, handle: u32, moving: bool) {
-        if moving {
-            self.moving_actors.insert(handle);
-        } else {
-            self.moving_actors.remove(&handle);
-        }
+        self.actors.set_actor_moving(handle, moving);
     }
 
     fn is_actor_moving(&self, handle: u32) -> bool {
-        self.moving_actors.contains(&handle)
+        self.actors.is_actor_moving(handle)
     }
 
     fn walk_actor_to_handle(&mut self, handle: u32, target: Vec3) -> bool {
@@ -2245,20 +2101,11 @@ impl EngineContext {
     }
 
     fn actor_snapshot(&self, actor_id: &str) -> Option<&ActorSnapshot> {
-        self.actors
-            .get(actor_id)
-            .or_else(|| self.actors.get(&actor_id.to_ascii_lowercase()))
+        self.actors.actor_snapshot(actor_id)
     }
 
     fn actor_position_xy(&self, actor_id: &str) -> Option<(f32, f32)> {
-        if let Some(actor) = self.actors.get(actor_id) {
-            return actor.position.map(|pos| (pos.x, pos.y));
-        }
-        let lowercase = actor_id.to_ascii_lowercase();
-        self.actors
-            .get(&lowercase)
-            .and_then(|actor| actor.position)
-            .map(|pos| (pos.x, pos.y))
+        self.actors.actor_position_xy(actor_id)
     }
 
     fn geometry_sector_hit(&self, actor_id: &str, raw_kind: &str) -> Option<SectorHit> {
@@ -2405,11 +2252,8 @@ impl EngineContext {
     }
 
     fn put_actor_handle_in_set(&mut self, handle: u32, set_file: &str) {
-        if let Some(id) = self.actor_handles.get(&handle).cloned() {
-            if let Some(actor) = self.actors.get(&id) {
-                let label = actor.name.clone();
-                self.put_actor_in_set(&id, &label, set_file);
-            }
+        if let Some((id, label)) = self.actors.actor_identity_by_handle(handle) {
+            self.put_actor_in_set(&id, &label, set_file);
         }
     }
 
@@ -2424,20 +2268,20 @@ impl EngineContext {
     fn snapshot_state(&self) -> geometry_export::SnapshotState {
         geometry_export::SnapshotState {
             current_set: self.current_set.clone(),
-            selected_actor: self.selected_actor.clone(),
+            selected_actor: self.actors.selected_actor_id().map(|id| id.to_string()),
             voice_effect: self.voice_effect.clone(),
             loaded_sets: self.loaded_sets.clone(),
             current_setups: self.current_setups.clone(),
             available_sets: self.available_sets.clone(),
             set_geometry: self.set_geometry.clone(),
             sector_states: self.sector_states.clone(),
-            actors: self.actors.clone(),
+            actors: self.actors.clone_map(),
             objects: self.objects.clone(),
-            actor_handles: self.actor_handles.clone(),
+            actor_handles: self.actors.clone_handles(),
             visible_objects: self.visible_objects.clone(),
             hotlist_handles: self.hotlist_handles.clone(),
-            inventory: self.inventory.clone(),
-            inventory_rooms: self.inventory_rooms.clone(),
+            inventory: self.inventory.clone_items(),
+            inventory_rooms: self.inventory.clone_rooms(),
             commentary: self.commentary.clone(),
             cut_scene_stack: self.cut_scene_stack.clone(),
             music: self.music.clone(),
@@ -7247,7 +7091,11 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
     }
     println!(
         "  Selected actor: {}",
-        state.selected_actor.as_deref().unwrap_or("<none>")
+        state
+            .actors
+            .selected_actor_id()
+            .map(|id| id.as_str())
+            .unwrap_or("<none>")
     );
     if let Some(effect) = &state.voice_effect {
         println!("  Voice effect: {}", effect);
@@ -7379,8 +7227,8 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
             }
         }
     }
-    if !state.inventory.is_empty() {
-        let mut items: Vec<_> = state.inventory.iter().collect();
+    if !state.inventory.items().is_empty() {
+        let mut items: Vec<_> = state.inventory.items().iter().collect();
         items.sort();
         let display = items
             .iter()
@@ -7389,8 +7237,8 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
             .join(", ");
         println!("  Inventory: {}", display);
     }
-    if !state.inventory_rooms.is_empty() {
-        let mut rooms: Vec<_> = state.inventory_rooms.iter().collect();
+    if !state.inventory.rooms().is_empty() {
+        let mut rooms: Vec<_> = state.inventory.rooms().iter().collect();
         rooms.sort();
         let display = rooms
             .iter()
