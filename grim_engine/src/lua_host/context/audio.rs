@@ -970,6 +970,29 @@ pub(super) struct AudioRuntimeAdapter<'a> {
     events: &'a mut Vec<String>,
 }
 
+/// Read-only access to the audio runtime, used to surface state without exposing internals.
+pub(super) struct AudioRuntimeView<'a> {
+    runtime: &'a AudioRuntime,
+}
+
+impl<'a> AudioRuntimeView<'a> {
+    pub(super) fn new(runtime: &'a AudioRuntime) -> Self {
+        Self { runtime }
+    }
+
+    pub(super) fn music(&self) -> &MusicState {
+        self.runtime.music()
+    }
+
+    pub(super) fn sfx(&self) -> &SfxState {
+        self.runtime.sfx()
+    }
+
+    pub(super) fn get_sound_param(&self, numeric: i64, param: i32) -> Option<i32> {
+        self.runtime.get_sound_param(numeric, param)
+    }
+}
+
 impl<'a> AudioRuntimeAdapter<'a> {
     pub(super) fn new(runtime: &'a mut AudioRuntime, events: &'a mut Vec<String>) -> Self {
         Self { runtime, events }

@@ -19,18 +19,20 @@ mod sets;
 use achievements::{AchievementRuntime, AchievementRuntimeAdapter, AchievementRuntimeView};
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
-use audio::{AudioRuntime, AudioRuntimeAdapter, MusicState, SfxState};
+use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView, MusicState, SfxState};
 use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
 };
 use geometry::SectorHit;
 use inventory::{InventoryRuntimeAdapter, InventoryRuntimeView, InventoryState};
-use menus::{MenuRegistry, MenuState};
+use menus::{MenuRegistry, MenuRegistryView, MenuState};
 use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
-use pause::{PauseLabel, PauseState};
+use pause::{PauseLabel, PauseRuntimeView, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeView};
-use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot};
+use sets::{
+    SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot, SetRuntimeView,
+};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, install_globals,
@@ -166,6 +168,18 @@ impl EngineContext {
         AudioRuntimeAdapter::new(&mut self.audio, &mut self.events)
     }
 
+    fn audio_view(&self) -> AudioRuntimeView<'_> {
+        AudioRuntimeView::new(&self.audio)
+    }
+
+    fn set_view(&self) -> SetRuntimeView<'_> {
+        SetRuntimeView::new(&self.sets)
+    }
+
+    fn menu_view(&self) -> MenuRegistryView<'_> {
+        MenuRegistryView::new(&self.menus)
+    }
+
     fn object_runtime(&mut self) -> ObjectRuntimeAdapter<'_> {
         ObjectRuntimeAdapter::new(
             &mut self.objects,
@@ -225,8 +239,8 @@ impl EngineContext {
         self.events.push(event.into());
     }
 
-    pub(super) fn pause_state(&self) -> &PauseState {
-        &self.pause
+    fn pause_view(&self) -> PauseRuntimeView<'_> {
+        PauseRuntimeView::new(&self.pause)
     }
 
     pub(super) fn handle_pause_request(&mut self, label: PauseLabel, active: bool) {
@@ -237,7 +251,7 @@ impl EngineContext {
 
     fn push_cut_scene(&mut self, label: Option<String>, flags: Vec<String>) {
         let set_file = self
-            .sets
+            .set_view()
             .current_set()
             .map(|snapshot| snapshot.set_file.clone());
         let sector_hit = set_file.as_ref().and_then(|_| {
@@ -396,15 +410,7 @@ impl EngineContext {
     }
 
     fn get_sound_param(&self, numeric: i64, param: i32) -> Option<i32> {
-        self.audio.get_sound_param(numeric, param)
-    }
-
-    fn music_state(&self) -> &MusicState {
-        self.audio.music()
-    }
-
-    fn sfx_state(&self) -> &SfxState {
-        self.audio.sfx()
+        self.audio_view().get_sound_param(numeric, param)
     }
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
@@ -532,15 +538,15 @@ impl EngineContext {
     }
 
     fn is_sector_active(&self, set_file: &str, sector_name: &str) -> bool {
-        self.sets.is_sector_active(set_file, sector_name)
+        self.set_view().is_sector_active(set_file, sector_name)
     }
 
     fn record_current_setup(&mut self, set_file: &str, setup: i32) {
-        self.sets.record_current_setup(set_file, setup);
+        self.set_runtime().record_current_setup(set_file, setup);
     }
 
     fn current_setup_for(&self, set_file: &str) -> Option<i32> {
-        self.sets.current_setup_for(set_file)
+        self.set_view().current_setup_for(set_file)
     }
 
     fn set_actor_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
@@ -749,7 +755,10 @@ impl EngineContext {
     }
 
     fn visible_object_handles(&self) -> Vec<i64> {
-        let current = self.sets.current_set().map(|set| set.set_file.as_str());
+        let sets = self.set_view();
+        let current = sets
+            .current_set()
+            .map(|set| set.set_file.as_str());
         self.objects
             .visible_handles(current, |set, sector| self.is_sector_active(set, sector))
     }
@@ -912,7 +921,9 @@ impl EngineContext {
             available_sets,
             set_geometry,
             sector_states,
-        } = self.sets.snapshot();
+        } = self.set_view().snapshot();
+        let music = self.audio_view().music().clone();
+        let sfx = self.audio_view().sfx().clone();
         geometry_export::SnapshotState {
             current_set,
             selected_actor: self.actors.selected_actor_id().map(|id| id.to_string()),
@@ -931,8 +942,8 @@ impl EngineContext {
             inventory_rooms: self.inventory_view().clone_rooms(),
             commentary: self.cutscene_view().commentary().cloned(),
             cut_scene_stack: self.cutscene_view().cut_scene_stack().to_vec(),
-            music: self.audio.music().clone(),
-            sfx: self.audio.sfx().clone(),
+            music,
+            sfx,
             events: self.events.clone(),
         }
     }
@@ -1100,7 +1111,11 @@ mod tests {
 
         {
             let guard = context.borrow();
-            let state = guard.menus.get("menu_common").expect("state").borrow();
+            let state = guard
+                .menu_view()
+                .get("menu_common")
+                .expect("state")
+                .borrow();
             assert!(state.visible, "menu state should mark visible");
         }
         assert!(menu.get::<_, bool>("is_visible").unwrap_or(false));
@@ -1111,7 +1126,11 @@ mod tests {
         {
             let guard = context.borrow();
             {
-                let state = guard.menus.get("menu_common").expect("state").borrow();
+                let state = guard
+                    .menu_view()
+                    .get("menu_common")
+                    .expect("state")
+                    .borrow();
                 assert!(!state.visible, "menu state should mark hidden");
             }
             assert!(guard.events.iter().any(|event| event == "menu_common.show"));
@@ -1146,7 +1165,8 @@ mod tests {
                 .iter()
                 .any(|e| e == "menu_common.auto_freeze on"));
 
-            let history = &guard.pause_state().history;
+            let pause = guard.pause_view();
+            let history = pause.history();
             assert_eq!(history.len(), 2);
             assert_eq!(
                 history[0],
@@ -1163,7 +1183,7 @@ mod tests {
                 }
             );
             assert!(
-                !guard.pause_state().active,
+                !pause.active(),
                 "auto-freeze should return game to unpaused state"
             );
         }
@@ -1310,7 +1330,8 @@ mod tests {
 
         ctx.play_music("intro".to_string(), vec!["loop=true".to_string()]);
         assert_eq!(
-            ctx.music_state()
+            ctx.audio_view()
+                .music()
                 .current
                 .as_ref()
                 .map(|cue| cue.name.as_str()),
@@ -1318,13 +1339,13 @@ mod tests {
         );
 
         ctx.stop_music(Some("immediate".to_string()));
-        assert!(ctx.music_state().current.is_none());
+        assert!(ctx.audio_view().music().current.is_none());
 
         let handle = ctx.play_sound_effect("doorbell".to_string(), Vec::new());
-        assert!(ctx.sfx_state().active.contains_key(&handle));
+        assert!(ctx.audio_view().sfx().active.contains_key(&handle));
 
         ctx.stop_sound_effect(Some(handle.clone()));
-        assert!(!ctx.sfx_state().active.contains_key(&handle));
+        assert!(!ctx.audio_view().sfx().active.contains_key(&handle));
 
         let events = callback.events();
         assert_eq!(
@@ -1338,22 +1359,26 @@ mod tests {
         );
 
         assert!(ctx
-            .music_state()
+            .audio_view()
+            .music()
             .history
             .iter()
             .any(|entry| entry.starts_with("play intro")));
         assert!(ctx
-            .music_state()
+            .audio_view()
+            .music()
             .history
             .iter()
             .any(|entry| entry == "stop immediate"));
         assert!(ctx
-            .sfx_state()
+            .audio_view()
+            .sfx()
             .history
             .iter()
             .any(|entry| entry.starts_with("sfx.play doorbell")));
         assert!(ctx
-            .sfx_state()
+            .audio_view()
+            .sfx()
             .history
             .iter()
             .any(|entry| entry.starts_with("sfx.stop")));
@@ -1420,54 +1445,63 @@ mod tests {
         let mut ctx = make_context();
         ctx.play_music("intro".to_string(), vec!["loop=true".to_string()]);
         assert_eq!(
-            ctx.music_state()
+            ctx.audio_view()
+                .music()
                 .current
                 .as_ref()
                 .map(|cue| cue.name.as_str()),
             Some("intro")
         );
         assert!(ctx
-            .music_state()
+            .audio_view()
+            .music()
             .history
             .last()
             .expect("music history entry")
             .starts_with("play intro"));
 
         ctx.queue_music("next".to_string(), Vec::new());
-        assert_eq!(ctx.music_state().queued.len(), 1);
+        assert_eq!(ctx.audio_view().music().queued.len(), 1);
 
         ctx.pause_music();
-        assert!(ctx.music_state().paused);
+        assert!(ctx.audio_view().music().paused);
         ctx.resume_music();
-        assert!(!ctx.music_state().paused);
+        assert!(!ctx.audio_view().music().paused);
 
         ctx.set_music_state(Some("office".to_string()));
-        assert_eq!(ctx.music_state().current_state.as_deref(), Some("office"));
+        assert_eq!(
+            ctx.audio_view().music().current_state.as_deref(),
+            Some("office")
+        );
         ctx.push_music_state(Some("alert".to_string()));
         assert_eq!(
-            ctx.music_state().state_stack.last().map(|s| s.as_str()),
+            ctx.audio_view()
+                .music()
+                .state_stack
+                .last()
+                .map(|s| s.as_str()),
             Some("alert")
         );
         ctx.pop_music_state();
-        assert!(ctx.music_state().state_stack.is_empty());
+        assert!(ctx.audio_view().music().state_stack.is_empty());
 
         ctx.stop_music(Some("immediate".to_string()));
-        assert!(ctx.music_state().current.is_none());
+        assert!(ctx.audio_view().music().current.is_none());
     }
 
     #[test]
     fn sfx_state_registers_and_clears_instances() {
         let mut ctx = make_context();
         let handle = ctx.play_sound_effect("door_knock".to_string(), vec!["loop=0".to_string()]);
-        assert!(ctx.sfx_state().active.contains_key(&handle));
+        assert!(ctx.audio_view().sfx().active.contains_key(&handle));
         ctx.stop_sound_effect(Some(handle.clone()));
-        assert!(!ctx.sfx_state().active.contains_key(&handle));
+        assert!(!ctx.audio_view().sfx().active.contains_key(&handle));
 
         ctx.play_sound_effect("ambient".to_string(), Vec::new());
         ctx.play_sound_effect("buzz".to_string(), Vec::new());
-        assert!(!ctx.sfx_state().active.is_empty());
+        assert!(!ctx.audio_view().sfx().active.is_empty());
         ctx.stop_sound_effect(None);
-        assert!(ctx.sfx_state().active.is_empty());
+        assert!(ctx.audio_view().sfx().active.is_empty());
     }
 
     #[test]

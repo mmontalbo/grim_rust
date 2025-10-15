@@ -24,6 +24,11 @@ pub(super) struct SetRuntimeAdapter<'a> {
     events: &'a mut Vec<String>,
 }
 
+/// Exposes read-only queries on the set runtime.
+pub(super) struct SetRuntimeView<'a> {
+    runtime: &'a SetRuntime,
+}
+
 impl<'a> SetRuntimeAdapter<'a> {
     pub(super) fn new(runtime: &'a mut SetRuntime, events: &'a mut Vec<String>) -> Self {
         Self { runtime, events }
@@ -92,6 +97,32 @@ impl<'a> SetRuntimeAdapter<'a> {
         }
 
         result
+    }
+
+    pub(super) fn record_current_setup(&mut self, set_file: &str, setup: i32) {
+        self.runtime.record_current_setup(set_file, setup);
+    }
+}
+
+impl<'a> SetRuntimeView<'a> {
+    pub(super) fn new(runtime: &'a SetRuntime) -> Self {
+        Self { runtime }
+    }
+
+    pub(super) fn current_set(&self) -> Option<&SetSnapshot> {
+        self.runtime.current_set()
+    }
+
+    pub(super) fn is_sector_active(&self, set_file: &str, sector_name: &str) -> bool {
+        self.runtime.is_sector_active(set_file, sector_name)
+    }
+
+    pub(super) fn current_setup_for(&self, set_file: &str) -> Option<i32> {
+        self.runtime.current_setup_for(set_file)
+    }
+
+    pub(super) fn snapshot(&self) -> SetRuntimeSnapshot {
+        self.runtime.snapshot()
     }
 }
 

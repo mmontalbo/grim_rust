@@ -40,6 +40,26 @@ impl PauseState {
     }
 }
 
+/// Read-only access to pause state for callers that only need inspection.
+pub(super) struct PauseRuntimeView<'a> {
+    state: &'a PauseState,
+}
+
+impl<'a> PauseRuntimeView<'a> {
+    pub(super) fn new(state: &'a PauseState) -> Self {
+        Self { state }
+    }
+
+    pub(super) fn active(&self) -> bool {
+        self.state.active
+    }
+
+    #[cfg(test)]
+    pub(super) fn history(&self) -> &'a [PauseEvent] {
+        &self.state.history
+    }
+}
+
 pub(crate) fn install_game_pauser(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
     let game_pauser = lua.create_table()?;

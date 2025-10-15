@@ -738,7 +738,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
             let description = describe_value(&value);
             if let Some(setup) = value_to_i32(&value) {
                 let mut ctx = make_setup_ctx.borrow_mut();
-                if let Some(current) = ctx.sets.current_set().cloned() {
+                if let Some(current) = ctx.set_view().current_set().cloned() {
                     let file = current.set_file.clone();
                     ctx.record_current_setup(&file, setup);
                     ctx.log_event(format!("set.setup.make {file} -> {setup}"));
@@ -763,7 +763,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
                 if let Some(set_file) = set_file_opt.clone() {
                     let setup = ctx.current_setup_for(&set_file).unwrap_or(0);
                     (set_file, setup)
-                } else if let Some(current) = ctx.sets.current_set() {
+                } else if let Some(current) = ctx.set_view().current_set() {
                     let file = current.set_file.clone();
                     let setup = ctx.current_setup_for(&file).unwrap_or(0);
                     (file, setup)
@@ -3886,7 +3886,7 @@ pub(crate) fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContex
 
 pub(crate) fn dump_runtime_summary(state: &EngineContext) {
     println!("Lua runtime summary:");
-    let sets_snapshot = state.sets.snapshot();
+    let sets_snapshot = state.set_view().snapshot();
     match &sets_snapshot.current_set {
         Some(set) => {
             let display = set.display_name.as_deref().unwrap_or(&set.variable_name);
@@ -3905,7 +3905,7 @@ pub(crate) fn dump_runtime_summary(state: &EngineContext) {
     if let Some(effect) = &state.voice_effect {
         println!("  Voice effect: {}", effect);
     }
-    let music = state.music_state();
+    let music = state.audio_view().music().clone();
     if let Some(current) = &music.current {
         if current.parameters.is_empty() {
             println!("  Music playing: {}", current.name);
@@ -3930,7 +3930,7 @@ pub(crate) fn dump_runtime_summary(state: &EngineContext) {
     if music.paused {
         println!("  Music paused");
     }
-    if state.pause_state().active {
+    if state.pause_view().active() {
         println!("  Game paused");
     }
     if let Some(state_name) = &music.current_state {
@@ -3950,7 +3950,7 @@ pub(crate) fn dump_runtime_summary(state: &EngineContext) {
     if let Some(volume) = music.volume {
         println!("  Music volume: {:.3}", volume);
     }
-    let sfx = state.sfx_state();
+    let sfx = state.audio_view().sfx().clone();
     if !sfx.active.is_empty() {
         println!("  Active SFX:");
         for instance in sfx.active.values() {
@@ -4105,9 +4105,10 @@ pub(crate) fn dump_runtime_summary(state: &EngineContext) {
             println!("    - {} (#{}{})", info.display_name(), info.handle, suffix);
         }
     }
-    if !state.menus.is_empty() {
+    let menus = state.menu_view();
+    if !menus.is_empty() {
         println!("  Menus:");
-        for (name, menu_state) in state.menus.iter() {
+        for (name, menu_state) in menus.iter() {
             let snapshot = menu_state.borrow();
             let visibility = if snapshot.visible {
                 "visible"

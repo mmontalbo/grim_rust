@@ -36,17 +36,38 @@ impl MenuRegistry {
             .clone()
     }
 
-    #[cfg(test)]
-    pub(super) fn get(&self, name: &str) -> Option<&Rc<RefCell<MenuState>>> {
-        self.states.get(name)
-    }
-
     pub(super) fn is_empty(&self) -> bool {
         self.states.is_empty()
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &Rc<RefCell<MenuState>>)> {
         self.states.iter()
+    }
+}
+
+/// Read-only access to menu registry state so call sites stay decoupled from storage details.
+pub(super) struct MenuRegistryView<'a> {
+    registry: &'a MenuRegistry,
+}
+
+impl<'a> MenuRegistryView<'a> {
+    pub(super) fn new(registry: &'a MenuRegistry) -> Self {
+        Self { registry }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.registry.is_empty()
+    }
+
+    pub(super) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&'a String, &'a Rc<RefCell<MenuState>>)> + 'a {
+        self.registry.iter()
+    }
+
+    #[cfg(test)]
+    pub(super) fn get(&self, name: &str) -> Option<&'a Rc<RefCell<MenuState>>> {
+        self.registry.states.get(name)
     }
 }
 
