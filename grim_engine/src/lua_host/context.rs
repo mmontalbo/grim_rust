@@ -19,7 +19,9 @@ mod sets;
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
 use audio::{AudioRuntime, AudioRuntimeAdapter, MusicState, SfxState};
-use cutscenes::{CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, DialogState};
+use cutscenes::{
+    CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
+};
 use geometry::SectorHit;
 use inventory::InventoryState;
 use menus::{MenuRegistry, MenuState};
@@ -182,6 +184,10 @@ impl EngineContext {
         CutsceneRuntimeAdapter::new(&mut self.cutscenes, &mut self.events)
     }
 
+    fn cutscene_view(&self) -> CutsceneRuntimeView<'_> {
+        CutsceneRuntimeView::new(&self.cutscenes)
+    }
+
     fn script_runtime(&mut self) -> ScriptRuntimeAdapter<'_> {
         ScriptRuntimeAdapter::new(&mut self.scripts, &mut self.events)
     }
@@ -266,10 +272,13 @@ impl EngineContext {
     }
 
     fn finish_dialog_line(&mut self, expected_actor: Option<&str>) -> Option<DialogState> {
-        let should_finish = match (self.cutscenes.active_dialog(), expected_actor) {
-            (None, _) => false,
-            (Some(state), Some(expected)) => state.actor_id.eq_ignore_ascii_case(expected),
-            (Some(_), None) => true,
+        let should_finish = {
+            let view = self.cutscene_view();
+            match (view.active_dialog(), expected_actor) {
+                (None, _) => false,
+                (Some(state), Some(expected)) => state.actor_id.eq_ignore_ascii_case(expected),
+                (Some(_), None) => true,
+            }
         };
         if !should_finish {
             return None;
@@ -288,11 +297,12 @@ impl EngineContext {
     }
 
     pub(super) fn is_message_active(&self) -> bool {
-        self.cutscenes.is_message_active()
+        self.cutscene_view().is_message_active()
     }
 
-    fn speaking_actor(&self) -> Option<&str> {
-        self.cutscenes.speaking_actor()
+    fn speaking_actor(&self) -> Option<String> {
+        let view = self.cutscene_view();
+        view.speaking_actor().map(|value| value.to_string())
     }
 
     fn play_music(&mut self, track: String, params: Vec<String>) {
@@ -926,8 +936,8 @@ impl EngineContext {
             hotlist_handles: self.objects.hotlist_handles().to_vec(),
             inventory: self.inventory.clone_items(),
             inventory_rooms: self.inventory.clone_rooms(),
-            commentary: self.cutscenes.clone_commentary(),
-            cut_scene_stack: self.cutscenes.clone_cut_scene_stack(),
+            commentary: self.cutscene_view().commentary().cloned(),
+            cut_scene_stack: self.cutscene_view().cut_scene_stack().to_vec(),
             music: self.audio.music().clone(),
             sfx: self.audio.sfx().clone(),
             events: self.events.clone(),

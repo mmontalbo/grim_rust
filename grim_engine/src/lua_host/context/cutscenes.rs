@@ -219,16 +219,8 @@ impl CutsceneRuntime {
         self.commentary.as_ref()
     }
 
-    pub(super) fn clone_commentary(&self) -> Option<CommentaryRecord> {
-        self.commentary.clone()
-    }
-
     pub(super) fn cut_scene_stack(&self) -> &[CutSceneRecord] {
         &self.cut_scene_stack
-    }
-
-    pub(super) fn clone_cut_scene_stack(&self) -> Vec<CutSceneRecord> {
-        self.cut_scene_stack.clone()
     }
 
     pub(super) fn set_dialog_state(&mut self, state: DialogState) {
@@ -263,6 +255,11 @@ impl CutsceneRuntime {
 pub(super) struct CutsceneRuntimeAdapter<'a> {
     runtime: &'a mut CutsceneRuntime,
     events: &'a mut Vec<String>,
+}
+
+/// Provides read-only accessors for cutscene state.
+pub(super) struct CutsceneRuntimeView<'a> {
+    runtime: &'a CutsceneRuntime,
 }
 
 impl<'a> CutsceneRuntimeAdapter<'a> {
@@ -337,5 +334,31 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
         {
             self.events.push(message);
         }
+    }
+}
+
+impl<'a> CutsceneRuntimeView<'a> {
+    pub(super) fn new(runtime: &'a CutsceneRuntime) -> Self {
+        Self { runtime }
+    }
+
+    pub(super) fn active_dialog(&self) -> Option<&DialogState> {
+        self.runtime.active_dialog()
+    }
+
+    pub(super) fn is_message_active(&self) -> bool {
+        self.runtime.is_message_active()
+    }
+
+    pub(super) fn speaking_actor(&self) -> Option<&str> {
+        self.runtime.speaking_actor()
+    }
+
+    pub(super) fn commentary(&self) -> Option<&CommentaryRecord> {
+        self.runtime.commentary()
+    }
+
+    pub(super) fn cut_scene_stack(&self) -> &[CutSceneRecord] {
+        self.runtime.cut_scene_stack()
     }
 }
