@@ -83,6 +83,10 @@ def parse_args() -> argparse.Namespace:
 def format_message(component: str, summary: str, why: list[str], what: list[str]) -> str:
     root = Path(__file__).resolve().parent.parent
 
+    summary = summary.strip()
+    if summary and summary[0].isalpha():
+        summary = summary[0].lower() + summary[1:]
+
     if not why:
         raise ValueError("at least one --why entry is required")
     for item in why:

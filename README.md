@@ -39,6 +39,9 @@ flow and prototype modern tooling around it.
 - Run `tools/install_git_hooks.sh` once to install the shared `commit-msg` hook;
   it calls `tools/lint_commit.py` so commits without Why/What bullets are
   rejected instead of slipping into history.
+- When using `tools/format_commit.py`, run `git commit -F .git/COMMIT_EDITMSG`
+  (or set `GIT_EDITOR=true`) so Git skips launching an interactive editor inside
+  the CLI harness.
 - If the commit subject/Why/What spacing trips you up, run
   `git config commit.template tools/commit_template.txt` once—the template
   pre-populates the blank line and bullet blocks so you only fill in the text.
