@@ -18,6 +18,79 @@ pub(crate) struct SetRuntime {
     lab_collection: Option<Rc<LabCollection>>,
 }
 
+/// Couples set runtime mutations with the engine event log.
+pub(super) struct SetRuntimeAdapter<'a> {
+    runtime: &'a mut SetRuntime,
+    events: &'a mut Vec<String>,
+}
+
+impl<'a> SetRuntimeAdapter<'a> {
+    pub(super) fn new(runtime: &'a mut SetRuntime, events: &'a mut Vec<String>) -> Self {
+        Self { runtime, events }
+    }
+
+    pub(super) fn switch_to_set(&mut self, set_file: &str) -> &SetSnapshot {
+        let snapshot = self.runtime.switch_to_set(set_file);
+        self.events.push(format!("set.switch {set_file}"));
+        snapshot
+    }
+
+    pub(super) fn mark_set_loaded(&mut self, set_file: &str) {
+        let newly_loaded = self.runtime.mark_set_loaded(set_file);
+        if newly_loaded {
+            self.events.push(format!("set.load {set_file}"));
+        }
+        if let Some(message) = self.runtime.ensure_geometry_cached(set_file) {
+            self.events.push(message);
+        }
+    }
+
+    pub(super) fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
+        let (has_geometry, geometry_message) = self.runtime.ensure_sector_state_map(set_file);
+        if let Some(message) = geometry_message {
+            self.events.push(message);
+        }
+        has_geometry
+    }
+
+    pub(super) fn set_sector_active(
+        &mut self,
+        set_file_hint: Option<&str>,
+        sector_name: &str,
+        active: bool,
+    ) -> SectorToggleResult {
+        if let Some(candidate) = set_file_hint.filter(|value| !value.is_empty()) {
+            if let Some(message) = self.runtime.ensure_geometry_cached(candidate) {
+                self.events.push(message);
+            }
+        } else if let Some(current) = self.runtime.current_set().map(|set| set.set_file.clone()) {
+            if let Some(message) = self.runtime.ensure_geometry_cached(&current) {
+                self.events.push(message);
+            }
+        }
+
+        let result = self
+            .runtime
+            .set_sector_active(set_file_hint, sector_name, active);
+
+        let state = if active { "on" } else { "off" };
+        match &result {
+            SectorToggleResult::Applied { set_file, sector, .. } => {
+                self.events
+                    .push(format!("sector.active {set_file}:{sector} {state}"));
+            }
+            SectorToggleResult::NoChange { set_file, sector, .. } => {
+                self.events.push(format!(
+                    "sector.active {set_file}:{sector} already {state}"
+                ));
+            }
+            SectorToggleResult::NoSet => {}
+        }
+
+        result
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SetRuntimeSnapshot {
     pub(crate) current_set: Option<SetSnapshot>,
@@ -81,11 +154,7 @@ impl SetRuntime {
         }
     }
 
-    pub(crate) fn switch_to_set<'a>(
-        &'a mut self,
-        events: &mut Vec<String>,
-        set_file: &str,
-    ) -> &'a SetSnapshot {
+    pub(crate) fn switch_to_set<'a>(&'a mut self, set_file: &str) -> &'a SetSnapshot {
         let set_key = set_file.to_string();
         let (variable_name, display_name) = match self.available_sets.get(&set_key) {
             Some(descriptor) => (
@@ -100,7 +169,6 @@ impl SetRuntime {
             display_name,
         });
         self.current_setups.entry(set_key).or_insert(0);
-        events.push(format!("set.switch {set_file}"));
         self.current_set
             .as_ref()
             .expect("current set just assigned")
@@ -110,20 +178,13 @@ impl SetRuntime {
         self.current_set.as_ref()
     }
 
-    pub(crate) fn mark_set_loaded(&mut self, events: &mut Vec<String>, set_file: &str) {
-        if self.loaded_sets.insert(set_file.to_string()) {
-            events.push(format!("set.load {set_file}"));
-        }
-        self.ensure_geometry_loaded(events, set_file);
+    pub(crate) fn mark_set_loaded(&mut self, set_file: &str) -> bool {
+        self.loaded_sets.insert(set_file.to_string())
     }
 
-    pub(crate) fn ensure_sector_state_map(
-        &mut self,
-        events: &mut Vec<String>,
-        set_file: &str,
-    ) -> bool {
+    pub(crate) fn ensure_sector_state_map(&mut self, set_file: &str) -> (bool, Option<String>) {
+        let geometry_message = self.ensure_geometry_cached(set_file);
         if !self.sector_states.contains_key(set_file) {
-            self.ensure_geometry_loaded(events, set_file);
             let mut map = BTreeMap::new();
             if let Some(geometry) = self.set_geometry.get(set_file) {
                 for sector in &geometry.sectors {
@@ -140,12 +201,11 @@ impl SetRuntime {
                 }
             }
         }
-        self.set_geometry.contains_key(set_file)
+        (self.set_geometry.contains_key(set_file), geometry_message)
     }
 
     pub(crate) fn set_sector_active(
         &mut self,
-        events: &mut Vec<String>,
         set_file_hint: Option<&str>,
         sector_name: &str,
         active: bool,
@@ -158,7 +218,7 @@ impl SetRuntime {
             },
         };
 
-        let has_geometry = self.ensure_sector_state_map(events, &set_file);
+        let (has_geometry, _) = self.ensure_sector_state_map(&set_file);
         let canonical = self
             .canonical_sector_name(&set_file, sector_name)
             .unwrap_or_else(|| sector_name.to_string());
@@ -181,13 +241,8 @@ impl SetRuntime {
             .get_mut(&set_file)
             .expect("sector state map missing after ensure");
         let previous = states.insert(canonical.clone(), active);
-        let state = if active { "on" } else { "off" };
-
         let result = match previous {
             Some(prev) if prev == active => {
-                events.push(format!(
-                    "sector.active {set_file}:{canonical} already {state}"
-                ));
                 SectorToggleResult::NoChange {
                     set_file: set_file.clone(),
                     sector: canonical.clone(),
@@ -195,7 +250,6 @@ impl SetRuntime {
                 }
             }
             _ => {
-                events.push(format!("sector.active {set_file}:{canonical} {state}"));
                 SectorToggleResult::Applied {
                     set_file: set_file.clone(),
                     sector: canonical.clone(),
@@ -351,12 +405,12 @@ impl SetRuntime {
         self.set_geometry.insert(set_file.to_string(), geometry);
     }
 
-    fn ensure_geometry_loaded(&mut self, events: &mut Vec<String>, set_file: &str) {
+    pub(crate) fn ensure_geometry_cached(&mut self, set_file: &str) -> Option<String> {
         if self.set_geometry.contains_key(set_file) {
-            return;
+            return None;
         }
         let Some(collection) = &self.lab_collection else {
-            return;
+            return None;
         };
         match collection.find_entry(set_file) {
             Some((archive, entry)) => {
@@ -365,13 +419,8 @@ impl SetRuntime {
                     Ok(file) => {
                         let geometry = ParsedSetGeometry::from_set_file(file);
                         if geometry.has_geometry() {
-                            if self.verbose {
-                                events.push(format!(
-                                    "set.geometry {set_file} sectors={} setups={}",
-                                    geometry.sectors.len(),
-                                    geometry.setups.len()
-                                ));
-                            }
+                            let sector_count = geometry.sectors.len();
+                            let setup_count = geometry.setups.len();
                             self.sector_states
                                 .entry(set_file.to_string())
                                 .or_insert_with(|| {
@@ -382,6 +431,12 @@ impl SetRuntime {
                                     map
                                 });
                             self.set_geometry.insert(set_file.to_string(), geometry);
+                            if self.verbose {
+                                return Some(format!(
+                                    "set.geometry {set_file} sectors={} setups={}",
+                                    sector_count, setup_count
+                                ));
+                            }
                         } else if self.verbose {
                             eprintln!(
                                 "[grim_engine] info: {} contained no geometry data",
@@ -408,5 +463,6 @@ impl SetRuntime {
                 }
             }
         }
+        None
     }
 }

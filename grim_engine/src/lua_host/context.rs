@@ -25,7 +25,7 @@ use menus::{MenuRegistry, MenuState};
 use objects::{ObjectRuntime, ObjectSectorRef, ObjectSnapshot};
 use pause::{PauseLabel, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime};
-use sets::{SectorToggleResult, SetRuntime, SetRuntimeSnapshot};
+use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, install_globals,
@@ -158,6 +158,10 @@ impl EngineContext {
 
     fn actor_runtime(&mut self) -> ActorRuntime<'_> {
         ActorRuntime::new(&mut self.actors, &mut self.events)
+    }
+
+    fn set_runtime(&mut self) -> SetRuntimeAdapter<'_> {
+        SetRuntimeAdapter::new(&mut self.sets, &mut self.events)
     }
 
     fn audio_runtime(&mut self) -> AudioRuntimeAdapter<'_> {
@@ -444,7 +448,7 @@ impl EngineContext {
 
     fn switch_to_set(&mut self, set_file: &str) {
         {
-            self.sets.switch_to_set(&mut self.events, set_file);
+            self.set_runtime().switch_to_set(set_file);
         }
         if set_file.eq_ignore_ascii_case("mo.set") {
             let needs_pos = self
@@ -467,12 +471,11 @@ impl EngineContext {
     }
 
     fn mark_set_loaded(&mut self, set_file: &str) {
-        self.sets.mark_set_loaded(&mut self.events, set_file);
+        self.set_runtime().mark_set_loaded(set_file);
     }
 
     fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
-        self.sets
-            .ensure_sector_state_map(&mut self.events, set_file)
+        self.set_runtime().ensure_sector_state_map(set_file)
     }
 
     fn set_sector_active(
@@ -481,9 +484,9 @@ impl EngineContext {
         sector_name: &str,
         active: bool,
     ) -> SectorToggleResult {
-        let result =
-            self.sets
-                .set_sector_active(&mut self.events, set_file_hint, sector_name, active);
+        let result = self
+            .set_runtime()
+            .set_sector_active(set_file_hint, sector_name, active);
         if let SectorToggleResult::Applied {
             set_file, sector, ..
         }
