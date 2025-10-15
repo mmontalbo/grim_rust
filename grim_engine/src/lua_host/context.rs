@@ -14,7 +14,7 @@ mod objects;
 mod pause;
 mod scripts;
 
-use actors::{ActorSnapshot, ActorStore};
+use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
 use audio::{AudioRuntime, MusicState, SfxState};
 use cutscenes::{CommentaryRecord, CutsceneRuntime, DialogState};
@@ -199,6 +199,10 @@ impl EngineContext {
             set_geometry: BTreeMap::new(),
             sector_states: BTreeMap::new(),
         }
+    }
+
+    fn actor_runtime(&mut self) -> ActorRuntime<'_> {
+        ActorRuntime::new(&mut self.actors, &mut self.events)
     }
 
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
@@ -491,8 +495,7 @@ impl EngineContext {
     }
 
     fn select_actor(&mut self, id: &str, label: &str) {
-        self.actors.select_actor(id, label);
-        self.log_event(format!("actor.select {id}"));
+        self.actor_runtime().select_actor(id, label);
     }
 
     fn switch_to_set(&mut self, set_file: &str) {
@@ -727,35 +730,12 @@ impl EngineContext {
     }
 
     fn set_actor_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
-        let actor = self.ensure_actor_mut(id, label);
-        actor.costume = costume.clone();
-        match costume {
-            Some(ref name) => {
-                if let Some(slot) = actor.costume_stack.last_mut() {
-                    *slot = name.clone();
-                } else {
-                    actor.costume_stack.push(name.clone());
-                }
-                self.log_event(format!("actor.{id}.costume {name}"));
-            }
-            None => {
-                actor.costume_stack.clear();
-                self.log_event(format!("actor.{id}.costume <nil>"));
-            }
-        }
+        self.actor_runtime().set_actor_costume(id, label, costume);
     }
 
     fn set_actor_base_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
-        let actor = self.ensure_actor_mut(id, label);
-        actor.base_costume = costume.clone();
-        actor.costume_stack.clear();
-        match costume {
-            Some(ref name) => {
-                actor.costume_stack.push(name.clone());
-                self.log_event(format!("actor.{id}.base_costume {name}"));
-            }
-            None => self.log_event(format!("actor.{id}.base_costume <nil>")),
-        }
+        self.actor_runtime()
+            .set_actor_base_costume(id, label, costume);
     }
 
     pub(super) fn actor_costume(&self, id: &str) -> Option<&str> {
@@ -771,40 +751,11 @@ impl EngineContext {
     }
 
     fn push_actor_costume(&mut self, id: &str, label: &str, costume: String) -> usize {
-        let depth;
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.costume_stack.push(costume.clone());
-            actor.costume = Some(costume.clone());
-            depth = actor.costume_stack.len();
-        }
-        self.log_event(format!("actor.{id}.push_costume {costume} depth {depth}"));
-        depth
+        self.actor_runtime().push_actor_costume(id, label, costume)
     }
 
     fn pop_actor_costume(&mut self, id: &str, label: &str) -> Option<String> {
-        let mut removed: Option<String> = None;
-        let mut next: Option<String> = None;
-        let blocked;
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            if actor.costume_stack.len() <= 1 {
-                blocked = true;
-            } else {
-                blocked = false;
-                removed = actor.costume_stack.pop();
-                next = actor.costume_stack.last().cloned();
-                actor.costume = next.clone();
-            }
-        }
-        if blocked {
-            self.log_event(format!("actor.{id}.pop_costume blocked"));
-            None
-        } else {
-            let name = removed.as_deref().unwrap_or("<nil>").to_string();
-            self.log_event(format!("actor.{id}.pop_costume {name}"));
-            next
-        }
+        self.actor_runtime().pop_actor_costume(id, label)
     }
 
     fn set_actor_current_chore(
@@ -814,15 +765,8 @@ impl EngineContext {
         chore: Option<String>,
         costume: Option<String>,
     ) {
-        let (chore_label, costume_label);
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.current_chore = chore.clone();
-            actor.last_chore_costume = costume.clone();
-            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
-            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
-        }
-        self.log_event(format!("actor.{id}.chore {chore_label} {costume_label}"));
+        self.actor_runtime()
+            .set_actor_current_chore(id, label, chore, costume);
     }
 
     fn set_actor_walk_chore(
@@ -832,16 +776,8 @@ impl EngineContext {
         chore: Option<String>,
         costume: Option<String>,
     ) {
-        let (chore_label, costume_label);
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.walk_chore = chore.clone();
-            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
-            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
-        }
-        self.log_event(format!(
-            "actor.{id}.walk_chore {chore_label} {costume_label}"
-        ));
+        self.actor_runtime()
+            .set_actor_walk_chore(id, label, chore, costume);
     }
 
     fn set_actor_talk_chore(
@@ -852,18 +788,8 @@ impl EngineContext {
         drop: Option<String>,
         costume: Option<String>,
     ) {
-        let (chore_label, drop_label, costume_label);
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.talk_chore = chore.clone();
-            actor.talk_drop_chore = drop.clone();
-            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
-            drop_label = drop.as_deref().unwrap_or("<nil>").to_string();
-            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
-        }
-        self.log_event(format!(
-            "actor.{id}.talk_chore {chore_label} drop {drop_label} costume {costume_label}"
-        ));
+        self.actor_runtime()
+            .set_actor_talk_chore(id, label, chore, drop, costume);
     }
 
     fn set_actor_mumble_chore(
@@ -873,128 +799,60 @@ impl EngineContext {
         chore: Option<String>,
         costume: Option<String>,
     ) {
-        let (chore_label, costume_label);
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.mumble_chore = chore.clone();
-            chore_label = chore.as_deref().unwrap_or("<nil>").to_string();
-            costume_label = costume.as_deref().unwrap_or("<nil>").to_string();
-        }
-        self.log_event(format!(
-            "actor.{id}.mumble_chore {chore_label} costume {costume_label}"
-        ));
+        self.actor_runtime()
+            .set_actor_mumble_chore(id, label, chore, costume);
     }
 
     fn set_actor_talk_color(&mut self, id: &str, label: &str, color: Option<String>) {
-        let display;
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.talk_color = color.clone();
-            display = color.as_deref().unwrap_or("<nil>").to_string();
-        }
-        self.log_event(format!("actor.{id}.talk_color {display}"));
+        self.actor_runtime().set_actor_talk_color(id, label, color);
     }
 
     fn set_actor_head_target(&mut self, id: &str, label: &str, target: Option<String>) {
-        let display;
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.head_target = target.clone();
-            display = target.as_deref().unwrap_or("<nil>").to_string();
-        }
-        self.log_event(format!("actor.{id}.head_target {display}"));
+        self.actor_runtime()
+            .set_actor_head_target(id, label, target);
     }
 
     fn set_actor_head_look_rate(&mut self, id: &str, label: &str, rate: Option<f32>) {
-        let snapshot;
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.head_look_rate = rate;
-            snapshot = actor.head_look_rate;
-        }
-        match snapshot {
-            Some(value) => self.log_event(format!("actor.{id}.head_rate {value:.3}")),
-            None => self.log_event(format!("actor.{id}.head_rate <nil>")),
-        }
+        self.actor_runtime()
+            .set_actor_head_look_rate(id, label, rate);
     }
 
     fn set_actor_collision_mode(&mut self, id: &str, label: &str, mode: Option<String>) {
-        let display;
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.collision_mode = mode.clone();
-            display = mode.as_deref().unwrap_or("<nil>").to_string();
-        }
-        self.log_event(format!("actor.{id}.collision_mode {display}"));
+        self.actor_runtime()
+            .set_actor_collision_mode(id, label, mode);
     }
 
     fn set_actor_ignore_boxes(&mut self, id: &str, label: &str, ignore: bool) {
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.ignoring_boxes = ignore;
-        }
-        self.log_event(format!("actor.{id}.ignore_boxes {}", ignore));
+        self.actor_runtime()
+            .set_actor_ignore_boxes(id, label, ignore);
     }
 
     fn put_actor_in_set(&mut self, id: &str, label: &str, set_file: &str) {
-        let actor = self.ensure_actor_mut(id, label);
-        actor.current_set = Some(set_file.to_string());
-        self.log_event(format!("actor.{id}.enter {set_file}"));
+        self.actor_runtime().put_actor_in_set(id, label, set_file);
     }
 
     fn actor_at_interest(&mut self, id: &str, label: &str) {
-        let actor = self.ensure_actor_mut(id, label);
-        actor.at_interest = true;
-        self.log_event(format!("actor.{id}.at_interest"));
+        self.actor_runtime().actor_at_interest(id, label);
     }
 
     fn set_actor_position(&mut self, id: &str, label: &str, position: Vec3) {
-        let handle = {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.position = Some(position);
-            actor.handle
-        };
-        self.log_event(format!(
-            "actor.{id}.pos {:.3},{:.3},{:.3}",
-            position.x, position.y, position.z
-        ));
+        let handle = self.actor_runtime().set_actor_position(id, label, position);
         if handle != 0 {
             self.update_object_position_for_actor(handle, position);
         }
     }
 
     fn set_actor_rotation(&mut self, id: &str, label: &str, rotation: Vec3) {
-        let _handle = {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.rotation = Some(rotation);
-            actor.handle
-        };
-        self.log_event(format!(
-            "actor.{id}.rot {:.3},{:.3},{:.3}",
-            rotation.x, rotation.y, rotation.z
-        ));
+        self.actor_runtime().set_actor_rotation(id, label, rotation);
     }
 
     fn set_actor_scale(&mut self, id: &str, label: &str, scale: Option<f32>) {
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.scale = scale;
-        }
-        let display = scale
-            .map(|value| format!("{value:.3}"))
-            .unwrap_or_else(|| "<nil>".to_string());
-        self.log_event(format!("actor.{id}.scale {display}"));
+        self.actor_runtime().set_actor_scale(id, label, scale);
     }
 
     fn set_actor_collision_scale(&mut self, id: &str, label: &str, scale: Option<f32>) {
-        {
-            let actor = self.ensure_actor_mut(id, label);
-            actor.collision_scale = scale;
-        }
-        let display = scale
-            .map(|value| format!("{value:.3}"))
-            .unwrap_or_else(|| "<nil>".to_string());
-        self.log_event(format!("actor.{id}.collision_scale {display}"));
+        self.actor_runtime()
+            .set_actor_collision_scale(id, label, scale);
     }
 
     pub(super) fn walk_actor_vector(
@@ -1089,8 +947,7 @@ impl EngineContext {
     }
 
     fn record_sector_hit(&mut self, id: &str, label: &str, hit: SectorHit) {
-        let actor = self.ensure_actor_mut(id, label);
-        actor.sectors.insert(hit.kind.clone(), hit);
+        self.actor_runtime().record_sector_hit(id, label, hit);
     }
 
     fn default_sector_hit(&self, actor_id: &str, requested_kind: Option<&str>) -> SectorHit {
