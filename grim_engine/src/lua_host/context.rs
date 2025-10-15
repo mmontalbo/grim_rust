@@ -8,6 +8,7 @@ mod bindings;
 mod cutscenes;
 mod geometry;
 mod geometry_export;
+mod movement;
 mod inventory;
 mod menus;
 mod objects;
@@ -26,6 +27,7 @@ use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
 use pause::{PauseLabel, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime};
 use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot};
+use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, install_globals,
@@ -37,7 +39,6 @@ use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
 use grim_analysis::resources::ResourceGraph;
-use grim_formats::SectorKind as SetSectorKind;
 use mlua::{Lua, RegistryKey, Result as LuaResult};
 
 #[derive(Debug, Default, Clone)]
@@ -179,6 +180,20 @@ impl EngineContext {
 
     fn cutscene_runtime(&mut self) -> CutsceneRuntimeAdapter<'_> {
         CutsceneRuntimeAdapter::new(&mut self.cutscenes, &mut self.events)
+    }
+
+    fn movement_runtime(&mut self) -> MovementRuntimeAdapter<'_> {
+        MovementRuntimeAdapter::new(
+            &mut self.actors,
+            &mut self.sets,
+            &mut self.objects,
+            &mut self.cutscenes,
+            &mut self.events,
+        )
+    }
+
+    fn movement_view(&self) -> MovementRuntimeView<'_> {
+        MovementRuntimeView::new(&self.actors, &self.sets, &self.objects)
     }
 
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
@@ -619,10 +634,8 @@ impl EngineContext {
     }
 
     fn set_actor_position(&mut self, id: &str, label: &str, position: Vec3) {
-        let handle = self.actor_runtime().set_actor_position(id, label, position);
-        if handle != 0 {
-            self.update_object_position_for_actor(handle, position);
-        }
+        self.movement_runtime()
+            .set_actor_position(id, label, position);
     }
 
     fn set_actor_rotation(&mut self, id: &str, label: &str, rotation: Vec3) {
@@ -645,71 +658,8 @@ impl EngineContext {
         adjust_y: Option<f32>,
         heading_offset: Option<f32>,
     ) -> bool {
-        let Some(actor_id) = self.actors.actor_id_for_handle(handle).cloned() else {
-            self.log_event(format!("walk.delta unknown_handle #{handle}"));
-            return false;
-        };
-        let (label, current_set, current_position) = {
-            let snapshot = self.actors.get(&actor_id).cloned().unwrap_or_else(|| {
-                let mut actor = ActorSnapshot::default();
-                actor.name = actor_id.clone();
-                actor
-            });
-            (
-                snapshot.name,
-                snapshot
-                    .current_set
-                    .or_else(|| self.sets.current_set().map(|set| set.set_file.clone())),
-                snapshot.position.unwrap_or(MANNY_OFFICE_SEED_POS),
-            )
-        };
-
-        self.log_event(format!(
-            "walk.vector {} {:.4},{:.4}",
-            label, delta.x, delta.y
-        ));
-
-        let mut next = Vec3 {
-            x: current_position.x + delta.x,
-            y: current_position.y + delta.y,
-            z: current_position.z + delta.z,
-        };
-        if let Some(offset) = adjust_y {
-            next.y += offset;
-        }
-
-        if let Some(ref set_file) = current_set {
-            if self.sets.set_geometry().contains_key(set_file)
-                && !self.point_in_active_walk(set_file, (next.x, next.y))
-            {
-                self.log_event(format!(
-                    "walk.delta blocked {} {:.3},{:.3}",
-                    label, next.x, next.y
-                ));
-                return false;
-            }
-        }
-
-        self.set_actor_position(&actor_id, &label, next);
-
-        if delta.x.abs() + delta.y.abs() > f32::EPSILON {
-            let yaw = compute_walk_yaw(delta, heading_offset);
-            self.set_actor_rotation(
-                &actor_id,
-                &label,
-                Vec3 {
-                    x: 0.0,
-                    y: yaw,
-                    z: 0.0,
-                },
-            );
-        }
-
-        if let Some(hit) = self.geometry_sector_hit(&actor_id, "walk") {
-            self.record_sector_hit(&actor_id, &label, hit);
-        }
-
-        true
+        self.movement_runtime()
+            .walk_actor_vector(handle, delta, adjust_y, heading_offset)
     }
 
     fn set_voice_effect(&mut self, effect: &str) {
@@ -734,91 +684,10 @@ impl EngineContext {
     }
 
     fn default_sector_hit(&self, actor_id: &str, requested_kind: Option<&str>) -> SectorHit {
-        let normalized = requested_kind
-            .map(|kind| kind.trim().to_ascii_lowercase())
-            .filter(|kind| !kind.is_empty())
-            .unwrap_or_else(|| "walk".to_string());
-
-        let request = match normalized.as_str() {
-            "0" => "walk".to_string(),
-            "1" => "hot".to_string(),
-            "2" => "camera".to_string(),
-            other => other.to_string(),
-        };
-
-        if let Some(hit) = self.resolve_sector_hit(actor_id, &request) {
-            return hit;
-        }
-
-        let kind = match request.as_str() {
-            "walk" => "WALK".to_string(),
-            "hot" => "HOT".to_string(),
-            "camera" => "CAMERA".to_string(),
-            other => other.to_ascii_uppercase(),
-        };
-        SectorHit::new(1000, format!("{}_sector", actor_id), kind)
+        self.movement_view()
+            .default_sector_hit(actor_id, requested_kind)
     }
 
-    fn resolve_sector_hit(&self, actor_id: &str, kind: &str) -> Option<SectorHit> {
-        let normalized_kind = if kind.is_empty() { "walk" } else { kind };
-        let request = match normalized_kind {
-            "0" => "walk",
-            "1" => "hot",
-            "2" => "camera",
-            other => other,
-        };
-
-        let lookup_key = match request {
-            "walk" => "WALK".to_string(),
-            "hot" => "HOT".to_string(),
-            "camera" => "CAMERA".to_string(),
-            other => other.to_ascii_uppercase(),
-        };
-
-        if let Some(hit) = self
-            .actor_snapshot(actor_id)
-            .and_then(|actor| actor.sectors.get(&lookup_key))
-        {
-            return Some(hit.clone());
-        }
-
-        if let Some(hit) = self.geometry_sector_hit(actor_id, request) {
-            return Some(hit);
-        }
-
-        if let Some(hit) = self.visible_sector_hit(actor_id, request) {
-            return Some(hit);
-        }
-
-        if let Some(current) = self.sets.current_set() {
-            if let Some(descriptor) = self.sets.available_sets().get(&current.set_file) {
-                match request {
-                    "camera" => {
-                        if let Some(current_setup) = self.current_setup_for(&current.set_file) {
-                            if let Some(label) = descriptor.setup_label_for_index(current_setup) {
-                                return Some(SectorHit::new(
-                                    current_setup,
-                                    label.to_string(),
-                                    "CAMERA",
-                                ));
-                            }
-                        }
-                        if let Some(info) = descriptor.first_setup() {
-                            return Some(SectorHit::new(info.index, info.label.clone(), "CAMERA"));
-                        }
-                    }
-                    "hot" => {
-                        if let Some(info) = descriptor.first_setup() {
-                            return Some(SectorHit::new(info.index, info.label.clone(), "HOT"));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        None
-    }
     fn evaluate_sector_name(&self, actor_id: &str, query: &str) -> bool {
         if actor_id.eq_ignore_ascii_case("manny") {
             matches!(query, "manny" | "office" | "desk")
@@ -880,18 +749,6 @@ impl EngineContext {
         self.refresh_commentary_visibility();
     }
 
-    fn object_position_by_actor(&self, actor_handle: u32) -> Option<Vec3> {
-        self.objects.object_position_by_actor(actor_handle)
-    }
-
-    fn update_object_position_for_actor(&mut self, actor_handle: u32, position: Vec3) {
-        {
-            self.object_runtime()
-                .update_object_position_for_actor(actor_handle, position);
-        }
-        self.refresh_commentary_visibility();
-    }
-
     fn set_object_touchable(&mut self, handle: i64, touchable: bool) {
         {
             self.object_runtime()
@@ -912,22 +769,11 @@ impl EngineContext {
     }
 
     fn commentary_object_visible(&self, record: &CommentaryRecord) -> bool {
-        let current = self.sets.current_set().map(|set| set.set_file.as_str());
-        self.objects
-            .commentary_object_visible(record, current, |set, sector| {
-                self.is_sector_active(set, sector)
-            })
+        self.movement_view().commentary_object_visible(record)
     }
 
     fn refresh_commentary_visibility(&mut self) {
-        let Some(record) = self.cutscenes.commentary().cloned() else {
-            return;
-        };
-        let visible = self.commentary_object_visible(&record);
-        {
-            let mut runtime = self.cutscene_runtime();
-            runtime.update_commentary_visibility(visible, "not_visible");
-        }
+        self.movement_runtime().refresh_commentary_visibility();
     }
 
     fn set_commentary_active(&mut self, enabled: bool, label: Option<String>) {
@@ -963,9 +809,7 @@ impl EngineContext {
     }
 
     pub(super) fn actor_position_by_handle(&self, handle: u32) -> Option<Vec3> {
-        self.actors
-            .actor_position_by_handle(handle)
-            .or_else(|| self.object_position_by_actor(handle))
+        self.movement_view().actor_position_by_handle(handle)
     }
     pub(super) fn actor_rotation_by_handle(&self, handle: u32) -> Option<Vec3> {
         self.actors.actor_rotation_by_handle(handle)
@@ -1006,141 +850,22 @@ impl EngineContext {
         true
     }
 
-    fn set_actor_moving(&mut self, handle: u32, moving: bool) {
-        self.actors.set_actor_moving(handle, moving);
-    }
-
     fn is_actor_moving(&self, handle: u32) -> bool {
         self.actors.is_actor_moving(handle)
     }
 
     fn walk_actor_to_handle(&mut self, handle: u32, target: Vec3) -> bool {
-        let Some(current) = self.actor_position_by_handle(handle) else {
-            self.log_event(format!("walk.to unknown_handle #{handle}"));
-            return false;
-        };
-
-        let delta = Vec3 {
-            x: target.x - current.x,
-            y: target.y - current.y,
-            z: target.z - current.z,
-        };
-
-        if delta.x.abs() + delta.y.abs() + delta.z.abs() <= f32::EPSILON {
-            return true;
-        }
-
-        self.set_actor_moving(handle, true);
-        let moved = self.walk_actor_vector(handle, delta, None, None);
-        self.set_actor_moving(handle, false);
-        moved
-    }
-
-    fn point_in_active_walk(&self, set_file: &str, point: (f32, f32)) -> bool {
-        self.sets.point_in_active_walk(set_file, point)
-    }
-
-    fn actor_snapshot(&self, actor_id: &str) -> Option<&ActorSnapshot> {
-        self.actors.actor_snapshot(actor_id)
-    }
-
-    fn actor_position_xy(&self, actor_id: &str) -> Option<(f32, f32)> {
-        self.actors.actor_position_xy(actor_id)
+        self.movement_runtime().walk_actor_to_handle(handle, target)
     }
 
     fn geometry_sector_hit(&self, actor_id: &str, raw_kind: &str) -> Option<SectorHit> {
-        self.sets.current_set()?;
-        let point = self.actor_position_xy(actor_id)?;
-        self.sets.geometry_sector_hit(raw_kind, point)
+        self.movement_view()
+            .geometry_sector_hit(actor_id, raw_kind)
     }
 
     pub(super) fn geometry_sector_name(&self, actor_id: &str, raw_kind: &str) -> Option<String> {
-        self.geometry_sector_hit(actor_id, raw_kind)
-            .map(|hit| hit.name)
-    }
-
-    fn visible_sector_hit(&self, _actor_id: &str, request: &str) -> Option<SectorHit> {
-        let current = self.sets.current_set()?;
-        let geometry = self.sets.set_geometry().get(&current.set_file)?;
-
-        let mut handles: Vec<i64> = self.objects.hotlist_handles().to_vec();
-        for info in self.objects.visible_objects() {
-            if !handles.contains(&info.handle) {
-                handles.push(info.handle);
-            }
-        }
-
-        if handles.is_empty() {
-            return None;
-        }
-
-        for handle in handles {
-            let object = self.objects.object(handle)?;
-            if !object.visible || !object.touchable {
-                continue;
-            }
-            if let Some(set_file) = object.set_file.as_ref() {
-                if !set_file.eq_ignore_ascii_case(&current.set_file) {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-
-            let point = if let Some(position) = object.position.as_ref() {
-                Some((position.x, position.y))
-            } else if let Some(actor_handle) = object.interest_actor {
-                self.actor_position_by_handle(actor_handle)
-                    .map(|vec| (vec.x, vec.y))
-            } else {
-                None
-            };
-
-            let point = match point {
-                Some(value) => value,
-                None => continue,
-            };
-
-            match request {
-                "camera" | "hot" => {
-                    if let Some(setup) = geometry.best_setup_for_point(point) {
-                        if let Some(hit) =
-                            self.sets
-                                .sector_hit_from_setup(&current.set_file, &setup.name, request)
-                        {
-                            return Some(hit);
-                        }
-                    }
-                }
-                "walk" => {
-                    if let Some(polygon) = geometry.find_polygon(SetSectorKind::Walk, point) {
-                        if self.is_sector_active(&current.set_file, &polygon.name) {
-                            return Some(SectorHit::new(polygon.id, polygon.name.clone(), "WALK"));
-                        }
-                    }
-                }
-                other => {
-                    let sector_kind = match other {
-                        "camera" => Some(SetSectorKind::Camera),
-                        "walk" => Some(SetSectorKind::Walk),
-                        _ => None,
-                    };
-                    if let Some(kind) = sector_kind {
-                        if let Some(polygon) = geometry.find_polygon(kind, point) {
-                            if self.is_sector_active(&current.set_file, &polygon.name) {
-                                return Some(SectorHit::new(
-                                    polygon.id,
-                                    polygon.name.clone(),
-                                    other.to_ascii_uppercase(),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        None
+        self.movement_view()
+            .geometry_sector_name(actor_id, raw_kind)
     }
 
     fn set_actor_visibility(&mut self, actor_id: &str, label: &str, visible: bool) {
@@ -1204,19 +929,6 @@ impl EngineContext {
 
 fn vec3_to_array(vec: Vec3) -> [f32; 3] {
     [vec.x, vec.y, vec.z]
-}
-
-fn compute_walk_yaw(delta: Vec3, heading_offset: Option<f32>) -> f32 {
-    let mut yaw = (-delta.x).atan2(delta.y).to_degrees();
-    if let Some(offset) = heading_offset {
-        yaw += offset;
-    }
-    yaw = yaw.rem_euclid(360.0);
-    if yaw < 0.0 {
-        yaw + 360.0
-    } else {
-        yaw
-    }
 }
 
 pub(crate) fn heading_between(from: Vec3, to: Vec3) -> f64 {
