@@ -258,3 +258,84 @@ impl CutsceneRuntime {
         self.speaking_actor.as_deref()
     }
 }
+
+/// Couples cutscene runtime state with the engine event log.
+pub(super) struct CutsceneRuntimeAdapter<'a> {
+    runtime: &'a mut CutsceneRuntime,
+    events: &'a mut Vec<String>,
+}
+
+impl<'a> CutsceneRuntimeAdapter<'a> {
+    pub(super) fn new(runtime: &'a mut CutsceneRuntime, events: &'a mut Vec<String>) -> Self {
+        Self { runtime, events }
+    }
+
+    pub(super) fn push_cut_scene(
+        &mut self,
+        label: Option<String>,
+        flags: Vec<String>,
+        set_file: Option<String>,
+        sector: Option<String>,
+        suppressed: bool,
+    ) {
+        let message = self
+            .runtime
+            .push_cut_scene(label, flags, set_file, sector, suppressed);
+        self.events.push(message);
+    }
+
+    pub(super) fn pop_cut_scene(&mut self) {
+        if let Some(message) = self.runtime.pop_cut_scene() {
+            self.events.push(message);
+        }
+    }
+
+    pub(super) fn push_override(&mut self, description: String) {
+        let message = self.runtime.push_override(description);
+        self.events.push(message);
+    }
+
+    pub(super) fn pop_override(&mut self) -> bool {
+        if let Some(message) = self.runtime.pop_override() {
+            self.events.push(message);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn clear_overrides(&mut self) {
+        for message in self.runtime.take_all_overrides() {
+            self.events.push(message);
+        }
+    }
+
+    pub(super) fn handle_sector_activation(&mut self, set_file: &str, sector: &str, active: bool) {
+        let messages = self
+            .runtime
+            .handle_sector_activation(set_file, sector, active);
+        for message in messages {
+            self.events.push(message);
+        }
+    }
+
+    pub(super) fn set_commentary(&mut self, record: CommentaryRecord) {
+        if let Some(message) = self.runtime.set_commentary(record) {
+            self.events.push(message);
+        }
+    }
+
+    pub(super) fn disable_commentary(&mut self) {
+        let message = self.runtime.disable_commentary();
+        self.events.push(message);
+    }
+
+    pub(super) fn update_commentary_visibility(&mut self, visible: bool, suppressed_reason: &str) {
+        if let Some(message) = self
+            .runtime
+            .update_commentary_visibility(visible, suppressed_reason)
+        {
+            self.events.push(message);
+        }
+    }
+}

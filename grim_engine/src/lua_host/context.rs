@@ -18,7 +18,7 @@ mod sets;
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
 use audio::{AudioRuntime, AudioRuntimeAdapter, MusicState, SfxState};
-use cutscenes::{CommentaryRecord, CutsceneRuntime, DialogState};
+use cutscenes::{CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, DialogState};
 use geometry::SectorHit;
 use inventory::InventoryState;
 use menus::{MenuRegistry, MenuState};
@@ -177,6 +177,10 @@ impl EngineContext {
         )
     }
 
+    fn cutscene_runtime(&mut self) -> CutsceneRuntimeAdapter<'_> {
+        CutsceneRuntimeAdapter::new(&mut self.cutscenes, &mut self.events)
+    }
+
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
     }
@@ -205,36 +209,24 @@ impl EngineContext {
             (Some(set), Some(name)) => !self.is_sector_active(set, name),
             _ => false,
         };
-        let message = self
-            .cutscenes
+        self.cutscene_runtime()
             .push_cut_scene(label, flags, set_file, sector, suppressed);
-        self.log_event(message);
     }
 
     fn pop_cut_scene(&mut self) {
-        if let Some(message) = self.cutscenes.pop_cut_scene() {
-            self.log_event(message);
-        }
+        self.cutscene_runtime().pop_cut_scene();
     }
 
     fn push_override(&mut self, description: String) {
-        let message = self.cutscenes.push_override(description);
-        self.log_event(message);
+        self.cutscene_runtime().push_override(description);
     }
 
     fn pop_override(&mut self) -> bool {
-        if let Some(message) = self.cutscenes.pop_override() {
-            self.log_event(message);
-            true
-        } else {
-            false
-        }
+        self.cutscene_runtime().pop_override()
     }
 
     fn clear_overrides(&mut self) {
-        for message in self.cutscenes.take_all_overrides() {
-            self.log_event(message);
-        }
+        self.cutscene_runtime().clear_overrides();
     }
 
     fn begin_dialog_line(&mut self, id: &str, label: &str, line: &str) {
@@ -932,18 +924,15 @@ impl EngineContext {
             return;
         };
         let visible = self.commentary_object_visible(&record);
-        if let Some(message) = self
-            .cutscenes
-            .update_commentary_visibility(visible, "not_visible")
         {
-            self.log_event(message);
+            let mut runtime = self.cutscene_runtime();
+            runtime.update_commentary_visibility(visible, "not_visible");
         }
     }
 
     fn set_commentary_active(&mut self, enabled: bool, label: Option<String>) {
         if !enabled {
-            let message = self.cutscenes.disable_commentary();
-            self.log_event(message);
+            self.cutscene_runtime().disable_commentary();
             return;
         }
 
@@ -959,17 +948,16 @@ impl EngineContext {
             record.suppressed_reason = Some("not_visible".to_string());
         }
 
-        if let Some(message) = self.cutscenes.set_commentary(record) {
-            self.log_event(message);
+        {
+            let mut runtime = self.cutscene_runtime();
+            runtime.set_commentary(record);
         }
     }
 
     fn handle_sector_dependents(&mut self, set_file: &str, sector: &str, active: bool) {
-        let messages = self
-            .cutscenes
-            .handle_sector_activation(set_file, sector, active);
-        for message in messages {
-            self.log_event(message);
+        {
+            let mut runtime = self.cutscene_runtime();
+            runtime.handle_sector_activation(set_file, sector, active);
         }
         self.refresh_commentary_visibility();
     }
