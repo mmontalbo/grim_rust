@@ -30,12 +30,10 @@ flow and prototype modern tooling around it.
 ## Development
 - Run workspace checks from inside `nix-shell`: `cargo fmt` and `cargo test` (or
   crate-specific commands) keep the tree tidy.
-- Use `tools/wip_summary.py [--workstream SLUG]` to review the current project
-  focus before diving into a new task. When you finish a thread, update the
-  corresponding section in `tools/wip_summary.py` (usually by pruning the
-  completed workstream and nudging the “Active Threads” / “Next Steps”) so the
-  next contributor sees the new priority without having to chase context in the
-  commit log.
+- Run `tools/wip_summary.py` to review the current project focus before diving
+  into a new task. When priorities shift, update the milestone sections in
+  `tools/wip_summary.py` so the next contributor sees the Manny office goal
+  without chasing context in the commit log.
 - Run `tools/install_git_hooks.sh` once to install the shared `commit-msg` hook;
   it calls `tools/lint_commit.py` so commits without Why/What bullets are
   rejected instead of slipping into history.
