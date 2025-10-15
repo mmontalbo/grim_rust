@@ -6,9 +6,10 @@ usage() {
 Usage: tools/run_manny_boot.sh [viewer-arg ...]
 
 Runs the Manny's office Lua boot inside grim_engine and captures the baseline
-artefacts (timeline, audio, movement, depth stats, hotspot events) before
-launching grim_viewer against the fresh snapshot. Any additional arguments are
-forwarded to grim_viewer (for example --headless or --asset overrides).
+artefacts (timeline, audio, movement, depth stats, geometry snapshot, hotspot
+events) before launching grim_viewer against the fresh snapshot. Any additional
+arguments are forwarded to grim_viewer (for example --headless or --asset
+overrides).
 USAGE
 }
 
@@ -40,12 +41,13 @@ AUDIO_LOG="${RUN_CACHE}/manny_audio_log.json"
 MOVEMENT_LOG="${RUN_CACHE}/manny_movement_log.json"
 DEPTH_STATS_JSON="${RUN_CACHE}/manny_depth_stats.json"
 EVENT_LOG_JSON="${RUN_CACHE}/manny_hotspot_events.json"
+GEOMETRY_JSON="${RUN_CACHE}/manny_geometry.json"
 
 echo "[run_manny_boot] Generating Manny timeline via grim_engine analysis..."
 cargo run --bin grim_engine -- \
     --timeline-json "${TIMELINE_JSON}"
 
-echo "[run_manny_boot] Bootstrapping grim_engine Lua runtime for hotspot capture..."
+echo "[run_manny_boot] Bootstrapping grim_engine Lua runtime for hotspot and geometry capture..."
 cargo run --bin grim_engine -- \
     --run-lua \
     --movement-demo \
@@ -53,11 +55,14 @@ cargo run --bin grim_engine -- \
     --hotspot-demo computer \
     --audio-log-json "${AUDIO_LOG}" \
     --depth-stats-json "${DEPTH_STATS_JSON}" \
-    --event-log-json "${EVENT_LOG_JSON}"
+    --event-log-json "${EVENT_LOG_JSON}" \
+    --lua-geometry-json "${GEOMETRY_JSON}"
 
 echo "[run_manny_boot] Launching grim_viewer with hotspot overlays..."
 cargo run -p grim_viewer -- \
     --timeline "${TIMELINE_JSON}" \
     --audio-log "${AUDIO_LOG}" \
     --movement-log "${MOVEMENT_LOG}" \
-    --event-log "${EVENT_LOG_JSON}" "${VIEWER_ARGS[@]}"
+    --event-log "${EVENT_LOG_JSON}" \
+    --lua-geometry-json "${GEOMETRY_JSON}" \
+    "${VIEWER_ARGS[@]}"

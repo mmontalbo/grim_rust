@@ -166,10 +166,11 @@ Manny office baselines; the helper wires in the movement and hotspot fixtures by
 default and exits once the overlays stabilise. See `docs/grim_viewer_modules.md`
 for a module map and additional workflow notes.
 
-For a turnkey loop, run `tools/run_manny_boot.sh`. The helper first invokes
-`grim_engine --run-lua` with timeline and audio exports, then launches
-`grim_viewer` against the freshly generated manifests. Any additional arguments
-passed to the script are forwarded to the viewer step, so `tools/run_manny_boot.sh --headless`
+For a turnkey loop, run `tools/run_manny_boot.sh`. The helper captures the
+timeline, movement, hotspot, audio, depth, and Lua geometry artefacts into
+`artifacts/run_cache/`, then launches `grim_viewer` against the fresh snapshot
+with the geometry automatically attached. Any additional arguments passed to
+the script are forwarded to the viewer step, so `tools/run_manny_boot.sh --headless`
 will run the same pipeline without opening a window.
 
 
