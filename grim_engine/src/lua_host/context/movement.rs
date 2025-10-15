@@ -81,13 +81,8 @@ impl<'a> MovementRuntimeAdapter<'a> {
         }
 
         if let Some(ref set_file) = current_set {
-            if self
-                .sets
-                .set_geometry()
-                .contains_key(set_file)
-                && !self
-                    .sets
-                    .point_in_active_walk(set_file, (next.x, next.y))
+            if self.sets.set_geometry().contains_key(set_file)
+                && !self.sets.point_in_active_walk(set_file, (next.x, next.y))
             {
                 self.log(format!(
                     "walk.delta blocked {} {:.3},{:.3}",
@@ -156,11 +151,7 @@ impl<'a> MovementRuntimeAdapter<'a> {
         }
     }
 
-    pub(super) fn update_object_position_for_actor(
-        &mut self,
-        actor_handle: u32,
-        position: Vec3,
-    ) {
+    pub(super) fn update_object_position_for_actor(&mut self, actor_handle: u32, position: Vec3) {
         {
             let mut runtime = self.object_runtime();
             runtime.update_object_position_for_actor(actor_handle, position);
@@ -230,30 +221,18 @@ impl<'a> MovementRuntimeView<'a> {
             .or_else(|| self.objects.object_position_by_actor(handle))
     }
 
-    pub(super) fn geometry_sector_hit(
-        &self,
-        actor_id: &str,
-        raw_kind: &str,
-    ) -> Option<SectorHit> {
+    pub(super) fn geometry_sector_hit(&self, actor_id: &str, raw_kind: &str) -> Option<SectorHit> {
         self.sets.current_set()?;
         let point = self.actor_position_xy(actor_id)?;
         self.sets.geometry_sector_hit(raw_kind, point)
     }
 
-    pub(super) fn geometry_sector_name(
-        &self,
-        actor_id: &str,
-        raw_kind: &str,
-    ) -> Option<String> {
+    pub(super) fn geometry_sector_name(&self, actor_id: &str, raw_kind: &str) -> Option<String> {
         self.geometry_sector_hit(actor_id, raw_kind)
             .map(|hit| hit.name)
     }
 
-    pub(super) fn resolve_sector_hit(
-        &self,
-        actor_id: &str,
-        kind: &str,
-    ) -> Option<SectorHit> {
+    pub(super) fn resolve_sector_hit(&self, actor_id: &str, kind: &str) -> Option<SectorHit> {
         let normalized_kind = if kind.is_empty() { "walk" } else { kind };
         let request = match normalized_kind {
             "0" => "walk",
@@ -289,12 +268,9 @@ impl<'a> MovementRuntimeView<'a> {
             if let Some(descriptor) = self.sets.available_sets().get(&current.set_file) {
                 match request {
                     "camera" => {
-                        if let Some(current_setup) =
-                            self.sets.current_setup_for(&current.set_file)
+                        if let Some(current_setup) = self.sets.current_setup_for(&current.set_file)
                         {
-                            if let Some(label) =
-                                descriptor.setup_label_for_index(current_setup)
-                            {
+                            if let Some(label) = descriptor.setup_label_for_index(current_setup) {
                                 return Some(SectorHit::new(
                                     current_setup,
                                     label.to_string(),
@@ -303,20 +279,12 @@ impl<'a> MovementRuntimeView<'a> {
                             }
                         }
                         if let Some(info) = descriptor.first_setup() {
-                            return Some(SectorHit::new(
-                                info.index,
-                                info.label.clone(),
-                                "CAMERA",
-                            ));
+                            return Some(SectorHit::new(info.index, info.label.clone(), "CAMERA"));
                         }
                     }
                     "hot" => {
                         if let Some(info) = descriptor.first_setup() {
-                            return Some(SectorHit::new(
-                                info.index,
-                                info.label.clone(),
-                                "HOT",
-                            ));
+                            return Some(SectorHit::new(info.index, info.label.clone(), "HOT"));
                         }
                     }
                     _ => {}
@@ -357,14 +325,8 @@ impl<'a> MovementRuntimeView<'a> {
         SectorHit::new(1000, format!("{}_sector", actor_id), kind)
     }
 
-    pub(super) fn commentary_object_visible(
-        &self,
-        record: &CommentaryRecord,
-    ) -> bool {
-        let current = self
-            .sets
-            .current_set()
-            .map(|set| set.set_file.as_str());
+    pub(super) fn commentary_object_visible(&self, record: &CommentaryRecord) -> bool {
+        let current = self.sets.current_set().map(|set| set.set_file.as_str());
         self.objects
             .commentary_object_visible(record, current, |set, sector| {
                 self.sets.is_sector_active(set, sector)
@@ -375,11 +337,7 @@ impl<'a> MovementRuntimeView<'a> {
         self.actors.actor_position_xy(actor_id)
     }
 
-    pub(super) fn visible_sector_hit(
-        &self,
-        _actor_id: &str,
-        request: &str,
-    ) -> Option<SectorHit> {
+    pub(super) fn visible_sector_hit(&self, _actor_id: &str, request: &str) -> Option<SectorHit> {
         let current = self.sets.current_set()?;
         let geometry = self.sets.set_geometry().get(&current.set_file)?;
 
@@ -434,15 +392,8 @@ impl<'a> MovementRuntimeView<'a> {
                 }
                 "walk" => {
                     if let Some(polygon) = geometry.find_polygon(SetSectorKind::Walk, point) {
-                        if self
-                            .sets
-                            .is_sector_active(&current.set_file, &polygon.name)
-                        {
-                            return Some(SectorHit::new(
-                                polygon.id,
-                                polygon.name.clone(),
-                                "WALK",
-                            ));
+                        if self.sets.is_sector_active(&current.set_file, &polygon.name) {
+                            return Some(SectorHit::new(polygon.id, polygon.name.clone(), "WALK"));
                         }
                     }
                 }
@@ -454,10 +405,7 @@ impl<'a> MovementRuntimeView<'a> {
                     };
                     if let Some(kind) = sector_kind {
                         if let Some(polygon) = geometry.find_polygon(kind, point) {
-                            if self
-                                .sets
-                                .is_sector_active(&current.set_file, &polygon.name)
-                            {
+                            if self.sets.is_sector_active(&current.set_file, &polygon.name) {
                                 return Some(SectorHit::new(
                                     polygon.id,
                                     polygon.name.clone(),

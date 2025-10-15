@@ -145,11 +145,7 @@ impl<'a> ScriptRuntimeAdapter<'a> {
         Self { runtime, events }
     }
 
-    pub(super) fn start_script(
-        &mut self,
-        label: String,
-        callable: Option<RegistryKey>,
-    ) -> u32 {
+    pub(super) fn start_script(&mut self, label: String, callable: Option<RegistryKey>) -> u32 {
         let (handle, event) = self.runtime.start_script(label, callable);
         self.events.push(event);
         handle

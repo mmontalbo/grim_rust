@@ -1,21 +1,22 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
+mod achievements;
 mod actors;
 mod audio;
 mod bindings;
 mod cutscenes;
 mod geometry;
 mod geometry_export;
-mod movement;
 mod inventory;
 mod menus;
+mod movement;
 mod objects;
 mod pause;
 mod scripts;
 mod sets;
 
+use achievements::{AchievementRuntime, AchievementRuntimeAdapter, AchievementRuntimeView};
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
 use audio::{AudioRuntime, AudioRuntimeAdapter, MusicState, SfxState};
@@ -23,13 +24,13 @@ use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
 };
 use geometry::SectorHit;
-use inventory::InventoryState;
+use inventory::{InventoryRuntimeAdapter, InventoryRuntimeView, InventoryState};
 use menus::{MenuRegistry, MenuState};
+use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
 use pause::{PauseLabel, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeView};
 use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot};
-use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, install_globals,
@@ -42,12 +43,6 @@ use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
 use grim_analysis::resources::ResourceGraph;
 use mlua::{Lua, RegistryKey, Result as LuaResult};
-
-#[derive(Debug, Default, Clone)]
-struct AchievementState {
-    eligible: bool,
-    established: bool,
-}
 
 #[derive(Clone)]
 pub struct EngineContextHandle {
@@ -128,7 +123,7 @@ pub(super) struct EngineContext {
     menus: MenuRegistry,
     voice_effect: Option<String>,
     objects: ObjectRuntime,
-    achievements: BTreeMap<String, AchievementState>,
+    achievements: AchievementRuntime,
     cutscenes: CutsceneRuntime,
     pause: PauseState,
     audio: AudioRuntime,
@@ -152,7 +147,7 @@ impl EngineContext {
             menus: MenuRegistry::new(),
             voice_effect: None,
             objects: ObjectRuntime::new(),
-            achievements: BTreeMap::new(),
+            achievements: AchievementRuntime::new(),
             cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
             audio: AudioRuntime::new(audio_callback),
@@ -208,6 +203,22 @@ impl EngineContext {
 
     fn movement_view(&self) -> MovementRuntimeView<'_> {
         MovementRuntimeView::new(&self.actors, &self.sets, &self.objects)
+    }
+
+    fn inventory_runtime(&mut self) -> InventoryRuntimeAdapter<'_> {
+        InventoryRuntimeAdapter::new(&mut self.inventory, &mut self.events)
+    }
+
+    fn inventory_view(&self) -> InventoryRuntimeView<'_> {
+        InventoryRuntimeView::new(&self.inventory)
+    }
+
+    fn achievement_runtime(&mut self) -> AchievementRuntimeAdapter<'_> {
+        AchievementRuntimeAdapter::new(&mut self.achievements, &mut self.events)
+    }
+
+    fn achievement_view(&self) -> AchievementRuntimeView<'_> {
+        AchievementRuntimeView::new(&self.achievements)
     }
 
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
@@ -401,28 +412,15 @@ impl EngineContext {
     }
 
     fn set_achievement_eligibility(&mut self, id: &str, eligible: bool) {
-        let entry = self
-            .achievements
-            .entry(id.to_string())
-            .or_insert_with(AchievementState::default);
-        entry.eligible = eligible;
-        entry.established = true;
-        let state = if eligible { "eligible" } else { "ineligible" };
-        self.log_event(format!("achievement.{id} {state}"));
+        self.achievement_runtime().set_eligibility(id, eligible);
     }
 
     fn achievement_is_eligible(&self, id: &str) -> bool {
-        self.achievements
-            .get(id)
-            .map(|state| state.eligible)
-            .unwrap_or(false)
+        self.achievement_view().is_eligible(id)
     }
 
     fn achievement_has_been_established(&self, id: &str) -> bool {
-        self.achievements
-            .get(id)
-            .map(|state| state.established)
-            .unwrap_or(false)
+        self.achievement_view().has_been_established(id)
     }
 
     fn start_script(&mut self, label: String, callable: Option<RegistryKey>) -> u32 {
@@ -686,15 +684,11 @@ impl EngineContext {
     }
 
     fn add_inventory_item(&mut self, name: &str) {
-        if self.inventory.add_item(name) {
-            self.log_event(format!("inventory.add {name}"));
-        }
+        self.inventory_runtime().add_item(name);
     }
 
     fn register_inventory_room(&mut self, name: &str) {
-        if self.inventory.register_room(name) {
-            self.log_event(format!("inventory.room {name}"));
-        }
+        self.inventory_runtime().register_room(name);
     }
 
     fn record_sector_hit(&mut self, id: &str, label: &str, hit: SectorHit) {
@@ -877,8 +871,7 @@ impl EngineContext {
     }
 
     fn geometry_sector_hit(&self, actor_id: &str, raw_kind: &str) -> Option<SectorHit> {
-        self.movement_view()
-            .geometry_sector_hit(actor_id, raw_kind)
+        self.movement_view().geometry_sector_hit(actor_id, raw_kind)
     }
 
     pub(super) fn geometry_sector_name(&self, actor_id: &str, raw_kind: &str) -> Option<String> {
@@ -934,8 +927,8 @@ impl EngineContext {
             actor_handles: self.actors.clone_handles(),
             visible_objects: self.objects.visible_objects().to_vec(),
             hotlist_handles: self.objects.hotlist_handles().to_vec(),
-            inventory: self.inventory.clone_items(),
-            inventory_rooms: self.inventory.clone_rooms(),
+            inventory: self.inventory_view().clone_items(),
+            inventory_rooms: self.inventory_view().clone_rooms(),
             commentary: self.cutscene_view().commentary().cloned(),
             cut_scene_stack: self.cutscene_view().cut_scene_stack().to_vec(),
             music: self.audio.music().clone(),

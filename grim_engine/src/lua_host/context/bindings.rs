@@ -4372,15 +4372,15 @@ fn resume_script(
             }
             Ok(ScriptStep::Completed)
         }
-                Err(err) => {
-                    let label = {
-                        let state = context.borrow();
-                        state
-                            .script_label(handle)
-                            .unwrap_or_else(|| format!("#{handle}"))
-                    };
-                    let message = err.to_string();
-                    context
+        Err(err) => {
+            let label = {
+                let state = context.borrow();
+                state
+                    .script_label(handle)
+                    .unwrap_or_else(|| format!("#{handle}"))
+            };
+            let message = err.to_string();
+            context
                 .borrow_mut()
                 .log_event(format!("script.error {label}: {message}"));
             let cleanup = {
