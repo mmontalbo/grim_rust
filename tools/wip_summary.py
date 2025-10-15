@@ -12,72 +12,18 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Milestone Goal",
             "body": [
-                """Deliver a first-playable Manny office where the viewer renders in-world markers and Manny’s actual geometry, the ability to walk around and
-                interact with the world, and placeholders for transitioning to other scenes""",
+                "Deliver a first-playable Manny office where the viewer renders initial Manny's office scene.",
+                "User should be able to provide input to the viewer and have game state update in the same exact way the real game does",
                 "Every task should accelerate implementing the initial office gameplay, before thinking about work keep this ultimate goal in mind",
-            ],
-        },
-        {
-            "title": "Critical Path",
-            "body": [
-                "Bootstrap a depth-aware 3D marker/mesh pass in the viewer that shares camera math with runtime playback.",
-                "Decode Manny’s mesh and transforms from the LAB assets and stage a reusable geometry cache for the viewer.",
-                "Keep the desk/computer interaction script stable and the runtime regression harness green as we layer in 3D rendering.",
-            ],
-        },
-        {
-            "title": "Immediate Focus",
-            "body": [
-                "Swap Manny’s exported 3DO mesh into the main viewer scene and validate the camera render now that axes line up, replacing the sphere proxy.",
-                "Plumb Manny/desk/tube axis conversions throughout the viewer so decoded meshes land in the correct orientation.",
-                "Capture runtime scale data (e.g. SetActorScale/SetActorCollisionScale) and expose it to the viewer so decoded meshes match in-game size.",
-                "Run the Manny office interaction traces after each rendering change to ensure computer triggers and fallback handling remain stable.",
             ],
         },
         {
             "title": "Execution Notes",
             "body": [
-                "Iterate with python tools/grim_viewer.py -- --headless to quickly validate the new 3D marker pass alongside existing overlays.",
-                "Document decoded asset formats in docs/runtime_smoke_tests.md or a new decoder README so refresh steps stay reproducible.",
-                "Use `cargo run -p grim_formats --bin cos_extract -- --cos artifacts/manny_assets/ma_note_type.cos --dest artifacts/run_cache/manny_mesh` to refresh the staged Manny meshes.",
-                "Use `cargo run -p grim_formats --bin three_do_export -- --input artifacts/run_cache/manny_mesh/mannysuit.3do --output artifacts/run_cache/manny_mesh/mannysuit_mesh.json --pretty` to regenerate the viewer-ready JSON.",
-                "Use `cargo run -p grim_formats --bin cos_dump -- <costume>` to inspect costume component lists before wiring up 3DO decoding.",
-                "After regenerating meshes or Lua snapshots, run cargo test -p grim_engine -- runtime_regression before committing.",
-                "grim_viewer now accepts `--manny-mesh-json`; otherwise it looks for artifacts/run_cache/manny_mesh/mannysuit_mesh.json when staging the mesh.",
-                "Cross-check new 3DO exports against the axis-conversion unit test harness before wiring them into the viewer.",
-                "Leverage the in-view axis gizmo to confirm world orientation when debugging new 3D markers or meshes.",
-                "Document the primitive mesh legend (cones/spheres/cubes) and call out that overlap is expected until decoded meshes replace the proxies.",
+                "We are trying to re-create game logic in rust, prefer to fail fast rather than providing fallback for behavior that does not match the real game",
+                "If making progress on a work item is slow or uncertain, evaluate if there are opportunites to simplify or clarify the related components",
                 "When committing, use python tools/format_commit.py to generate the message and python tools/lint_commit.py to validate it before pushing.",
             ],
-        },
-    ],
-    "workstreams": [
-        {
-            "slug": "viewer-3d-renderer",
-            "title": "Viewer 3D renderer",
-            "description": "Give the viewer a depth-aware render path that can draw markers and meshes in world space.",
-            "prompt": (
-                "Use the instanced primitive meshes to mirror Manny/desk/tube anchors and verify depth and lighting in grim_viewer. "
-                "Keep iterating on the gold selection pointer while we retire the flat overlay pass, then move toward swapping in decoded assets."
-            ),
-        },
-        {
-            "slug": "manny-mesh-decode",
-            "title": "Decode Manny mesh",
-            "description": "Extract Manny’s geometry/rig from LAB archives and stage it for the viewer.",
-            "prompt": (
-                "Build a decoder that reads the remastered LAB data, exports Manny’s mesh (and transforms if available) into artifacts/run_cache, "
-                "and document the refresh command. Leave hooks for expanding to desk/tube assets next."
-            ),
-        },
-        {
-            "slug": "runtime-stability",
-            "title": "Runtime harness stability",
-            "description": "Maintain passing runtime_regression results after artifact or script changes.",
-            "prompt": (
-                "After any refresh, run cargo test -p grim_engine -- runtime_regression and note the check-in that validated the baselines. "
-                "Document failures immediately so we do not mask blockers on the path to first-playable."
-            ),
         },
     ],
 }
