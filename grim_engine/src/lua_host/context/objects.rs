@@ -6,6 +6,7 @@ use crate::lua_host::types::Vec3;
 
 use super::actors::ActorStore;
 use super::cutscenes::CommentaryRecord;
+use super::sets::SetRuntime;
 use super::{distance_between, heading_between};
 
 #[derive(Debug, Clone)]
@@ -303,6 +304,209 @@ impl ObjectRuntime {
 
     pub(super) fn clone_records(&self) -> BTreeMap<i64, ObjectSnapshot> {
         self.records.clone()
+    }
+}
+
+/// Provides high-level object runtime operations coupled with engine event logging.
+pub(super) struct ObjectRuntimeAdapter<'a> {
+    runtime: &'a mut ObjectRuntime,
+    events: &'a mut Vec<String>,
+    actors: &'a ActorStore,
+    sets: &'a mut SetRuntime,
+}
+
+impl<'a> ObjectRuntimeAdapter<'a> {
+    pub(super) fn new(
+        runtime: &'a mut ObjectRuntime,
+        events: &'a mut Vec<String>,
+        actors: &'a ActorStore,
+        sets: &'a mut SetRuntime,
+    ) -> Self {
+        Self {
+            runtime,
+            events,
+            actors,
+            sets,
+        }
+    }
+
+    fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
+        let (has_geometry, message) = self.sets.ensure_sector_state_map(set_file);
+        if let Some(message) = message {
+            self.events.push(message);
+        }
+        has_geometry
+    }
+
+    fn compute_object_sectors(&mut self, set_file: &str, position: Vec3) -> Vec<ObjectSectorRef> {
+        if !self.ensure_sector_state_map(set_file) {
+            return Vec::new();
+        }
+        let Some(geometry) = self.sets.set_geometry().get(set_file) else {
+            return Vec::new();
+        };
+        let point = (position.x, position.y);
+        geometry
+            .sectors
+            .iter()
+            .filter(|sector| sector.contains(point))
+            .map(|sector| ObjectSectorRef {
+                name: sector.name.clone(),
+                kind: sector.kind,
+            })
+            .collect()
+    }
+
+    pub(super) fn register_object(&mut self, mut snapshot: ObjectSnapshot) {
+        let handle = snapshot.handle;
+        if snapshot.set_file.is_none() {
+            if let Some(actor_handle) = snapshot.interest_actor {
+                if let Some(actor_id) = self.actors.actor_id_for_handle(actor_handle) {
+                    if let Some(actor) = self.actors.get(actor_id) {
+                        if let Some(set_file) = actor.current_set.clone() {
+                            snapshot.set_file = Some(set_file);
+                        }
+                    }
+                }
+            }
+            if snapshot.set_file.is_none() {
+                if let Some(current) = self.sets.current_set() {
+                    snapshot.set_file = Some(current.set_file.clone());
+                }
+            }
+        }
+        let sectors = if let (Some(set_file), Some(position)) =
+            (snapshot.set_file.as_ref(), snapshot.position)
+        {
+            self.compute_object_sectors(set_file, position)
+        } else {
+            Vec::new()
+        };
+        snapshot.sectors = sectors;
+        let interest_actor = snapshot.interest_actor;
+        let name = snapshot.name.clone();
+        let set_label = snapshot
+            .set_file
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let existed = self.runtime.register(snapshot);
+        if let Some(actor_handle) = interest_actor {
+            self.events
+                .push(format!("object.link actor#{} -> {}", actor_handle, name));
+        }
+        let verb = if existed {
+            "object.update"
+        } else {
+            "object.register"
+        };
+        self.events
+            .push(format!("{verb} {name} (#{handle}) @ {set_label}"));
+    }
+
+    pub(super) fn unregister_object(&mut self, handle: i64) -> bool {
+        if let Some(snapshot) = self.runtime.unregister(handle) {
+            self.events
+                .push(format!("object.remove {} (#{handle})", snapshot.name));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn record_visible_objects(&mut self, handles: &[i64]) {
+        let actor_snapshot = self
+            .actors
+            .selected_actor_snapshot()
+            .cloned()
+            .or_else(|| self.actors.get("manny").cloned());
+        let actor_position = actor_snapshot.as_ref().and_then(|actor| actor.position);
+        let actor_handle = actor_snapshot
+            .as_ref()
+            .map(|actor| actor.handle)
+            .filter(|handle| *handle != 0);
+
+        let mut log_messages: Vec<String> = Vec::new();
+        self.runtime.record_visible_objects(
+            handles,
+            self.actors,
+            actor_position,
+            actor_handle,
+            |message| log_messages.push(message),
+        );
+        for message in log_messages {
+            self.events.push(message);
+        }
+    }
+
+    pub(super) fn update_object_position_for_actor(&mut self, actor_handle: u32, position: Vec3) {
+        if let Some(object_handle) = self.runtime.handle_for_actor(actor_handle) {
+            let actor_set = self
+                .actors
+                .actor_id_for_handle(actor_handle)
+                .and_then(|id| self.actors.get(id))
+                .and_then(|actor| actor.current_set.clone())
+                .or_else(|| {
+                    self.sets
+                        .current_set()
+                        .map(|snapshot| snapshot.set_file.clone())
+                });
+            let mut object_name = None;
+            let mut set_for_recalc: Option<(String, Vec3)> = None;
+            {
+                if let Some(object) = self.runtime.object_mut(object_handle) {
+                    object.position = Some(position);
+                    object_name = Some(object.name.clone());
+                    if object.set_file.is_none() {
+                        if let Some(set_file) = actor_set.clone() {
+                            object.set_file = Some(set_file);
+                        }
+                    }
+                    if let Some(ref set_file) = object.set_file {
+                        set_for_recalc = Some((set_file.clone(), position));
+                    } else {
+                        object.sectors.clear();
+                    }
+                }
+            }
+            if let Some((set_file, pos)) = set_for_recalc {
+                let sectors = self.compute_object_sectors(&set_file, pos);
+                if let Some(object) = self.runtime.object_mut(object_handle) {
+                    object.sectors = sectors;
+                }
+            }
+            if let Some(name) = object_name {
+                self.events.push(format!(
+                    "object.actor#{}.pos {} {:.3},{:.3},{:.3}",
+                    actor_handle, name, position.x, position.y, position.z
+                ));
+            }
+        }
+    }
+
+    pub(super) fn set_object_touchable(&mut self, handle: i64, touchable: bool) {
+        if let Some(object) = self.runtime.object_mut(handle) {
+            object.touchable = touchable;
+        }
+        let state = if touchable {
+            "touchable"
+        } else {
+            "untouchable"
+        };
+        self.events
+            .push(format!("object.touchable #{handle} {state}"));
+    }
+
+    pub(super) fn set_object_visibility(&mut self, handle: i64, visible: bool) {
+        if let Some(object) = self.runtime.object_mut(handle) {
+            if object.visible != visible {
+                object.visible = visible;
+                let state = if visible { "visible" } else { "hidden" };
+                self.events
+                    .push(format!("object.visible #{handle} {state}"));
+            } else {
+                object.visible = visible;
+            }
+        }
     }
 }
 

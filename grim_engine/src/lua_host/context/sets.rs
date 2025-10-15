@@ -45,6 +45,7 @@ impl<'a> SetRuntimeAdapter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
         let (has_geometry, geometry_message) = self.runtime.ensure_sector_state_map(set_file);
         if let Some(message) = geometry_message {
@@ -75,14 +76,17 @@ impl<'a> SetRuntimeAdapter<'a> {
 
         let state = if active { "on" } else { "off" };
         match &result {
-            SectorToggleResult::Applied { set_file, sector, .. } => {
+            SectorToggleResult::Applied {
+                set_file, sector, ..
+            } => {
                 self.events
                     .push(format!("sector.active {set_file}:{sector} {state}"));
             }
-            SectorToggleResult::NoChange { set_file, sector, .. } => {
-                self.events.push(format!(
-                    "sector.active {set_file}:{sector} already {state}"
-                ));
+            SectorToggleResult::NoChange {
+                set_file, sector, ..
+            } => {
+                self.events
+                    .push(format!("sector.active {set_file}:{sector} already {state}"));
             }
             SectorToggleResult::NoSet => {}
         }
@@ -242,20 +246,16 @@ impl SetRuntime {
             .expect("sector state map missing after ensure");
         let previous = states.insert(canonical.clone(), active);
         let result = match previous {
-            Some(prev) if prev == active => {
-                SectorToggleResult::NoChange {
-                    set_file: set_file.clone(),
-                    sector: canonical.clone(),
-                    known_sector,
-                }
-            }
-            _ => {
-                SectorToggleResult::Applied {
-                    set_file: set_file.clone(),
-                    sector: canonical.clone(),
-                    known_sector,
-                }
-            }
+            Some(prev) if prev == active => SectorToggleResult::NoChange {
+                set_file: set_file.clone(),
+                sector: canonical.clone(),
+                known_sector,
+            },
+            _ => SectorToggleResult::Applied {
+                set_file: set_file.clone(),
+                sector: canonical.clone(),
+                known_sector,
+            },
         };
 
         result
