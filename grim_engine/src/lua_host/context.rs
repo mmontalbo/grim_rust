@@ -17,7 +17,7 @@ mod sets;
 
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
-use audio::{AudioRuntime, MusicState, SfxState};
+use audio::{AudioRuntime, AudioRuntimeAdapter, MusicState, SfxState};
 use cutscenes::{CommentaryRecord, CutsceneRuntime, DialogState};
 use geometry::SectorHit;
 use inventory::InventoryState;
@@ -160,6 +160,10 @@ impl EngineContext {
         ActorRuntime::new(&mut self.actors, &mut self.events)
     }
 
+    fn audio_runtime(&mut self) -> AudioRuntimeAdapter<'_> {
+        AudioRuntimeAdapter::new(&mut self.audio, &mut self.events)
+    }
+
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
     }
@@ -264,69 +268,55 @@ impl EngineContext {
     }
 
     fn play_music(&mut self, track: String, params: Vec<String>) {
-        let event = self.audio.play_music(track, params);
-        self.log_event(event);
+        self.audio_runtime().play_music(track, params);
     }
 
     fn queue_music(&mut self, track: String, params: Vec<String>) {
-        let event = self.audio.queue_music(track, params);
-        self.log_event(event);
+        self.audio_runtime().queue_music(track, params);
     }
 
     fn stop_music(&mut self, mode: Option<String>) {
-        let event = self.audio.stop_music(mode);
-        self.log_event(event);
+        self.audio_runtime().stop_music(mode);
     }
 
     fn pause_music(&mut self) {
-        let event = self.audio.pause_music();
-        self.log_event(event);
+        self.audio_runtime().pause_music();
     }
 
     fn resume_music(&mut self) {
-        let event = self.audio.resume_music();
-        self.log_event(event);
+        self.audio_runtime().resume_music();
     }
 
     fn set_music_state(&mut self, state: Option<String>) {
-        let event = self.audio.set_music_state(state);
-        self.log_event(event);
+        self.audio_runtime().set_music_state(state);
     }
 
     fn push_music_state(&mut self, state: Option<String>) {
-        let event = self.audio.push_music_state(state);
-        self.log_event(event);
+        self.audio_runtime().push_music_state(state);
     }
 
     fn pop_music_state(&mut self) {
-        let event = self.audio.pop_music_state();
-        self.log_event(event);
+        self.audio_runtime().pop_music_state();
     }
 
     fn mute_music_group(&mut self, group: Option<String>) {
-        let event = self.audio.mute_music_group(group);
-        self.log_event(event);
+        self.audio_runtime().mute_music_group(group);
     }
 
     fn unmute_music_group(&mut self, group: Option<String>) {
-        let event = self.audio.unmute_music_group(group);
-        self.log_event(event);
+        self.audio_runtime().unmute_music_group(group);
     }
 
     fn set_music_volume(&mut self, volume: Option<f32>) {
-        let event = self.audio.set_music_volume(volume);
-        self.log_event(event);
+        self.audio_runtime().set_music_volume(volume);
     }
 
     fn play_sound_effect(&mut self, cue: String, params: Vec<String>) -> String {
-        let (handle, event) = self.audio.play_sound_effect(cue, params);
-        self.log_event(event);
-        handle
+        self.audio_runtime().play_sound_effect(cue, params)
     }
 
     fn stop_sound_effect(&mut self, target: Option<String>) {
-        let event = self.audio.stop_sound_effect(target);
-        self.log_event(event);
+        self.audio_runtime().stop_sound_effect(target);
     }
 
     fn start_imuse_sound(&mut self, cue: String, priority: Option<i32>, group: Option<i32>) -> i64 {
@@ -337,8 +327,9 @@ impl EngineContext {
         if let Some(value) = group {
             params.push(format!("group={value}"));
         }
-        let handle = self.play_sound_effect(cue, params);
-        if let Some(instance) = self.audio.sfx_mut().active.get_mut(&handle) {
+        let mut runtime = self.audio_runtime();
+        let handle = runtime.play_sound_effect(cue, params);
+        if let Some(instance) = runtime.sfx_mut().active.get_mut(&handle) {
             instance.group = group;
             instance.play_count = 1;
             instance.numeric
@@ -348,14 +339,12 @@ impl EngineContext {
     }
 
     fn stop_sound_effect_by_numeric(&mut self, numeric: i64) {
-        let event = self.audio.stop_sound_effect_by_numeric(numeric);
-        self.log_event(event);
+        self.audio_runtime().stop_sound_effect_by_numeric(numeric);
     }
 
     fn set_sound_param(&mut self, numeric: i64, param: i32, value: i32) {
-        if let Some(event) = self.audio.set_sound_param(numeric, param, value) {
-            self.log_event(event);
-        }
+        self.audio_runtime()
+            .set_sound_param(numeric, param, value);
     }
 
     fn get_sound_param(&self, numeric: i64, param: i32) -> Option<i32> {

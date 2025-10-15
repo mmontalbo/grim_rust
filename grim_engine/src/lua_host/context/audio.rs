@@ -964,6 +964,99 @@ impl MusicState {
     }
 }
 
+/// Couples the audio runtime with the engine event log so call sites stay lean.
+pub(super) struct AudioRuntimeAdapter<'a> {
+    runtime: &'a mut AudioRuntime,
+    events: &'a mut Vec<String>,
+}
+
+impl<'a> AudioRuntimeAdapter<'a> {
+    pub(super) fn new(runtime: &'a mut AudioRuntime, events: &'a mut Vec<String>) -> Self {
+        Self { runtime, events }
+    }
+
+    pub(super) fn play_music(&mut self, track: String, params: Vec<String>) {
+        let event = self.runtime.play_music(track, params);
+        self.events.push(event);
+    }
+
+    pub(super) fn queue_music(&mut self, track: String, params: Vec<String>) {
+        let event = self.runtime.queue_music(track, params);
+        self.events.push(event);
+    }
+
+    pub(super) fn stop_music(&mut self, mode: Option<String>) {
+        let event = self.runtime.stop_music(mode);
+        self.events.push(event);
+    }
+
+    pub(super) fn pause_music(&mut self) {
+        let event = self.runtime.pause_music();
+        self.events.push(event);
+    }
+
+    pub(super) fn resume_music(&mut self) {
+        let event = self.runtime.resume_music();
+        self.events.push(event);
+    }
+
+    pub(super) fn set_music_state(&mut self, state: Option<String>) {
+        let event = self.runtime.set_music_state(state);
+        self.events.push(event);
+    }
+
+    pub(super) fn push_music_state(&mut self, state: Option<String>) {
+        let event = self.runtime.push_music_state(state);
+        self.events.push(event);
+    }
+
+    pub(super) fn pop_music_state(&mut self) {
+        let event = self.runtime.pop_music_state();
+        self.events.push(event);
+    }
+
+    pub(super) fn mute_music_group(&mut self, group: Option<String>) {
+        let event = self.runtime.mute_music_group(group);
+        self.events.push(event);
+    }
+
+    pub(super) fn unmute_music_group(&mut self, group: Option<String>) {
+        let event = self.runtime.unmute_music_group(group);
+        self.events.push(event);
+    }
+
+    pub(super) fn set_music_volume(&mut self, volume: Option<f32>) {
+        let event = self.runtime.set_music_volume(volume);
+        self.events.push(event);
+    }
+
+    pub(super) fn play_sound_effect(&mut self, cue: String, params: Vec<String>) -> String {
+        let (handle, event) = self.runtime.play_sound_effect(cue, params);
+        self.events.push(event);
+        handle
+    }
+
+    pub(super) fn stop_sound_effect(&mut self, target: Option<String>) {
+        let event = self.runtime.stop_sound_effect(target);
+        self.events.push(event);
+    }
+
+    pub(super) fn stop_sound_effect_by_numeric(&mut self, numeric: i64) {
+        let event = self.runtime.stop_sound_effect_by_numeric(numeric);
+        self.events.push(event);
+    }
+
+    pub(super) fn set_sound_param(&mut self, numeric: i64, param: i32, value: i32) {
+        if let Some(event) = self.runtime.set_sound_param(numeric, param, value) {
+            self.events.push(event);
+        }
+    }
+
+    pub(super) fn sfx_mut(&mut self) -> &mut SfxState {
+        self.runtime.sfx_mut()
+    }
+}
+
 impl MusicCueSnapshot {
     fn to_snapshot(&self) -> LuaMusicCueSnapshot {
         LuaMusicCueSnapshot {
