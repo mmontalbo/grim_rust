@@ -427,8 +427,13 @@ impl EngineContext {
         self.script_runtime().attach_thread(handle, key);
     }
 
-    fn script_thread_key(&self, handle: u32) -> Option<&RegistryKey> {
-        self.scripts.thread_key(handle)
+    fn with_script_thread_key<R>(
+        &self,
+        handle: u32,
+        f: impl FnOnce(Option<&RegistryKey>) -> R,
+    ) -> R {
+        let view = self.script_view();
+        f(view.thread_key(handle))
     }
 
     fn increment_script_yield(&mut self, handle: u32) {
@@ -439,8 +444,9 @@ impl EngineContext {
         self.script_view().yield_count(handle)
     }
 
-    fn script_label(&self, handle: u32) -> Option<&str> {
-        self.scripts.label(handle)
+    fn script_label(&self, handle: u32) -> Option<String> {
+        let view = self.script_view();
+        view.label(handle)
     }
 
     fn active_script_handles(&self) -> Vec<u32> {

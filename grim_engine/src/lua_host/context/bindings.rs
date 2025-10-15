@@ -991,7 +991,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
             if let Some(handle) = handle {
                 if let Some(label) = {
                     let ctx = identify_script_ctx.borrow();
-                    ctx.script_label(handle).map(|s| s.to_string())
+                    ctx.script_label(handle)
                 } {
                     return Ok(Value::String(lua_ctx.create_string(&label)?));
                 }
@@ -4303,15 +4303,20 @@ fn resume_script(
     let thread = if let Some(thread) = thread_override {
         thread
     } else {
-        let thread_value = {
+        let thread = {
             let state = context.borrow();
-            if let Some(key) = state.script_thread_key(handle) {
-                lua.registry_value::<Thread>(key)?
+            let maybe_thread = state.with_script_thread_key(handle, |maybe_key| {
+                maybe_key
+                    .map(|key| lua.registry_value::<Thread>(key))
+                    .transpose()
+            })?;
+            if let Some(thread) = maybe_thread {
+                thread
             } else {
                 return Ok(ScriptStep::Completed);
             }
         };
-        thread_value
+        thread
     };
 
     if !matches!(thread.status(), ThreadStatus::Resumable) {
@@ -4367,16 +4372,15 @@ fn resume_script(
             }
             Ok(ScriptStep::Completed)
         }
-        Err(err) => {
-            let label = {
-                let state = context.borrow();
-                state
-                    .script_label(handle)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("#{handle}"))
-            };
-            let message = err.to_string();
-            context
+                Err(err) => {
+                    let label = {
+                        let state = context.borrow();
+                        state
+                            .script_label(handle)
+                            .unwrap_or_else(|| format!("#{handle}"))
+                    };
+                    let message = err.to_string();
+                    context
                 .borrow_mut()
                 .log_event(format!("script.error {label}: {message}"));
             let cleanup = {
@@ -4405,7 +4409,6 @@ fn wait_for_handle(lua: &Lua, context: Rc<RefCell<EngineContext>>, handle: u32) 
                 let state = context.borrow();
                 state
                     .script_label(handle)
-                    .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("#{handle}"))
             };
             return Err(LuaError::external(format!(

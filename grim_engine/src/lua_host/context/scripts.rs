@@ -196,4 +196,12 @@ impl<'a> ScriptRuntimeView<'a> {
     pub(super) fn find_handle(&self, label: &str) -> Option<u32> {
         self.runtime.find_handle(label)
     }
+
+    pub(super) fn thread_key(&self, handle: u32) -> Option<&RegistryKey> {
+        self.runtime.thread_key(handle)
+    }
+
+    pub(super) fn label(&self, handle: u32) -> Option<String> {
+        self.runtime.label(handle).map(|label| label.to_string())
+    }
 }
