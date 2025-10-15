@@ -10,7 +10,8 @@ use crate::geometry_snapshot::{
 use super::actors::ActorSnapshot;
 use super::cutscenes::{CommentaryRecord, CutSceneRecord};
 use super::geometry::{sector_kind_label, ParsedSetGeometry, SetDescriptor, SetSnapshot};
-use super::{vec3_to_array, MusicState, ObjectSnapshot, SfxState, VisibleObjectInfo};
+use super::objects::{ObjectSnapshot, VisibleObjectInfo};
+use super::{vec3_to_array, MusicState, SfxState};
 
 #[derive(Clone)]
 pub(super) struct SnapshotState {

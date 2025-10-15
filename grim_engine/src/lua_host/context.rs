@@ -11,6 +11,7 @@ mod geometry;
 mod geometry_export;
 mod inventory;
 mod menus;
+mod objects;
 mod pause;
 mod scripts;
 
@@ -28,6 +29,7 @@ use menus::{
     install_menu_dialog, install_menu_infrastructure, install_menu_prefs, install_menu_remap,
     MenuRegistry, MenuState,
 };
+use objects::{ObjectRuntime, ObjectSectorRef, ObjectSnapshot};
 use pause::{PauseLabel, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime};
 
@@ -60,45 +62,6 @@ enum SectorToggleResult {
 struct AchievementState {
     eligible: bool,
     established: bool,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct ObjectSectorRef {
-    name: String,
-    kind: SetSectorKind,
-}
-
-#[derive(Debug, Clone)]
-struct ObjectSnapshot {
-    handle: i64,
-    name: String,
-    string_name: Option<String>,
-    set_file: Option<String>,
-    position: Option<Vec3>,
-    range: f32,
-    touchable: bool,
-    visible: bool,
-    interest_actor: Option<u32>,
-    sectors: Vec<ObjectSectorRef>,
-}
-
-#[derive(Debug, Clone)]
-struct VisibleObjectInfo {
-    handle: i64,
-    name: String,
-    string_name: Option<String>,
-    range: f32,
-    distance: Option<f32>,
-    angle: Option<f32>,
-    within_range: Option<bool>,
-    in_hotlist: bool,
-}
-
-impl VisibleObjectInfo {
-    fn display_name(&self) -> &str {
-        self.string_name.as_deref().unwrap_or(self.name.as_str())
-    }
 }
 
 #[derive(Clone)]
@@ -183,12 +146,8 @@ pub(super) struct EngineContext {
     inventory: InventoryState,
     menus: MenuRegistry,
     voice_effect: Option<String>,
-    objects: BTreeMap<i64, ObjectSnapshot>,
-    objects_by_name: BTreeMap<String, i64>,
-    objects_by_actor: BTreeMap<u32, i64>,
+    objects: ObjectRuntime,
     achievements: BTreeMap<String, AchievementState>,
-    visible_objects: Vec<VisibleObjectInfo>,
-    hotlist_handles: Vec<i64>,
     cutscenes: CutsceneRuntime,
     pause: PauseState,
     audio: AudioRuntime,
@@ -237,12 +196,8 @@ impl EngineContext {
             inventory: InventoryState::new(),
             menus: MenuRegistry::new(),
             voice_effect: None,
-            objects: BTreeMap::new(),
-            objects_by_name: BTreeMap::new(),
-            objects_by_actor: BTreeMap::new(),
+            objects: ObjectRuntime::new(),
             achievements: BTreeMap::new(),
-            visible_objects: Vec::new(),
-            hotlist_handles: Vec::new(),
             cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
             audio: AudioRuntime::new(audio_callback),
@@ -1296,36 +1251,8 @@ impl EngineContext {
             .collect()
     }
 
-    fn object_is_in_active_sector(&self, set_file: &str, snapshot: &ObjectSnapshot) -> bool {
-        if snapshot.sectors.is_empty() {
-            return true;
-        }
-        let mut considered = false;
-        for sector in &snapshot.sectors {
-            if matches!(
-                sector.kind,
-                SetSectorKind::Walk | SetSectorKind::Special | SetSectorKind::Other
-            ) {
-                considered = true;
-                if self.is_sector_active(set_file, &sector.name) {
-                    return true;
-                }
-            }
-        }
-        if considered {
-            false
-        } else {
-            true
-        }
-    }
-
     fn register_object(&mut self, mut snapshot: ObjectSnapshot) {
         let handle = snapshot.handle;
-        if let Some(existing) = self.objects.get(&handle) {
-            if let Some(actor_handle) = existing.interest_actor {
-                self.objects_by_actor.remove(&actor_handle);
-            }
-        }
         if snapshot.set_file.is_none() {
             if let Some(actor_handle) = snapshot.interest_actor {
                 if let Some(actor_id) = self.actors.actor_id_for_handle(actor_handle) {
@@ -1356,10 +1283,8 @@ impl EngineContext {
             .set_file
             .clone()
             .unwrap_or_else(|| "<unknown>".to_string());
-        let existed = self.objects.insert(handle, snapshot).is_some();
-        self.objects_by_name.insert(name.clone(), handle);
+        let existed = self.objects.register(snapshot);
         if let Some(actor_handle) = interest_actor {
-            self.objects_by_actor.insert(actor_handle, handle);
             self.log_event(format!("object.link actor#{} -> {}", actor_handle, name));
         }
         let verb = if existed {
@@ -1372,46 +1297,19 @@ impl EngineContext {
     }
 
     fn unregister_object(&mut self, handle: i64) {
-        if let Some(snapshot) = self.objects.remove(&handle) {
-            if let Some(actor_handle) = snapshot.interest_actor {
-                self.objects_by_actor.remove(&actor_handle);
-            }
-            self.objects_by_name.retain(|_, value| *value != handle);
+        if let Some(snapshot) = self.objects.unregister(handle) {
             self.log_event(format!("object.remove {} (#{handle})", snapshot.name));
         }
         self.refresh_commentary_visibility();
     }
 
     fn visible_object_handles(&self) -> Vec<i64> {
-        if let Some(current) = &self.current_set {
-            let current_file = current.set_file.as_str();
-            self.objects
-                .values()
-                .filter(|object| {
-                    object.touchable
-                        && object.visible
-                        && object
-                            .set_file
-                            .as_deref()
-                            .map(|file| file.eq_ignore_ascii_case(current_file))
-                            .unwrap_or(false)
-                        && self.object_is_in_active_sector(current_file, object)
-                })
-                .map(|object| object.handle)
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let current = self.current_set.as_ref().map(|set| set.set_file.as_str());
+        self.objects
+            .visible_handles(current, |set, sector| self.is_sector_active(set, sector))
     }
 
     fn record_visible_objects(&mut self, handles: &[i64]) {
-        self.visible_objects.clear();
-        self.hotlist_handles.clear();
-        if handles.is_empty() {
-            self.log_event("scene.visible <none>".to_string());
-            return;
-        }
-
         let actor_snapshot = self
             .actors
             .selected_actor_snapshot()
@@ -1423,107 +1321,26 @@ impl EngineContext {
             .map(|actor| actor.handle)
             .filter(|handle| *handle != 0);
 
-        let mut names = Vec::new();
-        let mut visible_infos: Vec<VisibleObjectInfo> = Vec::new();
-
-        for handle in handles {
-            if let Some(object) = self.objects.get(handle).cloned() {
-                let display = object
-                    .string_name
-                    .clone()
-                    .unwrap_or_else(|| object.name.clone());
-                names.push(display.clone());
-
-                let mut info = VisibleObjectInfo {
-                    handle: *handle,
-                    name: object.name.clone(),
-                    string_name: object.string_name.clone(),
-                    range: object.range,
-                    distance: None,
-                    angle: None,
-                    within_range: None,
-                    in_hotlist: false,
-                };
-
-                let object_position = object.position.or_else(|| {
-                    object
-                        .interest_actor
-                        .and_then(|h| self.actor_position_by_handle(h))
-                });
-                if let (Some(actor_pos), Some(obj_pos)) = (actor_position, object_position) {
-                    let distance = distance_between(actor_pos, obj_pos);
-                    info.distance = Some(distance);
-                    info.within_range = Some(distance <= object.range + f32::EPSILON);
-                }
-
-                if let (Some(actor_handle), Some(target_handle)) =
-                    (actor_handle, object.interest_actor)
-                {
-                    if let (Some(actor_pos), Some(target_pos)) = (
-                        self.actor_position_by_handle(actor_handle),
-                        self.actor_position_by_handle(target_handle),
-                    ) {
-                        info.angle = Some(heading_between(actor_pos, target_pos) as f32);
-                    }
-                }
-
-                visible_infos.push(info);
-            }
+        let mut log_messages: Vec<String> = Vec::new();
+        self.objects.record_visible_objects(
+            handles,
+            &self.actors,
+            actor_position,
+            actor_handle,
+            |message| log_messages.push(message),
+        );
+        for message in log_messages {
+            self.log_event(message);
         }
-
-        if names.is_empty() {
-            self.log_event("scene.visible <unknown>".to_string());
-        } else {
-            self.log_event(format!("scene.visible {}", names.join(", ")));
-        }
-
-        let mut best_angle: Option<f32> = None;
-        for info in &visible_infos {
-            if let Some(angle) = info.angle {
-                if best_angle.map(|best| angle < best).unwrap_or(true) {
-                    best_angle = Some(angle);
-                }
-            }
-        }
-
-        if let Some(best) = best_angle {
-            for info in &mut visible_infos {
-                if let Some(angle) = info.angle {
-                    if (angle - best).abs() < 10.0 {
-                        info.in_hotlist = true;
-                    }
-                }
-            }
-        }
-
-        let hot_names: Vec<String> = visible_infos
-            .iter()
-            .filter(|info| info.in_hotlist)
-            .map(|info| info.display_name().to_string())
-            .collect();
-
-        if !hot_names.is_empty() {
-            self.log_event(format!("scene.hotlist {}", hot_names.join(", ")));
-        }
-
-        self.hotlist_handles = visible_infos
-            .iter()
-            .filter(|info| info.in_hotlist)
-            .map(|info| info.handle)
-            .collect();
-        self.visible_objects = visible_infos;
         self.refresh_commentary_visibility();
     }
 
     fn object_position_by_actor(&self, actor_handle: u32) -> Option<Vec3> {
-        self.objects_by_actor
-            .get(&actor_handle)
-            .and_then(|object_handle| self.objects.get(object_handle))
-            .and_then(|object| object.position)
+        self.objects.object_position_by_actor(actor_handle)
     }
 
     fn update_object_position_for_actor(&mut self, actor_handle: u32, position: Vec3) {
-        if let Some(object_handle) = self.objects_by_actor.get(&actor_handle).copied() {
+        if let Some(object_handle) = self.objects.handle_for_actor(actor_handle) {
             let actor_set = self
                 .actors
                 .actor_id_for_handle(actor_handle)
@@ -1537,7 +1354,7 @@ impl EngineContext {
             let mut object_name = None;
             let mut set_for_recalc: Option<(String, Vec3)> = None;
             {
-                if let Some(object) = self.objects.get_mut(&object_handle) {
+                if let Some(object) = self.objects.object_mut(object_handle) {
                     object.position = Some(position);
                     object_name = Some(object.name.clone());
                     if object.set_file.is_none() {
@@ -1554,7 +1371,7 @@ impl EngineContext {
             }
             if let Some((set_file, pos)) = set_for_recalc {
                 let sectors = self.compute_object_sectors(&set_file, pos);
-                if let Some(object) = self.objects.get_mut(&object_handle) {
+                if let Some(object) = self.objects.object_mut(object_handle) {
                     object.sectors = sectors;
                 }
             }
@@ -1569,7 +1386,7 @@ impl EngineContext {
     }
 
     fn set_object_touchable(&mut self, handle: i64, touchable: bool) {
-        if let Some(object) = self.objects.get_mut(&handle) {
+        if let Some(object) = self.objects.object_mut(handle) {
             object.touchable = touchable;
         }
         let state = if touchable {
@@ -1582,7 +1399,7 @@ impl EngineContext {
     }
 
     fn set_object_visibility(&mut self, handle: i64, visible: bool) {
-        if let Some(object) = self.objects.get_mut(&handle) {
+        if let Some(object) = self.objects.object_mut(handle) {
             if object.visible != visible {
                 object.visible = visible;
                 let state = if visible { "visible" } else { "hidden" };
@@ -1595,33 +1412,15 @@ impl EngineContext {
     }
 
     fn commentary_candidate_handle(&self) -> Option<i64> {
-        self.hotlist_handles
-            .first()
-            .copied()
-            .or_else(|| self.visible_objects.first().map(|info| info.handle))
+        self.objects.commentary_candidate_handle()
     }
 
     fn commentary_object_visible(&self, record: &CommentaryRecord) -> bool {
-        if let Some(handle) = record.object_handle {
-            if let Some(object) = self.objects.get(&handle) {
-                if !object.visible || !object.touchable {
-                    return false;
-                }
-                if let Some(set_file) = object.set_file.as_ref() {
-                    if let Some(current) = &self.current_set {
-                        if !current.set_file.eq_ignore_ascii_case(set_file) {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                    return self.object_is_in_active_sector(set_file, object);
-                }
-            } else {
-                return false;
-            }
-        }
-        !self.hotlist_handles.is_empty() || !self.visible_objects.is_empty()
+        let current = self.current_set.as_ref().map(|set| set.set_file.as_str());
+        self.objects
+            .commentary_object_visible(record, current, |set, sector| {
+                self.is_sector_active(set, sector)
+            })
     }
 
     fn refresh_commentary_visibility(&mut self) {
@@ -1821,9 +1620,8 @@ impl EngineContext {
         let current = self.current_set.as_ref()?;
         let geometry = self.set_geometry.get(&current.set_file)?;
 
-        let mut handles: Vec<i64> = Vec::new();
-        handles.extend(self.hotlist_handles.iter().copied());
-        for info in &self.visible_objects {
+        let mut handles: Vec<i64> = self.objects.hotlist_handles().to_vec();
+        for info in self.objects.visible_objects() {
             if !handles.contains(&info.handle) {
                 handles.push(info.handle);
             }
@@ -1834,7 +1632,7 @@ impl EngineContext {
         }
 
         for handle in handles {
-            let object = self.objects.get(&handle)?;
+            let object = self.objects.object(handle)?;
             if !object.visible || !object.touchable {
                 continue;
             }
@@ -1906,7 +1704,7 @@ impl EngineContext {
         self.log_event(format!("actor.visibility {} {state}", label));
         if let Some(actor) = self.actors.get_mut(actor_id) {
             actor.is_visible = visible;
-            if let Some(object_handle) = self.objects_by_actor.get(&actor.handle).copied() {
+            if let Some(object_handle) = self.objects.handle_for_actor(actor.handle) {
                 self.set_object_visibility(object_handle, visible);
             }
         }
@@ -1937,10 +1735,10 @@ impl EngineContext {
             set_geometry: self.set_geometry.clone(),
             sector_states: self.sector_states.clone(),
             actors: self.actors.clone_map(),
-            objects: self.objects.clone(),
+            objects: self.objects.clone_records(),
             actor_handles: self.actors.clone_handles(),
-            visible_objects: self.visible_objects.clone(),
-            hotlist_handles: self.hotlist_handles.clone(),
+            visible_objects: self.objects.visible_objects().to_vec(),
+            hotlist_handles: self.objects.hotlist_handles().to_vec(),
             inventory: self.inventory.clone_items(),
             inventory_rooms: self.inventory.clone_rooms(),
             commentary: self.cutscenes.clone_commentary(),
@@ -2865,7 +2663,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
             if handle.is_none() {
                 let lookup = {
                     let ctx = send_front_ctx.borrow();
-                    ctx.objects_by_name.get(&label).copied()
+                    ctx.objects.lookup_by_name(&label)
                 };
                 if let Some(found) = lookup {
                     handle = Some(found);
@@ -5924,9 +5722,9 @@ pub(super) fn dump_runtime_summary(state: &EngineContext) {
             }
         }
     }
-    if !state.visible_objects.is_empty() {
+    if !state.objects.visible_objects().is_empty() {
         println!("  Visible objects:");
-        for info in &state.visible_objects {
+        for info in state.objects.visible_objects() {
             let mut details: Vec<String> = Vec::new();
             if let Some(distance) = info.distance {
                 details.push(format!("dist={distance:.3}"));
@@ -6386,7 +6184,7 @@ pub(super) fn describe_value(value: &Value) -> String {
     }
 }
 
-fn heading_between(from: Vec3, to: Vec3) -> f64 {
+pub(super) fn heading_between(from: Vec3, to: Vec3) -> f64 {
     let dx = (to.x - from.x) as f64;
     let dy = (to.y - from.y) as f64;
     let mut angle = dy.atan2(dx).to_degrees();
@@ -6396,7 +6194,7 @@ fn heading_between(from: Vec3, to: Vec3) -> f64 {
     angle
 }
 
-fn distance_between(a: Vec3, b: Vec3) -> f32 {
+pub(super) fn distance_between(a: Vec3, b: Vec3) -> f32 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     let dz = b.z - a.z;
@@ -6407,10 +6205,11 @@ fn distance_between(a: Vec3, b: Vec3) -> f32 {
 mod tests {
     use super::super::types::Vec3;
     use super::menus::install_menu_common;
+    use super::objects::ObjectSnapshot;
     use super::pause::{install_game_pauser, PauseEvent, PauseLabel};
     use super::{
         candidate_paths, value_slice_to_vec3, AudioCallback, EngineContext, EngineContextHandle,
-        ObjectSnapshot, ParsedSetGeometry,
+        ParsedSetGeometry,
     };
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
@@ -6986,7 +6785,7 @@ mod tests {
         assert!(ctx.visible_object_handles().is_empty());
         let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
         assert_eq!(ctx.visible_object_handles(), vec![3200]);
-        let sectors = ctx.objects.get(&3200).expect("object").sectors.clone();
+        let sectors = ctx.objects.object(3200).expect("object").sectors.clone();
         assert!(!sectors.is_empty(), "expected computed sectors");
         assert!(sectors.iter().any(|sector| sector.name == "desk_walk"));
     }
