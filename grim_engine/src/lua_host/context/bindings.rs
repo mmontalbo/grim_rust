@@ -738,7 +738,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
             let description = describe_value(&value);
             if let Some(setup) = value_to_i32(&value) {
                 let mut ctx = make_setup_ctx.borrow_mut();
-                if let Some(current) = ctx.current_set.clone() {
+                if let Some(current) = ctx.sets.current_set().cloned() {
                     let file = current.set_file.clone();
                     ctx.record_current_setup(&file, setup);
                     ctx.log_event(format!("set.setup.make {file} -> {setup}"));
@@ -763,7 +763,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
                 if let Some(set_file) = set_file_opt.clone() {
                     let setup = ctx.current_setup_for(&set_file).unwrap_or(0);
                     (set_file, setup)
-                } else if let Some(current) = ctx.current_set.as_ref() {
+                } else if let Some(current) = ctx.sets.current_set() {
                     let file = current.set_file.clone();
                     let setup = ctx.current_setup_for(&file).unwrap_or(0);
                     (file, setup)
@@ -3886,7 +3886,8 @@ pub(crate) fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContex
 
 pub(crate) fn dump_runtime_summary(state: &EngineContext) {
     println!("Lua runtime summary:");
-    match &state.current_set {
+    let sets_snapshot = state.sets.snapshot();
+    match &sets_snapshot.current_set {
         Some(set) => {
             let display = set.display_name.as_deref().unwrap_or(&set.variable_name);
             println!("  Current set: {} ({})", set.set_file, display);
@@ -4046,9 +4047,9 @@ pub(crate) fn dump_runtime_summary(state: &EngineContext) {
             .join(", ");
         println!("  Inventory rooms: {}", display);
     }
-    if let Some(current) = &state.current_set {
-        if let Some(states) = state.sector_states.get(&current.set_file) {
-            if let Some(geometry) = state.set_geometry.get(&current.set_file) {
+    if let Some(current) = &sets_snapshot.current_set {
+        if let Some(states) = sets_snapshot.sector_states.get(&current.set_file) {
+            if let Some(geometry) = sets_snapshot.set_geometry.get(&current.set_file) {
                 let mut overrides: Vec<(String, bool)> = Vec::new();
                 for sector in &geometry.sectors {
                     if let Some(active) = states.get(&sector.name) {

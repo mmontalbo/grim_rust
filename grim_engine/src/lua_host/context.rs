@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 mod actors;
@@ -13,17 +13,19 @@ mod menus;
 mod objects;
 mod pause;
 mod scripts;
+mod sets;
 
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 pub use audio::AudioCallback;
 use audio::{AudioRuntime, MusicState, SfxState};
 use cutscenes::{CommentaryRecord, CutsceneRuntime, DialogState};
-use geometry::{ParsedSetGeometry, SectorHit, SetDescriptor, SetSnapshot, SetupInfo};
+use geometry::SectorHit;
 use inventory::InventoryState;
 use menus::{MenuRegistry, MenuState};
 use objects::{ObjectRuntime, ObjectSectorRef, ObjectSnapshot};
 use pause::{PauseLabel, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime};
+use sets::{SectorToggleResult, SetRuntime, SetRuntimeSnapshot};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, install_globals,
@@ -35,22 +37,8 @@ use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
 use grim_analysis::resources::ResourceGraph;
-use grim_formats::{SectorKind as SetSectorKind, SetFile as SetFileData};
+use grim_formats::SectorKind as SetSectorKind;
 use mlua::{Lua, RegistryKey, Result as LuaResult};
-#[derive(Debug)]
-pub(crate) enum SectorToggleResult {
-    Applied {
-        set_file: String,
-        sector: String,
-        known_sector: bool,
-    },
-    NoChange {
-        set_file: String,
-        sector: String,
-        known_sector: bool,
-    },
-    NoSet,
-}
 
 #[derive(Debug, Default, Clone)]
 struct AchievementState {
@@ -129,14 +117,10 @@ impl EngineContextHandle {
 
 pub(super) struct EngineContext {
     verbose: bool,
-    _resources: Rc<ResourceGraph>,
     scripts: ScriptRuntime,
     events: Vec<String>,
-    current_set: Option<SetSnapshot>,
+    sets: SetRuntime,
     actors: ActorStore,
-    available_sets: BTreeMap<String, SetDescriptor>,
-    loaded_sets: BTreeSet<String>,
-    current_setups: BTreeMap<String, i32>,
     inventory: InventoryState,
     menus: MenuRegistry,
     voice_effect: Option<String>,
@@ -145,9 +129,6 @@ pub(super) struct EngineContext {
     cutscenes: CutsceneRuntime,
     pause: PauseState,
     audio: AudioRuntime,
-    lab_collection: Option<Rc<LabCollection>>,
-    set_geometry: BTreeMap<String, ParsedSetGeometry>,
-    sector_states: BTreeMap<String, BTreeMap<String, bool>>,
 }
 
 impl EngineContext {
@@ -157,36 +138,13 @@ impl EngineContext {
         lab_collection: Option<Rc<LabCollection>>,
         audio_callback: Option<Rc<dyn AudioCallback>>,
     ) -> Self {
-        let mut available_sets = BTreeMap::new();
-        for meta in &resources.sets {
-            let setups = meta
-                .setup_slots
-                .iter()
-                .map(|slot| SetupInfo {
-                    label: slot.label.clone(),
-                    index: slot.index as i32,
-                })
-                .collect();
-            available_sets.insert(
-                meta.set_file.clone(),
-                SetDescriptor {
-                    variable_name: meta.variable_name.clone(),
-                    display_name: meta.display_name.clone(),
-                    setups,
-                },
-            );
-        }
-
+        let sets = SetRuntime::new(resources, verbose, lab_collection);
         EngineContext {
             verbose,
-            _resources: resources,
             scripts: ScriptRuntime::new(),
             events: Vec::new(),
-            current_set: None,
+            sets,
             actors: ActorStore::new(1100),
-            available_sets,
-            loaded_sets: BTreeSet::new(),
-            current_setups: BTreeMap::new(),
             inventory: InventoryState::new(),
             menus: MenuRegistry::new(),
             voice_effect: None,
@@ -195,9 +153,6 @@ impl EngineContext {
             cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
             audio: AudioRuntime::new(audio_callback),
-            lab_collection,
-            set_geometry: BTreeMap::new(),
-            sector_states: BTreeMap::new(),
         }
     }
 
@@ -221,8 +176,8 @@ impl EngineContext {
 
     fn push_cut_scene(&mut self, label: Option<String>, flags: Vec<String>) {
         let set_file = self
-            .current_set
-            .as_ref()
+            .sets
+            .current_set()
             .map(|snapshot| snapshot.set_file.clone());
         let sector_hit = set_file.as_ref().and_then(|_| {
             self.geometry_sector_hit("manny", "hot")
@@ -499,21 +454,9 @@ impl EngineContext {
     }
 
     fn switch_to_set(&mut self, set_file: &str) {
-        let set_key = set_file.to_string();
-        let (variable_name, display_name) = match self.available_sets.get(&set_key) {
-            Some(descriptor) => (
-                descriptor.variable_name.clone(),
-                descriptor.display_name.clone(),
-            ),
-            None => (set_key.clone(), None),
-        };
-        self.current_set = Some(SetSnapshot {
-            set_file: set_key.clone(),
-            variable_name,
-            display_name,
-        });
-        self.current_setups.entry(set_key.clone()).or_insert(0);
-        self.log_event(format!("set.switch {set_file}"));
+        {
+            self.sets.switch_to_set(&mut self.events, set_file);
+        }
         if set_file.eq_ignore_ascii_case("mo.set") {
             let needs_pos = self
                 .actors
@@ -535,114 +478,12 @@ impl EngineContext {
     }
 
     fn mark_set_loaded(&mut self, set_file: &str) {
-        if self.loaded_sets.insert(set_file.to_string()) {
-            self.log_event(format!("set.load {set_file}"));
-        }
-        self.load_set_geometry(set_file);
-    }
-
-    fn load_set_geometry(&mut self, set_file: &str) {
-        if self.set_geometry.contains_key(set_file) {
-            return;
-        }
-        let Some(collection) = &self.lab_collection else {
-            return;
-        };
-        match collection.find_entry(set_file) {
-            Some((archive, entry)) => {
-                let bytes = archive.read_entry_bytes(entry);
-                match SetFileData::parse(&bytes) {
-                    Ok(file) => {
-                        let geometry = ParsedSetGeometry::from_set_file(file);
-                        if geometry.has_geometry() {
-                            if self.verbose {
-                                self.log_event(format!(
-                                    "set.geometry {set_file} sectors={} setups={}",
-                                    geometry.sectors.len(),
-                                    geometry.setups.len()
-                                ));
-                            }
-                            self.sector_states
-                                .entry(set_file.to_string())
-                                .or_insert_with(|| {
-                                    let mut map = BTreeMap::new();
-                                    for sector in &geometry.sectors {
-                                        map.insert(sector.name.clone(), sector.default_active);
-                                    }
-                                    map
-                                });
-                            self.set_geometry.insert(set_file.to_string(), geometry);
-                        } else if self.verbose {
-                            eprintln!(
-                                "[grim_engine] info: {} contained no geometry data",
-                                set_file
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        if self.verbose {
-                            eprintln!(
-                                "[grim_engine] warning: failed to parse {}: {:?}",
-                                set_file, err
-                            );
-                        }
-                    }
-                }
-            }
-            None => {
-                if self.verbose {
-                    eprintln!(
-                        "[grim_engine] info: no LAB entry for {} when loading geometry",
-                        set_file
-                    );
-                }
-            }
-        }
+        self.sets.mark_set_loaded(&mut self.events, set_file);
     }
 
     fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
-        if !self.sector_states.contains_key(set_file) {
-            if !self.set_geometry.contains_key(set_file) {
-                self.load_set_geometry(set_file);
-            }
-            let mut map = BTreeMap::new();
-            if let Some(geometry) = self.set_geometry.get(set_file) {
-                for sector in &geometry.sectors {
-                    map.insert(sector.name.clone(), sector.default_active);
-                }
-            }
-            self.sector_states.insert(set_file.to_string(), map);
-        } else if let Some(geometry) = self.set_geometry.get(set_file) {
-            let entries: Vec<(String, bool)> = geometry
-                .sectors
-                .iter()
-                .map(|sector| (sector.name.clone(), sector.default_active))
-                .collect();
-            if let Some(states) = self.sector_states.get_mut(set_file) {
-                for (name, default_active) in entries {
-                    states.entry(name).or_insert(default_active);
-                }
-            }
-        }
-        self.set_geometry.contains_key(set_file)
-    }
-
-    fn canonical_sector_name(&self, set_file: &str, sector: &str) -> Option<String> {
-        let lower = sector.to_ascii_lowercase();
-        if let Some(geometry) = self.set_geometry.get(set_file) {
-            if let Some(poly) = geometry
-                .sectors
-                .iter()
-                .find(|poly| poly.name.to_ascii_lowercase() == lower)
-            {
-                return Some(poly.name.clone());
-            }
-        }
-        self.sector_states.get(set_file).and_then(|map| {
-            map.keys()
-                .find(|name| name.to_ascii_lowercase() == lower)
-                .cloned()
-        })
+        self.sets
+            .ensure_sector_state_map(&mut self.events, set_file)
     }
 
     fn set_sector_active(
@@ -651,82 +492,31 @@ impl EngineContext {
         sector_name: &str,
         active: bool,
     ) -> SectorToggleResult {
-        let set_file = match set_file_hint {
-            Some(file) if !file.is_empty() => file.to_string(),
-            _ => match self.current_set.as_ref() {
-                Some(snapshot) => snapshot.set_file.clone(),
-                None => return SectorToggleResult::NoSet,
-            },
-        };
-
-        let has_geometry = self.ensure_sector_state_map(&set_file);
-        let canonical = self
-            .canonical_sector_name(&set_file, sector_name)
-            .unwrap_or_else(|| sector_name.to_string());
-        let known_sector = if has_geometry {
-            self.set_geometry
-                .get(&set_file)
-                .map(|geometry| {
-                    geometry
-                        .sectors
-                        .iter()
-                        .any(|poly| poly.name.eq_ignore_ascii_case(&canonical))
-                })
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        let states = self
-            .sector_states
-            .get_mut(&set_file)
-            .expect("sector state map missing");
-        let previous = states.insert(canonical.clone(), active);
-        let state = if active { "on" } else { "off" };
-
-        let result = match previous {
-            Some(prev) if prev == active => {
-                self.log_event(format!(
-                    "sector.active {set_file}:{canonical} already {state}"
-                ));
-                SectorToggleResult::NoChange {
-                    set_file: set_file.clone(),
-                    sector: canonical.clone(),
-                    known_sector,
-                }
-            }
-            _ => {
-                self.log_event(format!("sector.active {set_file}:{canonical} {state}"));
-                SectorToggleResult::Applied {
-                    set_file: set_file.clone(),
-                    sector: canonical.clone(),
-                    known_sector,
-                }
-            }
-        };
-
-        self.handle_sector_dependents(&set_file, &canonical, active);
-
+        let result =
+            self.sets
+                .set_sector_active(&mut self.events, set_file_hint, sector_name, active);
+        if let SectorToggleResult::Applied {
+            set_file, sector, ..
+        }
+        | SectorToggleResult::NoChange {
+            set_file, sector, ..
+        } = &result
+        {
+            self.handle_sector_dependents(set_file, sector, active);
+        }
         result
     }
 
     fn is_sector_active(&self, set_file: &str, sector_name: &str) -> bool {
-        let key = self
-            .canonical_sector_name(set_file, sector_name)
-            .unwrap_or_else(|| sector_name.to_string());
-        self.sector_states
-            .get(set_file)
-            .and_then(|map| map.get(&key))
-            .copied()
-            .unwrap_or(true)
+        self.sets.is_sector_active(set_file, sector_name)
     }
 
     fn record_current_setup(&mut self, set_file: &str, setup: i32) {
-        self.current_setups.insert(set_file.to_string(), setup);
+        self.sets.record_current_setup(set_file, setup);
     }
 
     fn current_setup_for(&self, set_file: &str) -> Option<i32> {
-        self.current_setups.get(set_file).copied()
+        self.sets.current_setup_for(set_file)
     }
 
     fn set_actor_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
@@ -876,7 +666,7 @@ impl EngineContext {
                 snapshot.name,
                 snapshot
                     .current_set
-                    .or_else(|| self.current_set.as_ref().map(|set| set.set_file.clone())),
+                    .or_else(|| self.sets.current_set().map(|set| set.set_file.clone())),
                 snapshot.position.unwrap_or(MANNY_OFFICE_SEED_POS),
             )
         };
@@ -896,7 +686,7 @@ impl EngineContext {
         }
 
         if let Some(ref set_file) = current_set {
-            if self.set_geometry.contains_key(set_file)
+            if self.sets.set_geometry().contains_key(set_file)
                 && !self.point_in_active_walk(set_file, (next.x, next.y))
             {
                 self.log_event(format!(
@@ -1007,8 +797,8 @@ impl EngineContext {
             return Some(hit);
         }
 
-        if let Some(current) = &self.current_set {
-            if let Some(descriptor) = self.available_sets.get(&current.set_file) {
+        if let Some(current) = self.sets.current_set() {
+            if let Some(descriptor) = self.sets.available_sets().get(&current.set_file) {
                 match request {
                     "camera" => {
                         if let Some(current_setup) = self.current_setup_for(&current.set_file) {
@@ -1036,19 +826,6 @@ impl EngineContext {
 
         None
     }
-
-    fn sector_hit_from_setup(&self, set_file: &str, label: &str, kind: &str) -> Option<SectorHit> {
-        let descriptor = self.available_sets.get(set_file)?;
-        let index = descriptor.setup_index(label)?;
-        let kind_upper = match kind {
-            "2" => "CAMERA".to_string(),
-            "1" => "HOT".to_string(),
-            "0" => "WALK".to_string(),
-            other => other.to_ascii_uppercase(),
-        };
-        Some(SectorHit::new(index, label.to_string(), kind_upper))
-    }
-
     fn evaluate_sector_name(&self, actor_id: &str, query: &str) -> bool {
         if actor_id.eq_ignore_ascii_case("manny") {
             matches!(query, "manny" | "office" | "desk")
@@ -1087,7 +864,7 @@ impl EngineContext {
         if !self.ensure_sector_state_map(set_file) {
             return Vec::new();
         }
-        let Some(geometry) = self.set_geometry.get(set_file) else {
+        let Some(geometry) = self.sets.set_geometry().get(set_file) else {
             return Vec::new();
         };
         let point = (position.x, position.y);
@@ -1115,7 +892,7 @@ impl EngineContext {
                 }
             }
             if snapshot.set_file.is_none() {
-                if let Some(current) = &self.current_set {
+                if let Some(current) = self.sets.current_set() {
                     snapshot.set_file = Some(current.set_file.clone());
                 }
             }
@@ -1155,7 +932,7 @@ impl EngineContext {
     }
 
     fn visible_object_handles(&self) -> Vec<i64> {
-        let current = self.current_set.as_ref().map(|set| set.set_file.as_str());
+        let current = self.sets.current_set().map(|set| set.set_file.as_str());
         self.objects
             .visible_handles(current, |set, sector| self.is_sector_active(set, sector))
     }
@@ -1198,8 +975,8 @@ impl EngineContext {
                 .and_then(|id| self.actors.get(id))
                 .and_then(|actor| actor.current_set.clone())
                 .or_else(|| {
-                    self.current_set
-                        .as_ref()
+                    self.sets
+                        .current_set()
                         .map(|snapshot| snapshot.set_file.clone())
                 });
             let mut object_name = None;
@@ -1267,7 +1044,7 @@ impl EngineContext {
     }
 
     fn commentary_object_visible(&self, record: &CommentaryRecord) -> bool {
-        let current = self.current_set.as_ref().map(|set| set.set_file.as_str());
+        let current = self.sets.current_set().map(|set| set.set_file.as_str());
         self.objects
             .commentary_object_visible(record, current, |set, sector| {
                 self.is_sector_active(set, sector)
@@ -1396,19 +1173,7 @@ impl EngineContext {
     }
 
     fn point_in_active_walk(&self, set_file: &str, point: (f32, f32)) -> bool {
-        if let Some(geometry) = self.set_geometry.get(set_file) {
-            for sector in geometry
-                .sectors
-                .iter()
-                .filter(|sector| matches!(sector.kind, SetSectorKind::Walk))
-            {
-                if sector.contains(point) && self.is_sector_active(set_file, &sector.name) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        true
+        self.sets.point_in_active_walk(set_file, point)
     }
 
     fn actor_snapshot(&self, actor_id: &str) -> Option<&ActorSnapshot> {
@@ -1420,46 +1185,9 @@ impl EngineContext {
     }
 
     fn geometry_sector_hit(&self, actor_id: &str, raw_kind: &str) -> Option<SectorHit> {
-        let current = self.current_set.as_ref()?;
-        let geometry = self.set_geometry.get(&current.set_file)?;
+        self.sets.current_set()?;
         let point = self.actor_position_xy(actor_id)?;
-        match raw_kind {
-            "camera" | "2" | "hot" | "1" => {
-                let request = if matches!(raw_kind, "hot" | "1") {
-                    "hot"
-                } else {
-                    "camera"
-                };
-                if let Some(setup) = geometry.best_setup_for_point(point) {
-                    return self.sector_hit_from_setup(&current.set_file, &setup.name, request);
-                }
-            }
-            "walk" | "0" => {
-                if let Some(polygon) = geometry.find_polygon(SetSectorKind::Walk, point) {
-                    if self.is_sector_active(&current.set_file, &polygon.name) {
-                        return Some(SectorHit::new(polygon.id, polygon.name.clone(), "WALK"));
-                    }
-                }
-            }
-            _ => {
-                if let Some(kind) = match raw_kind {
-                    "camera" | "2" => Some(SetSectorKind::Camera),
-                    "walk" | "0" => Some(SetSectorKind::Walk),
-                    _ => None,
-                } {
-                    if let Some(polygon) = geometry.find_polygon(kind, point) {
-                        if self.is_sector_active(&current.set_file, &polygon.name) {
-                            return Some(SectorHit::new(
-                                polygon.id,
-                                polygon.name.clone(),
-                                raw_kind.to_ascii_uppercase(),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        None
+        self.sets.geometry_sector_hit(raw_kind, point)
     }
 
     pub(super) fn geometry_sector_name(&self, actor_id: &str, raw_kind: &str) -> Option<String> {
@@ -1468,8 +1196,8 @@ impl EngineContext {
     }
 
     fn visible_sector_hit(&self, _actor_id: &str, request: &str) -> Option<SectorHit> {
-        let current = self.current_set.as_ref()?;
-        let geometry = self.set_geometry.get(&current.set_file)?;
+        let current = self.sets.current_set()?;
+        let geometry = self.sets.set_geometry().get(&current.set_file)?;
 
         let mut handles: Vec<i64> = self.objects.hotlist_handles().to_vec();
         for info in self.objects.visible_objects() {
@@ -1513,7 +1241,8 @@ impl EngineContext {
                 "camera" | "hot" => {
                     if let Some(setup) = geometry.best_setup_for_point(point) {
                         if let Some(hit) =
-                            self.sector_hit_from_setup(&current.set_file, &setup.name, request)
+                            self.sets
+                                .sector_hit_from_setup(&current.set_file, &setup.name, request)
                         {
                             return Some(hit);
                         }
@@ -1576,15 +1305,23 @@ impl EngineContext {
     }
 
     fn snapshot_state(&self) -> geometry_export::SnapshotState {
+        let SetRuntimeSnapshot {
+            current_set,
+            loaded_sets,
+            current_setups,
+            available_sets,
+            set_geometry,
+            sector_states,
+        } = self.sets.snapshot();
         geometry_export::SnapshotState {
-            current_set: self.current_set.clone(),
+            current_set,
             selected_actor: self.actors.selected_actor_id().map(|id| id.to_string()),
             voice_effect: self.voice_effect.clone(),
-            loaded_sets: self.loaded_sets.clone(),
-            current_setups: self.current_setups.clone(),
-            available_sets: self.available_sets.clone(),
-            set_geometry: self.set_geometry.clone(),
-            sector_states: self.sector_states.clone(),
+            loaded_sets,
+            current_setups,
+            available_sets,
+            set_geometry,
+            sector_states,
             actors: self.actors.clone_map(),
             objects: self.objects.clone_records(),
             actor_handles: self.actors.clone_handles(),
@@ -1642,7 +1379,8 @@ mod tests {
     use super::menus::install_menu_common;
     use super::objects::ObjectSnapshot;
     use super::pause::{install_game_pauser, PauseEvent, PauseLabel};
-    use super::{AudioCallback, EngineContext, EngineContextHandle, ParsedSetGeometry};
+    use super::geometry::ParsedSetGeometry;
+    use super::{AudioCallback, EngineContext, EngineContextHandle};
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
     use mlua::{Function, Lua, Table, Value};
@@ -1929,8 +1667,8 @@ mod tests {
     }
 
     fn install_manny_geometry(ctx: &mut EngineContext) {
-        ctx.set_geometry.insert(
-            "mo.set".to_string(),
+        ctx.sets.insert_geometry_for_tests(
+            "mo.set",
             ParsedSetGeometry::from_set_file(manny_geometry_set()),
         );
         ctx.ensure_sector_state_map("mo.set");
@@ -2041,15 +1779,11 @@ mod tests {
     #[test]
     fn geometry_walk_sector_selected_for_point() {
         let mut ctx = make_context();
-        ctx.set_geometry.insert(
-            "mo.set".to_string(),
+        ctx.sets.insert_geometry_for_tests(
+            "mo.set",
             ParsedSetGeometry::from_set_file(sample_geometry_set()),
         );
-        ctx.current_set = Some(super::SetSnapshot {
-            set_file: "mo.set".to_string(),
-            variable_name: "mo".to_string(),
-            display_name: None,
-        });
+        ctx.switch_to_set("mo.set");
         let (id, _handle) = ctx.register_actor_with_handle("Guard", Some(2002));
         ctx.put_actor_in_set(&id, "Guard", "mo.set");
         ctx.set_actor_position(
@@ -2152,8 +1886,8 @@ mod tests {
     #[test]
     fn visible_objects_respect_sector_activation() {
         let mut ctx = make_context();
-        ctx.set_geometry.insert(
-            "mo.set".to_string(),
+        ctx.sets.insert_geometry_for_tests(
+            "mo.set",
             ParsedSetGeometry::from_set_file(sample_geometry_set()),
         );
         ctx.switch_to_set("mo.set");
@@ -2184,8 +1918,8 @@ mod tests {
     #[test]
     fn interest_actor_objects_track_sector_activation() {
         let mut ctx = make_context();
-        ctx.set_geometry.insert(
-            "mo.set".to_string(),
+        ctx.sets.insert_geometry_for_tests(
+            "mo.set",
             ParsedSetGeometry::from_set_file(sample_geometry_set()),
         );
         ctx.switch_to_set("mo.set");
@@ -2225,8 +1959,8 @@ mod tests {
     #[test]
     fn commentary_respects_sector_activation() {
         let mut ctx = make_context();
-        ctx.set_geometry.insert(
-            "mo.set".to_string(),
+        ctx.sets.insert_geometry_for_tests(
+            "mo.set",
             ParsedSetGeometry::from_set_file(sample_geometry_set()),
         );
         ctx.switch_to_set("mo.set");
@@ -2269,8 +2003,8 @@ mod tests {
     #[test]
     fn cut_scene_tracks_sector_activation() {
         let mut ctx = make_context();
-        ctx.set_geometry.insert(
-            "mo.set".to_string(),
+        ctx.sets.insert_geometry_for_tests(
+            "mo.set",
             ParsedSetGeometry::from_set_file(sample_geometry_set()),
         );
         ctx.switch_to_set("mo.set");
@@ -2315,8 +2049,8 @@ mod tests {
     #[test]
     fn geometry_snapshot_reflects_sector_state() {
         let mut ctx = make_context();
-        ctx.set_geometry.insert(
-            "mo.set".to_string(),
+        ctx.sets.insert_geometry_for_tests(
+            "mo.set",
             ParsedSetGeometry::from_set_file(sample_geometry_set()),
         );
         ctx.switch_to_set("mo.set");
