@@ -21,9 +21,8 @@ flow and prototype modern tooling around it.
 - `grim_viewer/` – visual tooling built on the extracted data; see
   `grim_viewer/README.md`.
 - `docs/` – reference material:
-  - `docs/startup_overview.md` walks through the retail boot sequence.
-  - `docs/runtime_smoke_tests.md` documents the Manny hotspot demo and the CLI
-    loop we use for runtime smoke tests.
+- `docs/runtime_smoke_tests.md` documents the Manny hotspot demo and the CLI
+  loop we use for runtime smoke tests.
 - `tools/` – repo-level utilities such as `tools/wip_summary.py` for the current
   project plan and `tools/sync_assets.sh` for asset preparation.
 
