@@ -8,14 +8,18 @@ Usage:
 
 Use --write <path> to write the formatted commit message to a file (for example
 Git's .git/COMMIT_EDITMSG). Without --write, the formatted message is printed
-to stdout.
+to stdout. Pass --commit to invoke `git commit` with the formatted message,
+and repeat --commit-arg to forward custom arguments (for example --commit-arg
+--amend).
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -77,6 +81,18 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="write the formatted message to PATH instead of stdout",
     )
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="run `git commit` with the formatted message",
+    )
+    parser.add_argument(
+        "--commit-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="additional argument to pass to `git commit` (repeatable)",
+    )
     return parser.parse_args()
 
 
@@ -120,6 +136,27 @@ def format_message(component: str, summary: str, why: list[str], what: list[str]
     return "\n".join(lines) + "\n"
 
 
+def run_git_commit(message: str, extra_args: list[str]) -> int:
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
+        handle.write(message)
+        temp_path = Path(handle.name)
+    try:
+        result = subprocess.run(
+            ["git", "commit", "-F", str(temp_path), *extra_args],
+            check=False,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(
+                f"`git commit` failed with exit code {result.returncode}\n"
+            )
+        return result.returncode
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+
 def main() -> int:
     args = parse_args()
     message = format_message(args.component, args.summary, args.why, args.what)
@@ -127,6 +164,8 @@ def main() -> int:
         args.write.write_text(message, encoding="utf-8")
     else:
         sys.stdout.write(message)
+    if args.commit:
+        return run_git_commit(message, args.commit_arg)
     return 0
 
 
