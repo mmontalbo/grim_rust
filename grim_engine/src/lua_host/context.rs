@@ -30,9 +30,7 @@ use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
 use pause::{PauseLabel, PauseRuntimeView, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeView};
-use sets::{
-    SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot, SetRuntimeView,
-};
+use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot, SetRuntimeView};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, install_globals,
@@ -756,9 +754,7 @@ impl EngineContext {
 
     fn visible_object_handles(&self) -> Vec<i64> {
         let sets = self.set_view();
-        let current = sets
-            .current_set()
-            .map(|set| set.set_file.as_str());
+        let current = sets.current_set().map(|set| set.set_file.as_str());
         self.objects
             .visible_handles(current, |set, sector| self.is_sector_active(set, sector))
     }
@@ -842,6 +838,15 @@ impl EngineContext {
 
     fn actor_identity_by_handle(&self, handle: u32) -> Option<(String, String)> {
         self.actors.actor_identity_by_handle(handle)
+    }
+
+    fn set_actor_position_by_handle(&mut self, handle: u32, position: Vec3) -> bool {
+        let Some((id, label)) = self.actor_identity_by_handle(handle) else {
+            self.log_event(format!("actor.pos.unknown_handle #{handle}"));
+            return false;
+        };
+        self.set_actor_position(&id, &label, position);
+        true
     }
 
     fn set_actor_rotation_by_handle(&mut self, handle: u32, rotation: Vec3) -> bool {

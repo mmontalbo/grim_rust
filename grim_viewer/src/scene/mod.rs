@@ -11,6 +11,7 @@ mod orientation;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
+    convert::TryFrom,
     fs,
     path::Path,
 };
@@ -280,6 +281,26 @@ fn compute_entity_bounds(entities: &[SceneEntity]) -> Option<SceneBounds> {
     bounds
 }
 
+fn ensure_entities_have_pose(entities: &[SceneEntity]) -> Result<()> {
+    for entity in entities {
+        ensure!(
+            entity.position.is_some(),
+            "entity {} missing position from transform stream",
+            entity.name
+        );
+
+        if matches!(entity.kind, SceneEntityKind::Actor) {
+            ensure!(
+                entity.scale_multiplier().is_some(),
+                "actor {} missing scale from transform stream",
+                entity.name
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Assemble a `ViewerScene` from the timeline manifest exported by the engine.
 /// Attaches optional geometry snapshots and returns a camera recovered from the
 /// set file when possible.
@@ -303,19 +324,15 @@ pub fn load_scene_from_timeline(
         set_context.display_name(),
     );
 
+    ensure_entities_have_pose(&entities)?;
+
     if let Some(snapshot) = geometry {
-        manny::merge_geometry_entities(
-            &mut entities,
+        manny::validate_geometry_alignment(
+            &entities,
             snapshot,
             set_context.variable_name(),
             set_context.display_name(),
-        );
-        manny::apply_geometry_overrides(
-            &mut entities,
-            snapshot,
-            set_context.variable_name(),
-            set_context.display_name(),
-        );
+        )?;
     }
 
     let bounds = compute_entity_bounds(&entities);

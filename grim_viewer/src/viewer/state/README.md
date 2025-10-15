@@ -47,7 +47,6 @@ and scene modules focused on data acquisition rather than GPU state management.
   the viewer keeps exposing the engine's categories in 3D.
 - Cones also appear for the tube anchor fallback, the gold selection pointer,
   and the axis gizmo arms; those helpers reuse the same primitive batch path.
-- Overlap between shapes is expected: `scene::manny::apply_geometry_overrides`
-  stamps identical transforms onto each object/interest-actor pair (cards,
-  tube, Manny), so their cube and cone proxies stack until we swap in the
-  decoded meshes.
+- Overlap between shapes is expected: the transform stream drives identical
+  poses for each object/interest-actor pair (cards, tube, Manny), so their cube
+  and cone proxies stack until we swap in the decoded meshes.

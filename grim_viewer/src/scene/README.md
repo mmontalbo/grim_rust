@@ -9,10 +9,10 @@ HUD, while keeping the rest of the crate agnostic of the raw JSON layouts.
 ## Key Responsibilities
 - **Timeline ingestion (`mod.rs`):** Parses the boot timeline manifest,
   collects actors/objects created during replay, and records which hooks or Lua
-  scripts spawned them. The same module attaches optional movement traces,
-  hotspot events, and Lua geometry snapshots so downstream code does not need to
-  worry about file formats, capitalization quirks, or Manny-office-only
-  filtering rules.
+  scripts spawned them. The same module attaches optional movement traces and
+  hotspot events (plus optional geometry for validation) so downstream code does
+  not need to worry about file formats, capitalization quirks, or
+  Manny-office-only filtering rules.
 - **Movement analysis (`movement.rs`):** Summarises Manny's captured path into
   total distance, sector counts, and frame-to-position lookups. It also powers
   the keyboard-driven scrubber that highlights head-target markers and feeds the
@@ -30,15 +30,15 @@ HUD, while keeping the rest of the crate agnostic of the raw JSON layouts.
   navigation helpers so `viewer::state` can surface Manny's path without knowing
   about raw samples.
 - `LuaGeometrySnapshot`: Lightweight bridge for Lua-side entity poses, used to
-  keep Manny, tube, and desk anchors aligned when timeline data lags behind.
+  sanity-check the capture pipeline when supplied by the CLI.
 
 ## Data Flow
 1. `main.rs` requests `load_scene_from_timeline` when the user passes
    `--timeline` (and optional movement, hotspot, or geometry arguments).
 2. The loader resolves the referenced assets from the manifest, hydrates a
    `ViewerScene`, and trims entities to the Manny office focus so noisy props do
-   not clutter the HUD. Geometry overrides apply here, ensuring Manny, the desk,
-   and the pneumatic tube line up with the decoded plate.
+   not clutter the HUD. It fails fast if any required transform data is missing,
+   and uses optional geometry snapshots purely as a consistency check.
 3. `ViewerState` receives the `ViewerScene` and immediately exposes its bounds
    to the minimap, its camera parameters to the marker projection code, and its
    movement/hotspot data to the scrubber overlays. Marker batches in

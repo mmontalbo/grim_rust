@@ -461,6 +461,12 @@ fn classify_stateful_global(
     let target = normalize_actor_target(&arguments[0])?;
 
     let subsystem = match lower {
+        "setactorpos" | "set_actor_pos" | "setactorposition" | "set_actor_position" => {
+            StateSubsystem::Actors
+        }
+        "setactorrot" | "set_actor_rot" | "setactorrotation" | "set_actor_rotation" => {
+            StateSubsystem::Actors
+        }
         "setactorscale" | "setscale" | "scale" | "set_actor_scale" => StateSubsystem::Actors,
         "setactorcollisionscale"
         | "setcollisionscale"
@@ -695,6 +701,10 @@ fn extract_simple_var_name(var: &Var) -> Option<String> {
 fn classify_stateful_method(target: &str, method: &str) -> Option<StateSubsystem> {
     let target_lower = target.to_ascii_lowercase();
     let method_lower = method.to_ascii_lowercase();
+
+    if method_lower == "set_softimage_pos" {
+        return Some(StateSubsystem::Actors);
+    }
 
     const OBJECT_METHODS: &[&str] = &[
         "set_object_state",

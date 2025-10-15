@@ -1302,6 +1302,35 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         })?,
     )?;
 
+    let set_actor_pos_ctx = context.clone();
+    globals.set(
+        "SetActorPos",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let mut values = args.into_iter();
+            let handle = values
+                .next()
+                .and_then(|value| value_to_actor_handle(&value));
+            let Some(handle) = handle else {
+                return Ok(());
+            };
+            let x = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let y = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let z = values
+                .next()
+                .and_then(|value| value_to_f32(&value))
+                .unwrap_or(0.0);
+            let mut ctx = set_actor_pos_ctx.borrow_mut();
+            ctx.set_actor_position_by_handle(handle, Vec3 { x, y, z });
+            Ok(())
+        })?,
+    )?;
+
     let set_actor_rot_ctx = context.clone();
     globals.set(
         "SetActorRot",
@@ -1794,21 +1823,20 @@ fn install_actor_methods(
     )?;
 
     let moveto_context = context.clone();
-    actor.set(
-        "moveto",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let (self_table, values) = split_self(args);
-            if let Some(table) = self_table {
-                if let Some(position) = value_slice_to_vec3(&values) {
-                    let (id, name) = actor_identity(&table)?;
-                    moveto_context
-                        .borrow_mut()
-                        .set_actor_position(&id, &name, position);
-                }
+    let moveto_fn = lua.create_function(move |_, args: Variadic<Value>| {
+        let (self_table, values) = split_self(args);
+        if let Some(table) = self_table {
+            if let Some(position) = value_slice_to_vec3(&values) {
+                let (id, name) = actor_identity(&table)?;
+                moveto_context
+                    .borrow_mut()
+                    .set_actor_position(&id, &name, position);
             }
-            Ok(())
-        })?,
-    )?;
+        }
+        Ok(())
+    })?;
+    actor.set("moveto", moveto_fn.clone())?;
+    actor.set("moveTo", moveto_fn)?;
 
     let setpos_context = context.clone();
     actor.set(
@@ -1819,6 +1847,23 @@ fn install_actor_methods(
                 if let Some(position) = value_slice_to_vec3(&values) {
                     let (id, name) = actor_identity(&table)?;
                     setpos_context
+                        .borrow_mut()
+                        .set_actor_position(&id, &name, position);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let set_softimage_pos_context = context.clone();
+    actor.set(
+        "set_softimage_pos",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let (self_table, values) = split_self(args);
+            if let Some(table) = self_table {
+                if let Some(position) = value_slice_to_vec3(&values) {
+                    let (id, name) = actor_identity(&table)?;
+                    set_softimage_pos_context
                         .borrow_mut()
                         .set_actor_position(&id, &name, position);
                 }

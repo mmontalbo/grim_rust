@@ -121,6 +121,7 @@ impl SubsystemReplaySnapshot {
                 method_history: Vec::new(),
                 method_totals: BTreeMap::new(),
                 transform: ActorTransform::default(),
+                transform_stream: Vec::new(),
                 chore_state: ActorChoreState::default(),
             });
 
@@ -166,6 +167,19 @@ impl SubsystemReplaySnapshot {
             event.count,
             &event.triggered_by,
         );
+
+        if event.subsystem != StateSubsystem::Actors {
+            if let Some(actor_state) = self.actors.get_mut(&event.target) {
+                process_actor_detail(
+                    actor_state,
+                    &event.method,
+                    &event.arguments,
+                    &event.triggered_by,
+                    Some(event.trigger_sequence),
+                    true,
+                );
+            }
+        }
     }
 }
 
@@ -199,6 +213,7 @@ impl SetState {
                             method_history: Vec::new(),
                             method_totals: BTreeMap::new(),
                             transform: ActorTransform::default(),
+                            transform_stream: Vec::new(),
                             chore_state: ActorChoreState::default(),
                         },
                     );
@@ -232,6 +247,8 @@ pub struct ActorState {
     pub method_history: Vec<MethodInvocation>,
     pub method_totals: BTreeMap<String, usize>,
     pub transform: ActorTransform,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub transform_stream: Vec<ActorTransformSample>,
     pub chore_state: ActorChoreState,
 }
 
@@ -242,6 +259,38 @@ pub struct ActorTransform {
     pub facing_target: Option<String>,
     pub scale: Option<f32>,
     pub collision_scale: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActorTransformSample {
+    pub method: String,
+    pub trigger_sequence: usize,
+    pub triggered_by: HookReference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<Vector3>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<Vector3>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collision_scale: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facing_target: Option<String>,
+}
+
+impl ActorTransformSample {
+    fn new(method: &str, triggered_by: &HookReference, trigger_sequence: usize) -> Self {
+        ActorTransformSample {
+            method: method.to_string(),
+            trigger_sequence,
+            triggered_by: triggered_by.clone(),
+            position: None,
+            rotation: None,
+            scale: None,
+            collision_scale: None,
+            facing_target: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -599,6 +648,7 @@ fn apply_actor_mutation(actors: &mut BTreeMap<String, ActorState>, mutation: &Su
         method_history: Vec::new(),
         method_totals: BTreeMap::new(),
         transform: ActorTransform::default(),
+        transform_stream: Vec::new(),
         chore_state: ActorChoreState::default(),
     });
 
@@ -626,21 +676,46 @@ fn process_actor_detail(
     record_history: bool,
 ) {
     let method_lower = method.to_ascii_lowercase();
+    let mut sample = if record_history {
+        Some(ActorTransformSample::new(
+            method,
+            triggered_by,
+            trigger_sequence.unwrap_or(0),
+        ))
+    } else {
+        None
+    };
+    let mut recorded = false;
 
     match method_lower.as_str() {
-        "setpos" | "set_pos" | "set_position" => {
+        "setpos" | "set_pos" | "set_position" | "setactorpos" | "set_actor_pos"
+        | "setactorposition" | "set_actor_position" | "setsoftimagepos" | "set_softimage_pos"
+        | "moveto" | "move_to" => {
             if let Some(position) = vector3_from_arguments(args) {
-                actor.transform.position = Some(position);
+                actor.transform.position = Some(position.clone());
+                if let Some(ref mut sample) = sample {
+                    sample.position = Some(position);
+                }
+                recorded = true;
             }
         }
-        "setrot" | "set_rot" | "set_rotation" => {
+        "setrot" | "set_rot" | "set_rotation" | "setactorrot" | "set_actor_rot"
+        | "setactorrotation" | "set_actor_rotation" => {
             if let Some(rotation) = vector3_from_arguments(args) {
-                actor.transform.rotation = Some(rotation);
+                actor.transform.rotation = Some(rotation.clone());
+                if let Some(ref mut sample) = sample {
+                    sample.rotation = Some(rotation);
+                }
+                recorded = true;
             }
         }
         "setactorscale" | "set_actor_scale" | "setscale" | "set_scale" | "scale" => {
             if let Some(scale) = parse_last_f32_arg(args) {
                 actor.transform.scale = Some(scale);
+                if let Some(ref mut sample) = sample {
+                    sample.scale = Some(scale);
+                }
+                recorded = true;
             }
         }
         "setactorcollisionscale"
@@ -650,6 +725,10 @@ fn process_actor_detail(
         | "collision_scale" => {
             if let Some(scale) = parse_last_f32_arg(args) {
                 actor.transform.collision_scale = Some(scale);
+                if let Some(ref mut sample) = sample {
+                    sample.collision_scale = Some(scale);
+                }
+                recorded = true;
             }
         }
         "set_face_target" | "set_facing" | "look_at" => {
@@ -657,6 +736,10 @@ fn process_actor_detail(
                 let target = target.trim();
                 if !target.is_empty() {
                     actor.transform.facing_target = Some(target.to_string());
+                    if let Some(ref mut sample) = sample {
+                        sample.facing_target = Some(target.to_string());
+                    }
+                    recorded = true;
                 }
             }
         }
@@ -701,6 +784,12 @@ fn process_actor_detail(
             }
         }
         _ => {}
+    }
+
+    if recorded {
+        if let Some(sample) = sample {
+            actor.transform_stream.push(sample);
+        }
     }
 }
 

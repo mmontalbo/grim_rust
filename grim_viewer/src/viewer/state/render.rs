@@ -628,8 +628,7 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
                     let ndc = camera.project_ndc(position);
                     println!(
                         "[grim_viewer] Manny world position {:?}, ndc {:?}",
-                        position,
-                        ndc
+                        position, ndc
                     );
                     *logged = true;
                 }
@@ -735,9 +734,9 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         let skip_mesh = manny_mesh_loaded && entity.name.eq_ignore_ascii_case("manny");
         if !skip_mesh {
             // Keep each primitive tied to the scene entity's timeline category. The
-            // cube/cone pairs for desk, cards, and tube all share transforms injected
-            // by scene::manny::apply_geometry_overrides, so the proxies deliberately
-            // overlap until decoded meshes replace them.
+            // cube/cone pairs for desk, cards, and tube all share transforms pulled
+            // directly from the manifest, so the proxies deliberately overlap until
+            // decoded meshes replace them.
             groups.push(
                 mesh_kind_for_entity(entity.kind),
                 MeshInstance {

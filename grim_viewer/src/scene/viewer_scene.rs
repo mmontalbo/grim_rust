@@ -202,6 +202,63 @@ impl SceneEntityKey {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SceneActorTransformSample {
+    pub method: String,
+    pub trigger_sequence: usize,
+    pub triggered_by: Option<HookReference>,
+    pub position: Option<[f32; 3]>,
+    pub rotation: Option<[f32; 3]>,
+    pub scale: Option<f32>,
+    pub collision_scale: Option<f32>,
+    pub facing_target: Option<String>,
+}
+
+impl SceneActorTransformSample {
+    fn from_json(value: &Value) -> Option<Self> {
+        let method = value.get("method")?.as_str()?.to_string();
+        let trigger_sequence = value
+            .get("trigger_sequence")
+            .and_then(|field| field.as_u64())
+            .and_then(|raw| usize::try_from(raw).ok())
+            .unwrap_or(0);
+        let triggered_by = value
+            .get("triggered_by")
+            .and_then(parse_hook_reference);
+
+        let position = value
+            .get("position")
+            .and_then(parse_vec3_object);
+        let rotation = value
+            .get("rotation")
+            .and_then(parse_vec3_object);
+        let scale = value
+            .get("scale")
+            .and_then(|field| field.as_f64())
+            .map(|raw| raw as f32);
+        let collision_scale = value
+            .get("collision_scale")
+            .and_then(|field| field.as_f64())
+            .map(|raw| raw as f32);
+        let facing_target = value
+            .get("facing_target")
+            .and_then(|field| field.as_str())
+            .map(str::to_string);
+
+        Some(SceneActorTransformSample {
+            method,
+            trigger_sequence,
+            triggered_by,
+            position,
+            rotation,
+            scale,
+            collision_scale,
+            facing_target,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct SceneEntityBuilder {
     key: SceneEntityKey,
@@ -221,6 +278,7 @@ struct SceneEntityBuilder {
     last_completed: Option<String>,
     actor_scale: Option<f32>,
     collision_scale: Option<f32>,
+    transform_stream: Vec<SceneActorTransformSample>,
 }
 
 impl SceneEntityBuilder {
@@ -243,6 +301,7 @@ impl SceneEntityBuilder {
             last_completed: None,
             actor_scale: None,
             collision_scale: None,
+            transform_stream: Vec::new(),
         }
     }
 
@@ -309,6 +368,21 @@ impl SceneEntityBuilder {
             }
         }
 
+        if let Some(stream) = value
+            .get("transform_stream")
+            .and_then(|field| field.as_array())
+        {
+            for entry in stream {
+                if let Some(sample) = SceneActorTransformSample::from_json(entry) {
+                    if let Some(reference) = sample.triggered_by.as_ref() {
+                        self.register_hook_reference(reference, hooks);
+                    }
+                    self.methods.insert(sample.method.clone());
+                    self.transform_stream.push(sample);
+                }
+            }
+        }
+
         if let Some(chore) = value.get("chore_state") {
             if let Some(name) = chore
                 .get("last_played")
@@ -352,12 +426,28 @@ impl SceneEntityBuilder {
 
         let lower = method.to_ascii_lowercase();
         match lower.as_str() {
-            "setpos" | "set_pos" | "set_position" => {
+            "setpos"
+            | "set_pos"
+            | "set_position"
+            | "setactorpos"
+            | "set_actor_pos"
+            | "setactorposition"
+            | "set_actor_position"
+            | "setsoftimagepos"
+            | "set_softimage_pos"
+            | "moveto"
+            | "move_to" => {
                 if let Some(vec) = parse_vec3_args(args) {
                     self.position = Some(vec);
                 }
             }
-            "setrot" | "set_rot" | "set_rotation" => {
+            "setrot"
+            | "set_rot"
+            | "set_rotation"
+            | "setactorrot"
+            | "set_actor_rot"
+            | "setactorrotation"
+            | "set_actor_rotation" => {
                 if let Some(vec) = parse_vec3_args(args) {
                     self.rotation = Some(vec);
                 }
@@ -466,6 +556,7 @@ impl SceneEntityBuilder {
             last_completed: self.last_completed,
             actor_scale: self.actor_scale,
             collision_scale: self.collision_scale,
+            transform_stream: self.transform_stream,
         }
     }
 
@@ -506,6 +597,8 @@ pub struct SceneEntity {
     pub last_completed: Option<String>,
     pub actor_scale: Option<f32>,
     pub collision_scale: Option<f32>,
+    #[allow(dead_code)]
+    pub transform_stream: Vec<SceneActorTransformSample>,
 }
 
 impl SceneEntity {
