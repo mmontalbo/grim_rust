@@ -128,3 +128,72 @@ impl ScriptRecord {
         self.yields
     }
 }
+
+/// Couples script lifecycle operations with engine event logging.
+pub(super) struct ScriptRuntimeAdapter<'a> {
+    runtime: &'a mut ScriptRuntime,
+    events: &'a mut Vec<String>,
+}
+
+/// Provides read-only accessors for script runtime state.
+pub(super) struct ScriptRuntimeView<'a> {
+    runtime: &'a ScriptRuntime,
+}
+
+impl<'a> ScriptRuntimeAdapter<'a> {
+    pub(super) fn new(runtime: &'a mut ScriptRuntime, events: &'a mut Vec<String>) -> Self {
+        Self { runtime, events }
+    }
+
+    pub(super) fn start_script(
+        &mut self,
+        label: String,
+        callable: Option<RegistryKey>,
+    ) -> u32 {
+        let (handle, event) = self.runtime.start_script(label, callable);
+        self.events.push(event);
+        handle
+    }
+
+    pub(super) fn attach_thread(&mut self, handle: u32, key: RegistryKey) {
+        self.runtime.attach_thread(handle, key);
+    }
+
+    pub(super) fn increment_yield(&mut self, handle: u32) {
+        self.runtime.increment_yield(handle);
+    }
+
+    pub(super) fn complete_script(&mut self, handle: u32) -> ScriptCleanup {
+        let (cleanup, event) = self.runtime.complete_script(handle);
+        if let Some(message) = event {
+            self.events.push(message);
+        }
+        cleanup
+    }
+}
+
+impl<'a> ScriptRuntimeView<'a> {
+    pub(super) fn new(runtime: &'a ScriptRuntime) -> Self {
+        Self { runtime }
+    }
+
+    pub(super) fn has_label(&self, label: &str) -> bool {
+        self.runtime.has_label(label)
+    }
+
+    pub(super) fn yield_count(&self, handle: u32) -> Option<u32> {
+        self.runtime.yield_count(handle)
+    }
+
+    pub(super) fn active_handles(&self) -> Vec<u32> {
+        self.runtime.active_handles()
+    }
+
+    pub(super) fn is_running(&self, handle: u32) -> bool {
+        self.runtime.is_running(handle)
+    }
+
+    pub(super) fn find_handle(&self, label: &str) -> Option<u32> {
+        self.runtime.find_handle(label)
+    }
+}

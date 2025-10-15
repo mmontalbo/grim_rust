@@ -25,7 +25,7 @@ use inventory::InventoryState;
 use menus::{MenuRegistry, MenuState};
 use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
 use pause::{PauseLabel, PauseState};
-use scripts::{ScriptCleanup, ScriptRuntime};
+use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeView};
 use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot};
 use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 
@@ -180,6 +180,14 @@ impl EngineContext {
 
     fn cutscene_runtime(&mut self) -> CutsceneRuntimeAdapter<'_> {
         CutsceneRuntimeAdapter::new(&mut self.cutscenes, &mut self.events)
+    }
+
+    fn script_runtime(&mut self) -> ScriptRuntimeAdapter<'_> {
+        ScriptRuntimeAdapter::new(&mut self.scripts, &mut self.events)
+    }
+
+    fn script_view(&self) -> ScriptRuntimeView<'_> {
+        ScriptRuntimeView::new(&self.scripts)
     }
 
     fn movement_runtime(&mut self) -> MovementRuntimeAdapter<'_> {
@@ -408,17 +416,15 @@ impl EngineContext {
     }
 
     fn start_script(&mut self, label: String, callable: Option<RegistryKey>) -> u32 {
-        let (handle, event) = self.scripts.start_script(label, callable);
-        self.log_event(event);
-        handle
+        self.script_runtime().start_script(label, callable)
     }
 
     fn has_script_with_label(&self, label: &str) -> bool {
-        self.scripts.has_label(label)
+        self.script_view().has_label(label)
     }
 
     fn attach_script_thread(&mut self, handle: u32, key: RegistryKey) {
-        self.scripts.attach_thread(handle, key);
+        self.script_runtime().attach_thread(handle, key);
     }
 
     fn script_thread_key(&self, handle: u32) -> Option<&RegistryKey> {
@@ -426,11 +432,11 @@ impl EngineContext {
     }
 
     fn increment_script_yield(&mut self, handle: u32) {
-        self.scripts.increment_yield(handle);
+        self.script_runtime().increment_yield(handle);
     }
 
     fn script_yield_count(&self, handle: u32) -> Option<u32> {
-        self.scripts.yield_count(handle)
+        self.script_view().yield_count(handle)
     }
 
     fn script_label(&self, handle: u32) -> Option<&str> {
@@ -438,19 +444,15 @@ impl EngineContext {
     }
 
     fn active_script_handles(&self) -> Vec<u32> {
-        self.scripts.active_handles()
+        self.script_view().active_handles()
     }
 
     fn is_script_running(&self, handle: u32) -> bool {
-        self.scripts.is_running(handle)
+        self.script_view().is_running(handle)
     }
 
     fn complete_script(&mut self, handle: u32) -> ScriptCleanup {
-        let (cleanup, event) = self.scripts.complete_script(handle);
-        if let Some(message) = event {
-            self.log_event(message);
-        }
-        cleanup
+        self.script_runtime().complete_script(handle)
     }
 
     fn ensure_actor_mut(&mut self, id: &str, label: &str) -> &mut ActorSnapshot {
@@ -697,7 +699,7 @@ impl EngineContext {
     }
 
     fn find_script_handle(&self, label: &str) -> Option<u32> {
-        self.scripts.find_handle(label)
+        self.script_view().find_handle(label)
     }
 
     fn register_actor_with_handle(
