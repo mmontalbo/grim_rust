@@ -304,6 +304,12 @@ pub fn load_scene_from_timeline(
     );
 
     if let Some(snapshot) = geometry {
+        manny::merge_geometry_entities(
+            &mut entities,
+            snapshot,
+            set_context.variable_name(),
+            set_context.display_name(),
+        );
         manny::apply_geometry_overrides(
             &mut entities,
             snapshot,

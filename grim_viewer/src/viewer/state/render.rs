@@ -61,14 +61,15 @@ const PREVIEW_ORBIT_FACTOR: f32 = 3.6;
 const PREVIEW_ELEVATION_FACTOR: f32 = 2.4;
 const PREVIEW_MIN_DISTANCE: f32 = 2.0;
 
-static MANNY_SCALE_LOG: Lazy<Mutex<Option<(Option<f32>, Option<f32>, Option<f32>)>>> =
+static MANNY_SCALE_LOG: Lazy<Mutex<Option<(Option<f32>, Option<f32>, Option<f32>, f32)>>> =
     Lazy::new(|| Mutex::new(None));
+static MANNY_POSITION_LOGGED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
-fn log_manny_scale_state(entity: &SceneEntity) {
+fn log_manny_scale_state(entity: &SceneEntity, base_scale: f32) {
     let actor_scale = entity.actor_scale;
     let collision_scale = entity.collision_scale;
     let viewer_scale = entity.scale_multiplier();
-    let latest = Some((viewer_scale, actor_scale, collision_scale));
+    let latest = Some((viewer_scale, actor_scale, collision_scale, base_scale));
 
     let mut last = MANNY_SCALE_LOG
         .lock()
@@ -79,10 +80,11 @@ fn log_manny_scale_state(entity: &SceneEntity) {
             None => String::from("-"),
         };
         log::info!(
-            "[viewer] Manny scale resolved -> viewer={} actor={} collision={}",
+            "[viewer] Manny scale resolved -> viewer={} actor={} collision={} base_scale={:.3}",
             format_scale(viewer_scale),
             format_scale(actor_scale),
-            format_scale(collision_scale)
+            format_scale(collision_scale),
+            base_scale
         );
         *last = latest;
     }
@@ -538,8 +540,10 @@ fn manny_mesh_instance(
     };
     let anchor_scale = scale_for_factor(base_scale, MANNY_ANCHOR_SCALE * clamped_multiplier);
     let radius = mesh.radius.unwrap_or(0.0).abs();
-    let mut scale = if radius > 1e-4 {
-        anchor_scale / radius
+    let unit_scale = mesh.unit_scale.unwrap_or(1.0).abs().max(1e-4);
+    let radius_world = radius * unit_scale;
+    let mut scale = if radius_world > 1e-4 {
+        anchor_scale / radius_world
     } else {
         anchor_scale
     };
@@ -600,6 +604,7 @@ fn ensure_mesh_instance_capacity(state: &mut ViewerState, required: usize) {
 fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
     let scene = state.scene.as_ref()?;
     let base_scale = bounds_scale(scene.position_bounds.as_ref());
+    let camera = state.camera_projector.as_ref();
     let mut groups = MeshInstanceGroups::default();
 
     let manny_mesh = state
@@ -613,8 +618,22 @@ fn build_mesh_groups(state: &ViewerState) -> Option<MeshInstanceGroups> {
         .find(|entity| entity.name.eq_ignore_ascii_case("manny"));
 
     if let Some(entity) = manny_entity {
-        log_manny_scale_state(entity);
+        log_manny_scale_state(entity, base_scale);
         if let Some(position) = entity.position {
+            if let Some(camera) = camera {
+                let mut logged = MANNY_POSITION_LOGGED
+                    .lock()
+                    .expect("manny position log mutex poisoned");
+                if !*logged {
+                    let ndc = camera.project_ndc(position);
+                    println!(
+                        "[grim_viewer] Manny world position {:?}, ndc {:?}",
+                        position,
+                        ndc
+                    );
+                    *logged = true;
+                }
+            }
             let palette = MANNY_ANCHOR_PALETTE;
             let color = palette_to_color(palette.color, palette.highlight.max(0.6));
             let scale_multiplier = entity.scale_multiplier().unwrap_or(1.0);

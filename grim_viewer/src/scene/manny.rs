@@ -1,7 +1,10 @@
 //! Manny-office specific behaviour: pruning the scene allowlist and reconciling
 //! geometry snapshots so the viewer focuses on the core desk/tube experience.
 
-use super::{EntityOrientation, GeometryPose, LuaGeometrySnapshot, SceneEntity};
+use super::{
+    EntityOrientation, GeometryPose, LuaActorSnapshot, LuaGeometrySnapshot, SceneEntity,
+    SceneEntityKind,
+};
 
 pub(super) fn is_manny_office(
     set_variable_name: Option<&str>,
@@ -96,6 +99,58 @@ pub(super) fn apply_geometry_overrides(
     }
 }
 
+pub(super) fn merge_geometry_entities(
+    entities: &mut Vec<SceneEntity>,
+    geometry: &LuaGeometrySnapshot,
+    set_variable_name: Option<&str>,
+    set_display_name: Option<&str>,
+) {
+    if !is_manny_office(set_variable_name, set_display_name) {
+        return;
+    }
+
+    let Some(actor) = geometry_actor_snapshot(geometry, "manny") else {
+        return;
+    };
+
+    let has_manny = entities
+        .iter()
+        .any(|entity| entity.name.eq_ignore_ascii_case("manny"));
+    if has_manny {
+        return;
+    }
+
+    let name = actor
+        .name
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Manny".to_string());
+
+    let entity = SceneEntity {
+        kind: SceneEntityKind::Actor,
+        name,
+        created_by: Some("geometry.snapshot".to_string()),
+        timeline_hook_index: None,
+        timeline_stage_index: None,
+        timeline_stage_label: None,
+        timeline_hook_name: None,
+        methods: Vec::new(),
+        position: actor.position,
+        rotation: actor.rotation,
+        orientation: actor.rotation.map(EntityOrientation::from_degrees),
+        facing_target: None,
+        head_control: None,
+        head_look_rate: None,
+        last_played: None,
+        last_looping: None,
+        last_completed: None,
+        actor_scale: actor.scale,
+        collision_scale: actor.collision_scale,
+    };
+
+    entities.push(entity);
+}
+
 fn manny_office_entity_names(set_prefix: &str) -> Vec<String> {
     let prefix = if set_prefix.is_empty() {
         "mo"
@@ -135,6 +190,17 @@ fn geometry_object_pose(snapshot: &LuaGeometrySnapshot, name: &str) -> Option<Ge
                 .unwrap_or(false)
         })
         .and_then(|object| object.pose())
+}
+
+fn geometry_actor_snapshot<'a>(
+    snapshot: &'a LuaGeometrySnapshot,
+    key: &str,
+) -> Option<&'a LuaActorSnapshot> {
+    snapshot
+        .actors
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, actor)| actor)
 }
 
 #[cfg(test)]
@@ -231,5 +297,45 @@ mod tests {
         assert_eq!(entities[0].actor_scale, Some(1.2));
         assert_eq!(entities[0].collision_scale, Some(0.35));
         assert_eq!(entities[1].position, Some([4.0, 5.0, 6.0]));
+    }
+
+    #[test]
+    fn geometry_merge_inserts_manny_entity() {
+        let mut entities = vec![make_entity(SceneEntityKind::Object, "mo.computer")];
+
+        let mut snapshot = LuaGeometrySnapshot {
+            actors: BTreeMap::new(),
+            objects: Vec::new(),
+        };
+
+        snapshot.actors.insert(
+            "manny".to_string(),
+            LuaActorSnapshot {
+                name: Some("Manny".to_string()),
+                position: Some([0.5, 1.0, 0.25]),
+                rotation: Some([0.0, 180.0, 0.0]),
+                scale: Some(2.0),
+                collision_scale: Some(0.4),
+                ..Default::default()
+            },
+        );
+
+        merge_geometry_entities(&mut entities, &snapshot, Some("mo"), Some("Manny's Office"));
+
+        assert_eq!(entities.len(), 2);
+        let manny = entities
+            .iter()
+            .find(|entity| entity.name.eq_ignore_ascii_case("manny"))
+            .expect("manny entity created from geometry");
+        assert_eq!(manny.position, Some([0.5, 1.0, 0.25]));
+        assert_eq!(manny.rotation, Some([0.0, 180.0, 0.0]));
+        let orientation = manny
+            .orientation
+            .expect("orientation derived from geometry rotation");
+        assert!(orientation.forward[0].abs() < 1e-6);
+        assert!((orientation.forward[1] + 1.0).abs() < 1e-6);
+        assert!(orientation.forward[2].abs() < 1e-6);
+        assert_eq!(manny.actor_scale, Some(2.0));
+        assert_eq!(manny.collision_scale, Some(0.4));
     }
 }

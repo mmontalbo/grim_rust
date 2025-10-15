@@ -55,6 +55,7 @@ pub struct AssetMesh {
     pub bounds_max: [f32; 3],
     pub radius: Option<f32>,
     pub insert_offset: Option<[f32; 3]>,
+    pub unit_scale: Option<f32>,
 }
 
 #[repr(C)]
@@ -264,6 +265,7 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
     let export: ExportModel = serde_json::from_slice(&data)
         .with_context(|| format!("parsing mesh JSON {}", path.display()))?;
     let model_name = export.name.clone();
+    let unit_scale = export.unit_scale.filter(|value| value.is_finite());
 
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -356,6 +358,7 @@ pub fn load_exported_mesh(path: &Path) -> Result<AssetMesh> {
         bounds_max,
         radius: export.radius,
         insert_offset,
+        unit_scale,
     })
 }
 
@@ -367,6 +370,8 @@ struct ExportModel {
     radius: Option<f32>,
     #[serde(default)]
     insert_offset: Option<[f32; 3]>,
+    #[serde(default)]
+    unit_scale: Option<f32>,
     #[serde(default)]
     nodes: Vec<ExportNode>,
 }

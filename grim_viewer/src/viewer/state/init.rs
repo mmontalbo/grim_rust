@@ -788,12 +788,13 @@ fn create_mesh_resources(
             bounds_max,
             radius,
             insert_offset,
+            unit_scale,
         } = asset;
         let label = name.as_deref().unwrap_or("mesh-manny");
         let vertex_count = primitive.vertices.len();
         println!(
-            "[grim_viewer] Manny mesh loaded: {} vertices, {} triangles, bounds min {:?}, max {:?}, radius {:?}, insert {:?}",
-            vertex_count, triangle_count, bounds_min, bounds_max, radius, insert_offset
+            "[grim_viewer] Manny mesh loaded: {} vertices, {} triangles, bounds min {:?}, max {:?}, radius {:?}, insert {:?}, unit_scale={:?}",
+            vertex_count, triangle_count, bounds_min, bounds_max, radius, insert_offset, unit_scale
         );
         let buffers = upload_primitive(device, label, primitive);
         let bounds_center = [
@@ -830,6 +831,7 @@ fn create_mesh_resources(
             insert_offset,
             preview_center_matrix,
             max_half_extent,
+            unit_scale,
         }
     });
 

@@ -12,6 +12,11 @@ use grim_formats::{
 };
 use serde::Serialize;
 
+/// Softimage assets are authored roughly ten times smaller than the in-game
+/// coordinate system. The original engine applies this scale when staging
+/// costumes, so we mirror it here while exporting JSON for the viewer.
+const SOFTIMAGE_TO_WORLD_SCALE: f32 = 10.0;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
@@ -58,19 +63,27 @@ struct ExportModel {
     materials: Vec<String>,
     radius: f32,
     insert_offset: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unit_scale: Option<f32>,
     geosets: Vec<ExportGeoset>,
-    nodes: Vec<ThreeDoNode>,
+    nodes: Vec<ExportNode>,
 }
 
 impl From<&ThreeDoModel> for ExportModel {
     fn from(model: &ThreeDoModel) -> Self {
+        let scale = SOFTIMAGE_TO_WORLD_SCALE;
         ExportModel {
             name: model.name.clone(),
             materials: model.materials.clone(),
             radius: model.radius,
             insert_offset: model.insert_offset,
+            unit_scale: if (scale - 1.0).abs() > f32::EPSILON {
+                Some(scale)
+            } else {
+                None
+            },
             geosets: model.geosets.iter().map(ExportGeoset::from).collect(),
-            nodes: model.nodes.clone(),
+            nodes: model.nodes.iter().map(ExportNode::from).collect(),
         }
     }
 }
@@ -119,6 +132,29 @@ impl From<&ThreeDoMesh> for ExportMesh {
             texture_vertices: mesh.texture_vertices.clone(),
             faces: mesh.faces.clone(),
             triangles: mesh.triangles(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ExportNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mesh_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<usize>,
+    pivot: [f32; 3],
+    position: [f32; 3],
+    rotation_yaw_pitch_roll: [f32; 3],
+}
+
+impl From<&ThreeDoNode> for ExportNode {
+    fn from(node: &ThreeDoNode) -> Self {
+        ExportNode {
+            mesh_index: node.mesh_index,
+            parent: node.parent,
+            pivot: node.pivot,
+            position: node.position,
+            rotation_yaw_pitch_roll: node.rotation_yaw_pitch_roll,
         }
     }
 }

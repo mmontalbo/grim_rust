@@ -153,4 +153,5 @@ pub(super) struct MannyMesh {
     pub insert_offset: Option<[f32; 3]>,
     pub preview_center_matrix: Mat4,
     pub max_half_extent: f32,
+    pub unit_scale: Option<f32>,
 }
