@@ -45,7 +45,7 @@ def _load_workspace_members() -> set[str]:
     return members
 
 
-ALLOWED_COMPONENTS = _load_workspace_members().union({"tools", "docs"})
+ALLOWED_COMPONENTS = _load_workspace_members().union({"tools", "docs", "shim", "telemetry"})
 
 
 def validate_component(value: str) -> str:
