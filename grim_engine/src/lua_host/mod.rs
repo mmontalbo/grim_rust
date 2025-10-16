@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
-use grim_stream::{CoverageCounter, StateUpdate};
 use grim_analysis::resources::ResourceGraph;
+use grim_stream::{CoverageCounter, StateUpdate};
 use mlua::{Lua, LuaOptions, StdLib};
 
 use crate::lab_collection::LabCollection;
@@ -136,9 +136,7 @@ pub fn run_boot_sequence(
             events: Vec::new(),
         };
         if let Err(err) = stream.send_state_update(update) {
-            eprintln!(
-                "[grim_engine] failed to publish final state update: {err:?}"
-            );
+            eprintln!("[grim_engine] failed to publish final state update: {err:?}");
         }
     }
     Ok(EngineRunSummary { events, coverage })

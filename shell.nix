@@ -86,6 +86,7 @@ in pkgs.mkShell {
     rustfmt
     rust-analyzer
     pkg-config
+    ffmpeg-full
     alsa-lib
     vulkan-loader
     wayland

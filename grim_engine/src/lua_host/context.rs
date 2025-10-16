@@ -186,9 +186,7 @@ pub(super) fn describe_set_hook(method_name: &str) -> Option<SetHookDescriptor> 
             lookup_key: "camera_change".to_string(),
             category: HookCategory::CameraChange,
         })
-    } else if normalized
-        .normalized
-        .starts_with("set_up")
+    } else if normalized.normalized.starts_with("set_up")
         || normalized.normalized.starts_with("setup")
     {
         Some(SetHookDescriptor {

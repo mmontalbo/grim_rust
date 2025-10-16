@@ -162,9 +162,7 @@ pub(crate) fn simulate_movement(
                         events: Vec::new(),
                     };
                     if let Err(err) = stream.send_state_update(update) {
-                        eprintln!(
-                            "[grim_engine] failed to stream movement sample: {err:?}"
-                        );
+                        eprintln!("[grim_engine] failed to stream movement sample: {err:?}");
                     }
                 }
                 samples.push(sample);
@@ -210,9 +208,7 @@ pub(crate) fn simulate_movement(
                     events: Vec::new(),
                 };
                 if let Err(err) = stream.send_state_update(update) {
-                    eprintln!(
-                        "[grim_engine] failed to stream movement sample: {err:?}"
-                    );
+                    eprintln!("[grim_engine] failed to stream movement sample: {err:?}");
                 }
             }
             samples.push(sample);

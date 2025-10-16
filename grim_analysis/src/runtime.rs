@@ -54,9 +54,7 @@ fn classify_hooks(set: &SetMetadata) -> SetHooks {
             hooks.exit = Some(method.clone());
         } else if normalized.simplified == "camerachange" {
             hooks.camera_change = Some(method.clone());
-        } else if normalized
-            .normalized
-            .starts_with("set_up")
+        } else if normalized.normalized.starts_with("set_up")
             || normalized.normalized.starts_with("setup")
         {
             hooks.setup_functions.push(method.clone());

@@ -22,9 +22,7 @@ pub const PROTOCOL_VERSION: u16 = 0x0001;
 pub const HEADER_LEN: usize = 4 + 2 + 2 + 4;
 
 /// Message kinds understood by GrimStream v1.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr, Hash,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr, Hash)]
 #[repr(u16)]
 pub enum MessageKind {
     Hello = 0x0001,
@@ -213,11 +211,10 @@ where
     let header = MessageHeader {
         version: PROTOCOL_VERSION,
         kind,
-        length: u32::try_from(payload_bytes.len())
-            .map_err(|_| ProtocolError::LengthMismatch {
-                expected: u32::MAX,
-                actual: payload_bytes.len(),
-            })?,
+        length: u32::try_from(payload_bytes.len()).map_err(|_| ProtocolError::LengthMismatch {
+            expected: u32::MAX,
+            actual: payload_bytes.len(),
+        })?,
     };
     let mut out = Vec::with_capacity(HEADER_LEN + payload_bytes.len());
     out.extend_from_slice(&header.encode());

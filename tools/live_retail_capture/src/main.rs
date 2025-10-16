@@ -10,7 +10,7 @@ use grim_stream::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -85,16 +85,28 @@ async fn run(args: Args) -> Result<()> {
         return Err(CaptureError::EmptyFrame.into());
     }
 
-    let socket = TcpStream::connect(&args.stream_addr)
+    let listener = TcpListener::bind(&args.stream_addr)
         .await
-        .with_context(|| format!("connecting to {}", args.stream_addr))?;
+        .with_context(|| format!("binding {}", args.stream_addr))?;
+    println!(
+        "[live_retail_capture] waiting for viewer at {}",
+        args.stream_addr
+    );
+    let (socket, addr) = listener
+        .accept()
+        .await
+        .with_context(|| format!("accepting viewer connection on {}", args.stream_addr))?;
+    println!("[live_retail_capture] viewer connected from {addr}");
     socket.set_nodelay(true)?;
     let mut writer = BufWriter::new(socket);
 
     send_message(
         &mut writer,
         MessageKind::Hello,
-        &Hello::new("retail_capture", Some(format!("protocol={:#06x}", PROTOCOL_VERSION))),
+        &Hello::new(
+            "retail_capture",
+            Some(format!("protocol={:#06x}", PROTOCOL_VERSION)),
+        ),
     )
     .await?;
 
@@ -102,7 +114,8 @@ async fn run(args: Args) -> Result<()> {
         width: args.width,
         height: args.height,
         pixel_format: PixelFormat::Rgba8,
-        stride_bytes: args.width
+        stride_bytes: args
+            .width
             .checked_mul(4)
             .context("stride calculation overflow")?,
         nominal_fps: Some(args.fps),
@@ -163,9 +176,7 @@ async fn run(args: Args) -> Result<()> {
 
     let status = ffmpeg_child.wait().await?;
     if !status.success() {
-        eprintln!(
-            "[live_retail_capture] ffmpeg exited with status {status:?}"
-        );
+        eprintln!("[live_retail_capture] ffmpeg exited with status {status:?}");
     }
 
     writer.flush().await?;
@@ -228,7 +239,10 @@ async fn spawn_ffmpeg(args: &Args, frame_size: usize) -> Result<tokio::process::
 
 fn spawn_telemetry_reader(
     path: PathBuf,
-) -> Result<(mpsc::Receiver<Telemetry>, tokio::task::JoinHandle<Result<()>>)> {
+) -> Result<(
+    mpsc::Receiver<Telemetry>,
+    tokio::task::JoinHandle<Result<()>>,
+)> {
     let (tx, rx) = mpsc::channel(128);
     let handle = tokio::task::spawn_blocking(move || -> Result<()> {
         wait_for_file(path.as_path())?;

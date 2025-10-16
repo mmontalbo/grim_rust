@@ -73,7 +73,9 @@ fn worker_loop(listener: TcpListener, rx: Receiver<Command>, build_info: String)
             Ok(Command::Send(buffer)) => {
                 if let Some(conn) = stream.as_mut() {
                     if let Err(err) = write_all(conn, &buffer) {
-                        eprintln!("[grim_engine::stream] send failed: {err:?}; waiting for reconnect");
+                        eprintln!(
+                            "[grim_engine::stream] send failed: {err:?}; waiting for reconnect"
+                        );
                         stream = None;
                     }
                 }
@@ -94,15 +96,11 @@ fn worker_loop(listener: TcpListener, rx: Receiver<Command>, build_info: String)
                     }
                     match send_hello(&mut conn, &build_info) {
                         Ok(()) => {
-                            eprintln!(
-                                "[grim_engine::stream] viewer connected from {addr}"
-                            );
+                            eprintln!("[grim_engine::stream] viewer connected from {addr}");
                             stream = Some(conn);
                         }
                         Err(err) => {
-                            eprintln!(
-                                "[grim_engine::stream] handshake error with {addr}: {err:?}"
-                            );
+                            eprintln!("[grim_engine::stream] handshake error with {addr}: {err:?}");
                         }
                     }
                 }
