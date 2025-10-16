@@ -22,7 +22,9 @@ WIP_DATA: Dict[str, Any] = {
             "body": [
                 "We are trying to re-create game logic in rust, prefer to fail fast rather than providing fallback for behavior that does not match the real game",
                 "If making progress on a work item is slow or uncertain, evaluate if there are opportunites to simplify or clarify the related components",
+                "Launch the retail capture build with tools/run_dev_install.sh (default 20s timeout; override with --timeout when longer sessions are needed) so telemetry artifacts land in dev-install/mods/ consistently.",
                 "When committing, use python tools/format_commit.py to generate the message and python tools/lint_commit.py to validate it before pushing.",
+                "After a capture, compare dev-install/mods/telemetry_coverage.json against the catalog via cargo run -p grim_analysis -- --coverage-counts <path> to flag missing keys early.",
             ],
         },
     ],
