@@ -43,7 +43,7 @@ pub(super) use bindings::{
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
-use grim_analysis::resources::ResourceGraph;
+use grim_analysis::resources::{ResourceGraph, SetMetadata};
 use mlua::{Lua, RegistryKey, Result as LuaResult};
 
 #[derive(Clone)]
@@ -120,7 +120,85 @@ struct CoverageTracker {
     counts: BTreeMap<String, u64>,
     script_lookup: HashMap<String, String>,
     actor_lookup: HashMap<String, String>,
-    set_lookup: HashMap<String, String>,
+    set_aliases: HashMap<String, String>,
+    set_registry: HashMap<String, SetCoverageEntry>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct SetCoverageEntry {
+    base_key: String,
+    hook_keys: HashMap<String, String>,
+    setup_by_index: HashMap<i32, String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct SetHookDescriptor {
+    pub lookup_key: String,
+    pub category: HookCategory,
+}
+
+impl SetHookDescriptor {
+    fn coverage_key(&self, canonical_set: &str) -> String {
+        match &self.category {
+            HookCategory::Enter => format!("set:{canonical_set}:hook:enter"),
+            HookCategory::Exit => format!("set:{canonical_set}:hook:exit"),
+            HookCategory::CameraChange => format!("set:{canonical_set}:hook:camera_change"),
+            HookCategory::Setup { name } => {
+                format!("set:{canonical_set}:hook:setup:{name}")
+            }
+            HookCategory::Other { name } => {
+                format!("set:{canonical_set}:hook:other:{name}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum HookCategory {
+    Enter,
+    Exit,
+    CameraChange,
+    Setup { name: String },
+    Other { name: String },
+}
+
+pub(super) fn describe_set_hook(method_name: &str) -> Option<SetHookDescriptor> {
+    let trimmed = method_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    let simplified = normalized.replace('_', "");
+    if simplified == "enter" {
+        Some(SetHookDescriptor {
+            lookup_key: "enter".to_string(),
+            category: HookCategory::Enter,
+        })
+    } else if simplified == "exit" {
+        Some(SetHookDescriptor {
+            lookup_key: "exit".to_string(),
+            category: HookCategory::Exit,
+        })
+    } else if simplified == "camerachange" {
+        Some(SetHookDescriptor {
+            lookup_key: "camera_change".to_string(),
+            category: HookCategory::CameraChange,
+        })
+    } else if normalized.starts_with("set_up") || normalized.starts_with("setup") {
+        Some(SetHookDescriptor {
+            lookup_key: format!("setup:{normalized}"),
+            category: HookCategory::Setup {
+                name: trimmed.to_string(),
+            },
+        })
+    } else {
+        Some(SetHookDescriptor {
+            lookup_key: format!("other:{normalized}"),
+            category: HookCategory::Other {
+                name: trimmed.to_string(),
+            },
+        })
+    }
 }
 
 impl CoverageTracker {
@@ -139,7 +217,7 @@ impl CoverageTracker {
             tracker.register_actor(&actor.variable_name, &actor.label);
         }
         for set in &resources.sets {
-            tracker.register_set(&set.variable_name, &set.set_file);
+            tracker.register_set(set);
         }
         tracker
     }
@@ -175,17 +253,29 @@ impl CoverageTracker {
     }
 
     fn mark_set(&mut self, set_identifier: &str) {
-        let normalized = set_identifier.to_ascii_lowercase();
-        let mut candidates = Vec::new();
-        Self::push_unique(&mut candidates, normalized.clone());
-        if let Some(stripped) = normalized.strip_suffix(".set") {
-            Self::push_unique(&mut candidates, stripped.to_string());
+        if let Some(key) = self
+            .resolve_set_entry(set_identifier)
+            .map(|entry| entry.base_key.clone())
+        {
+            self.increment(&key);
         }
-        for candidate in candidates {
-            if let Some(key) = self.set_lookup.get(&candidate).cloned() {
-                self.increment(&key);
-                break;
-            }
+    }
+
+    fn mark_set_setup(&mut self, set_identifier: &str, setup: i32) {
+        if let Some(key) = self
+            .resolve_set_entry(set_identifier)
+            .and_then(|entry| entry.setup_by_index.get(&setup).cloned())
+        {
+            self.increment(&key);
+        }
+    }
+
+    fn mark_set_hook(&mut self, set_identifier: &str, lookup_key: &str) {
+        if let Some(key) = self
+            .resolve_set_entry(set_identifier)
+            .and_then(|entry| entry.hook_keys.get(lookup_key).cloned())
+        {
+            self.increment(&key);
         }
     }
 
@@ -197,8 +287,7 @@ impl CoverageTracker {
                 .insert(format!("{stem}.decompiled.lua"), key.clone());
         }
         if let Some(base) = normalized.rsplit('/').next() {
-            self.script_lookup
-                .insert(base.to_string(), key.clone());
+            self.script_lookup.insert(base.to_string(), key.clone());
             if let Some(stem) = base.strip_suffix(".lua") {
                 self.script_lookup
                     .insert(format!("{stem}.decompiled.lua"), key.clone());
@@ -226,14 +315,58 @@ impl CoverageTracker {
             .insert(Self::normalize_actor_label(label), key);
     }
 
-    fn register_set(&mut self, variable_name: &str, set_file: &str) {
-        let key = format!("set:{}", variable_name);
-        self.set_lookup
-            .insert(variable_name.to_ascii_lowercase(), key.clone());
-        self.set_lookup
-            .insert(variable_name.to_string(), key.clone());
-        self.set_lookup
-            .insert(set_file.to_ascii_lowercase(), key);
+    fn register_set(&mut self, metadata: &SetMetadata) {
+        let canonical = metadata.variable_name.to_ascii_lowercase();
+        let base_key = format!("set:{canonical}");
+
+        let mut entry = SetCoverageEntry {
+            base_key,
+            hook_keys: HashMap::new(),
+            setup_by_index: HashMap::new(),
+        };
+
+        for slot in &metadata.setup_slots {
+            let coverage_key = format!("set:{canonical}:setup_slot:{}", slot.label);
+            entry.setup_by_index.insert(slot.index as i32, coverage_key);
+        }
+
+        for method in &metadata.methods {
+            if let Some(descriptor) = describe_set_hook(&method.name) {
+                let coverage_key = descriptor.coverage_key(&canonical);
+                entry
+                    .hook_keys
+                    .entry(descriptor.lookup_key.clone())
+                    .or_insert(coverage_key);
+            }
+        }
+
+        self.set_registry.insert(canonical.clone(), entry);
+        self.insert_set_alias(&canonical, &metadata.variable_name);
+        self.insert_set_alias(&canonical, &metadata.set_file);
+        if let Some(stripped) = metadata.set_file.strip_suffix(".set") {
+            self.insert_set_alias(&canonical, stripped);
+        }
+    }
+
+    fn insert_set_alias(&mut self, canonical: &str, alias: &str) {
+        let trimmed = alias.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        self.set_aliases
+            .entry(normalized)
+            .or_insert_with(|| canonical.to_string());
+    }
+
+    fn resolve_set_entry(&self, identifier: &str) -> Option<&SetCoverageEntry> {
+        let trimmed = identifier.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        let canonical = self.set_aliases.get(&normalized)?;
+        self.set_registry.get(canonical)
     }
 
     fn mark_script_candidates(&mut self, normalized: &str) {
@@ -723,6 +856,10 @@ impl EngineContext {
         }
     }
 
+    fn mark_set_hook(&mut self, set_identifier: &str, lookup_key: &str) {
+        self.coverage.mark_set_hook(set_identifier, lookup_key);
+    }
+
     #[cfg(test)]
     fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
         self.set_runtime().ensure_sector_state_map(set_file)
@@ -754,6 +891,7 @@ impl EngineContext {
     }
 
     fn record_current_setup(&mut self, set_file: &str, setup: i32) {
+        self.coverage.mark_set_setup(set_file, setup);
         self.set_runtime().record_current_setup(set_file, setup);
     }
 

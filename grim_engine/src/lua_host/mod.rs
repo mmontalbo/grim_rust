@@ -10,8 +10,8 @@ pub use movement::MovementOptions;
 pub use movement::MovementPlan;
 
 use std::cell::RefCell;
-use std::fs;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 

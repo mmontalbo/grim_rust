@@ -1551,6 +1551,7 @@ fn install_set_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> LuaRe
         let result = original.call::<_, Value>(args)?;
         if let Value::Table(set_instance) = &result {
             ensure_set_metatable(lua_ctx, &set_instance)?;
+            attach_set_method_coverage(lua_ctx, &set_instance, wrapper_context.clone())?;
             if let Ok(Some(set_file)) = set_instance.get::<_, Option<String>>("setFile") {
                 wrapper_context.borrow_mut().mark_set_loaded(&set_file);
             }
@@ -3121,6 +3122,88 @@ fn ensure_set_metatable(lua: &Lua, set_instance: &Table) -> LuaResult<()> {
     Ok(())
 }
 
+fn attach_set_method_coverage<'lua>(
+    lua: &'lua Lua,
+    set_instance: &Table<'lua>,
+    context: Rc<RefCell<EngineContext>>,
+) -> LuaResult<()> {
+    let set_file = match set_instance.get::<_, Option<String>>("setFile")? {
+        Some(value) => value,
+        None => return Ok(()),
+    };
+    let normalized_set = set_file.to_ascii_lowercase();
+    let metatable = match set_instance.get_metatable() {
+        Some(meta) => meta,
+        None => lua.create_table()?,
+    };
+    if matches!(
+        metatable.get::<_, Value>("__coverage_hooks_installed"),
+        Ok(Value::Boolean(true))
+    ) {
+        return Ok(());
+    }
+
+    let original_newindex = match metatable.get::<_, Value>("__newindex") {
+        Ok(Value::Function(func)) => Some(lua.create_registry_value(func)?),
+        _ => None,
+    };
+    let coverage_context = context.clone();
+    let set_identifier = normalized_set.clone();
+    let new_index = lua.create_function(
+        move |lua_ctx, (table, key, value): (Table, Value, Value)| -> LuaResult<()> {
+            let mut handled = false;
+            if let (Value::String(method_name), Value::Function(func)) = (&key, &value) {
+                let method_str = method_name.to_str()?;
+                if let Some(descriptor) = describe_set_hook(method_str) {
+                    let original_key = lua_ctx.create_registry_value(func.clone())?;
+                    let wrapped = wrap_set_function(
+                        lua_ctx,
+                        original_key,
+                        coverage_context.clone(),
+                        set_identifier.clone(),
+                        descriptor.lookup_key.clone(),
+                    )?;
+                    table.raw_set(method_name.clone(), wrapped)?;
+                    handled = true;
+                }
+            }
+            if !handled {
+                if let Some(ref registry_key) = original_newindex {
+                    let fallback: Function = lua_ctx.registry_value(registry_key)?;
+                    fallback.call::<_, ()>((table.clone(), key.clone(), value.clone()))?;
+                } else {
+                    table.raw_set(key, value)?;
+                }
+            }
+            Ok(())
+        },
+    )?;
+
+    metatable.set("__newindex", new_index)?;
+    metatable.set("__coverage_hooks_installed", true)?;
+    set_instance.set_metatable(Some(metatable));
+    Ok(())
+}
+
+fn wrap_set_function<'lua>(
+    lua: &'lua Lua,
+    original_key: RegistryKey,
+    context: Rc<RefCell<EngineContext>>,
+    set_identifier: String,
+    lookup_key: String,
+) -> LuaResult<Function<'lua>> {
+    lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        {
+            let mut state = context.borrow_mut();
+            state.mark_set_hook(&set_identifier, &lookup_key);
+        }
+        let values: Vec<Value> = args.into_iter().collect();
+        let func: Function = lua_ctx.registry_value(&original_key)?;
+        let result: MultiValue = func.call(MultiValue::from_vec(values))?;
+        Ok(result)
+    })
+}
+
 fn inject_object_controls(
     lua: &Lua,
     object: &Table,
@@ -4493,4 +4576,4 @@ use super::menus::{
     install_menu_dialog, install_menu_infrastructure, install_menu_prefs, install_menu_remap,
 };
 use super::objects::ObjectSnapshot;
-use super::{heading_between, EngineContext, SectorToggleResult};
+use super::{describe_set_hook, heading_between, EngineContext, SectorToggleResult};
