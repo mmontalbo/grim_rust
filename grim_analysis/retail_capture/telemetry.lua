@@ -151,15 +151,15 @@ function telemetry_encode_string(value)
             out = out .. "\\\\"
         elseif ch == "\"" then
             out = out .. "\\\""
-        elseif ch == "\b" then
+        elseif byte == 8 then
             out = out .. "\\b"
-        elseif ch == "\f" then
+        elseif byte == 12 then
             out = out .. "\\f"
-        elseif ch == "\n" then
+        elseif byte == 10 then
             out = out .. "\\n"
-        elseif ch == "\r" then
+        elseif byte == 13 then
             out = out .. "\\r"
-        elseif ch == "\t" then
+        elseif byte == 9 then
             out = out .. "\\t"
         elseif byte < 32 then
             out = out .. strformat("\\u%04x", byte)
@@ -323,6 +323,19 @@ function _ERRORMESSAGE(err)
 end
 
 telemetry_append_line(telemetry_log_path, "telemetry.lua (Lua 3.1 rewrite) loaded")
+
+telemetry.reset()
+
+local telemetry_native_state = "missing"
+if type(telemetry_native_write) == "function" then
+    telemetry_native_state = "enabled"
+end
+
+telemetry.event(
+    "telemetry.runtime",
+    { phase = "loaded", native = telemetry_native_state, version = "lua31_rewrite" }
+)
+
 __telemetry_bootstrap_error = nil
 
 return telemetry

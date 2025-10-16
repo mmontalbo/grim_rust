@@ -159,8 +159,20 @@ static void resolve_real_symbols(void) {
     dlerror();
     real_lua_pushcclosure = (lua_pushcclosure_fn)dlsym(RTLD_NEXT, "lua_pushcclosure");
     err = dlerror();
-    if (err != NULL) {
-        log_event("failed to resolve lua_pushcclosure: %s", err);
+    if (err != NULL || !real_lua_pushcclosure) {
+        const char *primary_err = err;
+        dlerror();
+        real_lua_pushcclosure = (lua_pushcclosure_fn)dlsym(RTLD_NEXT, "lua_pushCclosure");
+        err = dlerror();
+        if (err != NULL || !real_lua_pushcclosure) {
+            const char *alias_err = err;
+            log_event(
+                "failed to resolve lua_pushcclosure (primary: %s; alias lua_pushCclosure: %s)",
+                primary_err ? primary_err : "unknown",
+                alias_err ? alias_err : "unknown");
+        } else {
+            log_event("resolved lua_pushcclosure via alias lua_pushCclosure");
+        }
     }
 
     dlerror();
@@ -347,10 +359,15 @@ static void attempt_io_library_open(void) {
         real_lua_iolibopen();
         if (real_lua_dostring && real_lua_getglobal && real_lua_getstring) {
             static const char *const IO_STATUS_SCRIPT =
-                "if type(io) == \"table\" and type(io.open) == \"function\" then\n"
+                "local io_type = type(io)\n"
+                "local io_open_type = \"nil\"\n"
+                "if io_type == \"table\" then\n"
+                "  io_open_type = type(io.open)\n"
+                "end\n"
+                "if io_type == \"table\" and io_open_type == \"function\" then\n"
                 "  __telemetry_io_ready = \"ready\"\n"
                 "else\n"
-                "  __telemetry_io_ready = \"missing\"\n"
+                "  __telemetry_io_ready = \"missing (io=\" .. tostring(io_type) .. \", io.open=\" .. tostring(io_open_type) .. \")\"\n"
                 "end\n";
             int status_result = real_lua_dostring((char *)IO_STATUS_SCRIPT);
             if (status_result != 0) {
