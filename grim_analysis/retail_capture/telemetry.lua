@@ -98,6 +98,12 @@ end
 
 function telemetry_write_file(path, contents, mode)
     mode = mode or "w"
+    if type(telemetry_native_write) == "function" then
+        local ok = telemetry_native_write(path, contents, mode)
+        if ok then
+            return 1
+        end
+    end
     if type(io) == "table" and type(io.open) == "function" then
         local file = io.open(path, mode)
         if file then

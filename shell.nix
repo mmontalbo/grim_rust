@@ -80,6 +80,7 @@ in pkgs.mkShell {
     rsync
     zig               # build the LD_PRELOAD shim
     qemu              # user-mode emulation for 32-bit binaries
+    gdb               # inspect qemu-i386 core dumps
     rustc
     cargo
     rustfmt
