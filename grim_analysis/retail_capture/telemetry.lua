@@ -336,6 +336,9 @@ telemetry.event(
     { phase = "loaded", native = telemetry_native_state, version = "lua31_rewrite" }
 )
 
+telemetry_event = telemetry.event
+telemetry_mark = telemetry.mark
+
 __telemetry_bootstrap_error = nil
 
 return telemetry

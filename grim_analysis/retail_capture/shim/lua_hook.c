@@ -20,6 +20,8 @@ typedef void (*lua_iolibopen_fn)(void);
 typedef int (*lua_dostring_fn)(char *string);
 typedef void (*lua_pushcclosure_fn)(lua_CFunction fn, int n);
 typedef void (*lua_setglobal_fn)(char *name);
+typedef void (*lua_pushstring_fn)(char *s);
+typedef int (*lua_callfunction_fn)(lua_Object function);
 
 static lua_dofile_fn real_lua_dofile = NULL;
 static lua_getglobal_fn real_lua_getglobal = NULL;
@@ -31,6 +33,8 @@ static lua_dostring_fn real_lua_dostring = NULL;
 static lua_iolibopen_fn real_lua_iolibopen = NULL;
 static lua_pushcclosure_fn real_lua_pushcclosure = NULL;
 static lua_setglobal_fn real_lua_setglobal = NULL;
+static lua_pushstring_fn real_lua_pushstring = NULL;
+static lua_callfunction_fn real_lua_callfunction = NULL;
 
 static pthread_once_t resolve_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t telemetry_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -183,6 +187,20 @@ static void resolve_real_symbols(void) {
     }
 
     dlerror();
+    real_lua_pushstring = (lua_pushstring_fn)dlsym(RTLD_NEXT, "lua_pushstring");
+    err = dlerror();
+    if (err != NULL) {
+        log_event("failed to resolve lua_pushstring: %s", err);
+    }
+
+    dlerror();
+    real_lua_callfunction = (lua_callfunction_fn)dlsym(RTLD_NEXT, "lua_callfunction");
+    err = dlerror();
+    if (err != NULL) {
+        log_event("failed to resolve lua_callfunction: %s", err);
+    }
+
+    dlerror();
     real_lua_dostring = (lua_dostring_fn)dlsym(RTLD_NEXT, "lua_dostring");
     err = dlerror();
     if (err != NULL) {
@@ -226,6 +244,43 @@ static const char *basename_or_self(const char *path) {
     }
     return path;
 }
+
+static void telemetry_emit_label(const char *label) {
+    if (!telemetry_injected || !label || label[0] == '\0') {
+        return;
+    }
+    if (!real_lua_getglobal || !real_lua_isfunction || !real_lua_pushstring || !real_lua_callfunction) {
+        return;
+    }
+    lua_Object fn = real_lua_getglobal("telemetry_event");
+    if (fn == 0 || !real_lua_isfunction(fn)) {
+        return;
+    }
+    real_lua_pushstring((char *)label);
+    int call_result = real_lua_callfunction(fn);
+    if (call_result != 0) {
+        log_event("telemetry_event(%s) failed (%d)", label, call_result);
+    }
+}
+
+static void telemetry_mark_key(const char *key) {
+    if (!telemetry_injected || !key || key[0] == '\0') {
+        return;
+    }
+    if (!real_lua_getglobal || !real_lua_isfunction || !real_lua_pushstring || !real_lua_callfunction) {
+        return;
+    }
+    lua_Object fn = real_lua_getglobal("telemetry_mark");
+    if (fn == 0 || !real_lua_isfunction(fn)) {
+        return;
+    }
+    real_lua_pushstring((char *)key);
+    int call_result = real_lua_callfunction(fn);
+    if (call_result != 0) {
+        log_event("telemetry_mark(%s) failed (%d)", key, call_result);
+    }
+}
+
 
 static void telemetry_native_write(void) {
     lua_Object path_obj = lua_getparam(1);
@@ -579,6 +634,16 @@ static int forward_lua_call(const char *filename, lua_dofile_fn real_fn, const c
         }
     }
     maybe_inject(filename, result);
+    if (result == 0 && filename && filename[0] != '\0' && telemetry_injected) {
+        const char *base = basename_or_self(filename);
+        const char *name = (base && base[0] != '\0') ? base : filename;
+        char event_label[128];
+        char mark_key[128];
+        snprintf(event_label, sizeof(event_label), "lua.load:%s", name);
+        snprintf(mark_key, sizeof(mark_key), "script:%s", name);
+        telemetry_emit_label(event_label);
+        telemetry_mark_key(mark_key);
+    }
     return result;
 }
 
