@@ -28,8 +28,13 @@ pub(crate) fn install_globals(
         if let Some(value) =
             handle_special_dofile(lua_ctx, &path, dofile_context.clone(), system_key.clone())?
         {
-            if verbose_context.borrow().verbose {
+            let verbose = verbose_context.borrow().verbose;
+            if verbose {
                 println!("[lua][dofile] handled {} via host", path);
+            }
+            {
+                let mut ctx = dofile_context.borrow_mut();
+                ctx.record_script_name(&path);
             }
             return Ok(value);
         }
@@ -43,8 +48,13 @@ pub(crate) fn install_globals(
             };
             tried.push(absolute.clone());
             if let Some(value) = execute_script(lua_ctx, &absolute)? {
-                if verbose_context.borrow().verbose {
+                let verbose = verbose_context.borrow().verbose;
+                if verbose {
                     println!("[lua][dofile] loaded {}", absolute.display());
+                }
+                {
+                    let mut ctx = dofile_context.borrow_mut();
+                    ctx.record_script_path(&absolute);
                 }
                 return Ok(value);
             }

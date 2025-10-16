@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::rc::Rc;
 
 mod achievements;
@@ -113,10 +115,202 @@ impl EngineContextHandle {
     }
 }
 
+#[derive(Debug, Default)]
+struct CoverageTracker {
+    counts: BTreeMap<String, u64>,
+    script_lookup: HashMap<String, String>,
+    actor_lookup: HashMap<String, String>,
+    set_lookup: HashMap<String, String>,
+}
+
+impl CoverageTracker {
+    fn from_resources(resources: &ResourceGraph) -> Self {
+        let mut tracker = CoverageTracker::default();
+        for script in &resources.year_scripts {
+            tracker.register_script(script, format!("script:year:{script}"));
+        }
+        for script in &resources.menu_scripts {
+            tracker.register_script(script, format!("script:menu:{script}"));
+        }
+        for script in &resources.room_scripts {
+            tracker.register_script(script, format!("script:room:{script}"));
+        }
+        for actor in &resources.actors {
+            tracker.register_actor(&actor.variable_name, &actor.label);
+        }
+        for set in &resources.sets {
+            tracker.register_set(&set.variable_name, &set.set_file);
+        }
+        tracker
+    }
+
+    fn counts(&self) -> &BTreeMap<String, u64> {
+        &self.counts
+    }
+
+    fn mark_script_name(&mut self, script: &str) {
+        let normalized = Self::normalize_script_identifier(script);
+        self.mark_script_candidates(&normalized);
+    }
+
+    fn mark_script_path(&mut self, path: &Path) {
+        let normalized = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        self.mark_script_candidates(&normalized);
+    }
+
+    fn mark_actor(&mut self, identifier: &str, label: &str) {
+        let mut candidates = Vec::new();
+        Self::push_unique(&mut candidates, identifier.to_ascii_lowercase());
+        Self::push_unique(&mut candidates, label.to_ascii_lowercase());
+        Self::push_unique(&mut candidates, Self::normalize_actor_label(label));
+        for candidate in candidates {
+            if let Some(key) = self.actor_lookup.get(&candidate).cloned() {
+                self.increment(&key);
+                break;
+            }
+        }
+    }
+
+    fn mark_set(&mut self, set_identifier: &str) {
+        let normalized = set_identifier.to_ascii_lowercase();
+        let mut candidates = Vec::new();
+        Self::push_unique(&mut candidates, normalized.clone());
+        if let Some(stripped) = normalized.strip_suffix(".set") {
+            Self::push_unique(&mut candidates, stripped.to_string());
+        }
+        for candidate in candidates {
+            if let Some(key) = self.set_lookup.get(&candidate).cloned() {
+                self.increment(&key);
+                break;
+            }
+        }
+    }
+
+    fn register_script(&mut self, script: &str, key: String) {
+        let normalized = Self::normalize_script_identifier(script);
+        self.script_lookup.insert(normalized.clone(), key.clone());
+        if let Some(stem) = normalized.strip_suffix(".lua") {
+            self.script_lookup
+                .insert(format!("{stem}.decompiled.lua"), key.clone());
+        }
+        if let Some(base) = normalized.rsplit('/').next() {
+            self.script_lookup
+                .insert(base.to_string(), key.clone());
+            if let Some(stem) = base.strip_suffix(".lua") {
+                self.script_lookup
+                    .insert(format!("{stem}.decompiled.lua"), key.clone());
+            }
+        }
+        if !normalized.starts_with("scripts/") {
+            self.script_lookup
+                .insert(format!("scripts/{}", normalized), key.clone());
+            if let Some(stem) = normalized.strip_suffix(".lua") {
+                self.script_lookup
+                    .insert(format!("scripts/{stem}.decompiled.lua"), key.clone());
+            }
+        }
+    }
+
+    fn register_actor(&mut self, variable_name: &str, label: &str) {
+        let key = format!("actor:{}", variable_name.to_ascii_lowercase());
+        self.actor_lookup
+            .insert(variable_name.to_ascii_lowercase(), key.clone());
+        self.actor_lookup
+            .insert(variable_name.to_string(), key.clone());
+        self.actor_lookup
+            .insert(label.to_ascii_lowercase(), key.clone());
+        self.actor_lookup
+            .insert(Self::normalize_actor_label(label), key);
+    }
+
+    fn register_set(&mut self, variable_name: &str, set_file: &str) {
+        let key = format!("set:{}", variable_name);
+        self.set_lookup
+            .insert(variable_name.to_ascii_lowercase(), key.clone());
+        self.set_lookup
+            .insert(variable_name.to_string(), key.clone());
+        self.set_lookup
+            .insert(set_file.to_ascii_lowercase(), key);
+    }
+
+    fn mark_script_candidates(&mut self, normalized: &str) {
+        let mut candidates = Vec::new();
+        let cleaned = normalized.trim_start_matches("./");
+        Self::push_unique(&mut candidates, cleaned.to_string());
+        if let Some(stripped) = cleaned.strip_suffix(".decompiled.lua") {
+            Self::push_unique(&mut candidates, format!("{stripped}.lua"));
+        }
+        if let Some(base) = cleaned.rsplit('/').next() {
+            Self::push_unique(&mut candidates, base.to_string());
+            if let Some(stripped) = base.strip_suffix(".decompiled.lua") {
+                Self::push_unique(&mut candidates, format!("{stripped}.lua"));
+            }
+        }
+        for candidate in candidates {
+            if let Some(key) = self.script_lookup.get(&candidate).cloned() {
+                self.increment(&key);
+                break;
+            }
+        }
+    }
+
+    fn increment(&mut self, key: &str) {
+        let entry = self.counts.entry(key.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    fn normalize_script_identifier(input: &str) -> String {
+        input
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    }
+
+    fn normalize_actor_label(label: &str) -> String {
+        let mut id = String::new();
+        for ch in label.chars() {
+            if ch.is_ascii_alphanumeric() {
+                id.push(ch.to_ascii_lowercase());
+            } else if ch.is_ascii_whitespace() || matches!(ch, '.' | '-' | '_' | ':') {
+                if !id.ends_with('_') {
+                    id.push('_');
+                }
+            }
+        }
+        while id.ends_with('_') {
+            id.pop();
+        }
+        if id.is_empty() {
+            let fallback = label.to_ascii_lowercase();
+            let trimmed = fallback.trim();
+            if trimmed.is_empty() {
+                id.push_str("actor");
+            } else {
+                id.push_str(trimmed);
+            }
+        }
+        id
+    }
+
+    fn push_unique(target: &mut Vec<String>, value: String) {
+        if value.is_empty() {
+            return;
+        }
+        if !target.iter().any(|existing| existing == &value) {
+            target.push(value);
+        }
+    }
+}
+
 pub(super) struct EngineContext {
     verbose: bool,
     scripts: ScriptRuntime,
     events: Vec<String>,
+    coverage: CoverageTracker,
     sets: SetRuntime,
     actors: ActorStore,
     inventory: InventoryState,
@@ -136,11 +330,13 @@ impl EngineContext {
         lab_collection: Option<Rc<LabCollection>>,
         audio_callback: Option<Rc<dyn AudioCallback>>,
     ) -> Self {
-        let sets = SetRuntime::new(resources, verbose, lab_collection);
+        let coverage = CoverageTracker::from_resources(&resources);
+        let sets = SetRuntime::new(resources.clone(), verbose, lab_collection);
         EngineContext {
             verbose,
             scripts: ScriptRuntime::new(),
             events: Vec::new(),
+            coverage,
             sets,
             actors: ActorStore::new(1100),
             inventory: InventoryState::new(),
@@ -235,6 +431,18 @@ impl EngineContext {
 
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
+    }
+
+    pub(super) fn record_script_name(&mut self, script: &str) {
+        self.coverage.mark_script_name(script);
+    }
+
+    pub(super) fn record_script_path(&mut self, path: &Path) {
+        self.coverage.mark_script_path(path);
+    }
+
+    pub(super) fn coverage_counts(&self) -> &BTreeMap<String, u64> {
+        self.coverage.counts()
     }
 
     fn pause_view(&self) -> PauseRuntimeView<'_> {
@@ -506,7 +714,13 @@ impl EngineContext {
     }
 
     fn mark_set_loaded(&mut self, set_file: &str) {
-        self.set_runtime().mark_set_loaded(set_file);
+        let newly_loaded = {
+            let mut runtime = self.set_runtime();
+            runtime.mark_set_loaded(set_file)
+        };
+        if newly_loaded {
+            self.coverage.mark_set(set_file);
+        }
     }
 
     #[cfg(test)]
@@ -726,6 +940,7 @@ impl EngineContext {
             .register_actor_with_handle(label, preferred_handle);
         if newly_assigned {
             self.log_event(format!("actor.register {} (#{handle})", label));
+            self.coverage.mark_actor(&id, label);
         }
         (id, handle)
     }

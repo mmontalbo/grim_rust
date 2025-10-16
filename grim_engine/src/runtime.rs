@@ -16,6 +16,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         lua_geometry_json,
         audio_log_json,
         event_log_json,
+        coverage_json,
         movement_demo,
         movement_log_json,
         hotspot_demo,
@@ -95,6 +96,14 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         fs::write(path, &json)
             .with_context(|| format!("writing hotspot event log to {}", path.display()))?;
         println!("Saved hotspot event log to {}", path.display());
+    }
+
+    if let Some(path) = coverage_json.as_ref() {
+        let json = serde_json::to_string_pretty(run_summary.coverage())
+            .context("serializing coverage counts to JSON")?;
+        fs::write(path, &json)
+            .with_context(|| format!("writing coverage counts to {}", path.display()))?;
+        println!("Saved coverage counts to {}", path.display());
     }
 
     if let (Some(path), Some(recorder)) = (audio_log_json.as_ref(), audio_recorder) {

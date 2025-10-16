@@ -11,6 +11,7 @@ pub use movement::MovementPlan;
 
 use std::cell::RefCell;
 use std::fs;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -23,11 +24,16 @@ use crate::lab_collection::LabCollection;
 #[derive(Debug, Clone)]
 pub struct EngineRunSummary {
     events: Vec<String>,
+    coverage: BTreeMap<String, u64>,
 }
 
 impl EngineRunSummary {
     pub fn events(&self) -> &[String] {
         &self.events
+    }
+
+    pub fn coverage(&self) -> &BTreeMap<String, u64> {
+        &self.coverage
     }
 }
 
@@ -98,6 +104,7 @@ pub fn run_boot_sequence(
     let snapshot = context.borrow();
     context::dump_runtime_summary(&snapshot);
     let events = snapshot.events().to_vec();
+    let coverage = snapshot.coverage_counts().clone();
     if let Some(path) = geometry_json {
         let snapshot_data = snapshot.geometry_snapshot();
         let json = serde_json::to_string_pretty(&snapshot_data)
@@ -106,5 +113,5 @@ pub fn run_boot_sequence(
             .with_context(|| format!("writing Lua geometry snapshot to {}", path.display()))?;
         println!("Saved Lua geometry snapshot to {}", path.display());
     }
-    Ok(EngineRunSummary { events })
+    Ok(EngineRunSummary { events, coverage })
 }

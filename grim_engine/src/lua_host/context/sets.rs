@@ -40,7 +40,7 @@ impl<'a> SetRuntimeAdapter<'a> {
         snapshot
     }
 
-    pub(super) fn mark_set_loaded(&mut self, set_file: &str) {
+    pub(super) fn mark_set_loaded(&mut self, set_file: &str) -> bool {
         let newly_loaded = self.runtime.mark_set_loaded(set_file);
         if newly_loaded {
             self.events.push(format!("set.load {set_file}"));
@@ -48,6 +48,7 @@ impl<'a> SetRuntimeAdapter<'a> {
         if let Some(message) = self.runtime.ensure_geometry_cached(set_file) {
             self.events.push(message);
         }
+        newly_loaded
     }
 
     #[cfg(test)]

@@ -73,6 +73,10 @@ pub struct Args {
     #[arg(long)]
     pub event_log_json: Option<PathBuf>,
 
+    /// Path to write the coverage counts emitted by the Lua runtime (requires --run-lua)
+    #[arg(long)]
+    pub coverage_json: Option<PathBuf>,
+
     /// Run the built-in Manny movement demo after boot (requires --run-lua)
     #[arg(long)]
     pub movement_demo: bool,
@@ -104,6 +108,7 @@ pub struct RunLuaArgs {
     pub lua_geometry_json: Option<PathBuf>,
     pub audio_log_json: Option<PathBuf>,
     pub event_log_json: Option<PathBuf>,
+    pub coverage_json: Option<PathBuf>,
     pub movement_demo: bool,
     pub movement_log_json: Option<PathBuf>,
     pub hotspot_demo: Option<String>,
@@ -152,6 +157,7 @@ impl Args {
                 lua_geometry_json: self.lua_geometry_json,
                 audio_log_json: self.audio_log_json,
                 event_log_json: self.event_log_json,
+                coverage_json: self.coverage_json,
                 movement_demo: self.movement_demo,
                 movement_log_json: self.movement_log_json,
                 hotspot_demo: self.hotspot_demo,
