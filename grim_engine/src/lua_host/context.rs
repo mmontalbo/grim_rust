@@ -43,7 +43,10 @@ pub(super) use bindings::{
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
-use grim_analysis::resources::{ResourceGraph, SetMetadata};
+use grim_analysis::{
+    hook_names::normalize_hook_name,
+    resources::{ResourceGraph, SetMetadata},
+};
 use mlua::{Lua, RegistryKey, Result as LuaResult};
 
 #[derive(Clone)]
@@ -131,7 +134,7 @@ struct SetCoverageEntry {
     setup_by_index: HashMap<i32, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SetHookDescriptor {
     pub lookup_key: String,
     pub category: HookCategory,
@@ -153,7 +156,7 @@ impl SetHookDescriptor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum HookCategory {
     Enter,
     Exit,
@@ -162,42 +165,112 @@ pub(super) enum HookCategory {
     Other { name: String },
 }
 
+/// Normalize a set hook method name and map it into a coverage category.
+///
+/// The helper trims whitespace, lowercases characters, and ignores underscores
+/// so variants like `CameraChange`, `camera_change`, or `cameraChange` all land
+/// in the same bucket. Hook keys keep the original trimmed name where we need to
+/// surface user-facing labels (e.g. `setup:SetupActors` retains its casing).
 pub(super) fn describe_set_hook(method_name: &str) -> Option<SetHookDescriptor> {
-    let trimmed = method_name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let normalized = trimmed.to_ascii_lowercase();
-    let simplified = normalized.replace('_', "");
-    if simplified == "enter" {
+    let normalized = normalize_hook_name(method_name)?;
+
+    if normalized.simplified == "enter" {
         Some(SetHookDescriptor {
             lookup_key: "enter".to_string(),
             category: HookCategory::Enter,
         })
-    } else if simplified == "exit" {
+    } else if normalized.simplified == "exit" {
         Some(SetHookDescriptor {
             lookup_key: "exit".to_string(),
             category: HookCategory::Exit,
         })
-    } else if simplified == "camerachange" {
+    } else if normalized.simplified == "camerachange" {
         Some(SetHookDescriptor {
             lookup_key: "camera_change".to_string(),
             category: HookCategory::CameraChange,
         })
-    } else if normalized.starts_with("set_up") || normalized.starts_with("setup") {
+    } else if normalized
+        .normalized
+        .starts_with("set_up")
+        || normalized.normalized.starts_with("setup")
+    {
         Some(SetHookDescriptor {
-            lookup_key: format!("setup:{normalized}"),
+            lookup_key: format!("setup:{}", normalized.normalized),
             category: HookCategory::Setup {
-                name: trimmed.to_string(),
+                name: normalized.trimmed,
             },
         })
     } else {
         Some(SetHookDescriptor {
-            lookup_key: format!("other:{normalized}"),
+            lookup_key: format!("other:{}", normalized.normalized),
             category: HookCategory::Other {
-                name: trimmed.to_string(),
+                name: normalized.trimmed,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::{describe_set_hook, HookCategory};
+
+    #[test]
+    fn classify_enter_case_insensitive() {
+        let descriptor = describe_set_hook(" Enter ").expect("descriptor");
+        assert_eq!(descriptor.lookup_key, "enter");
+        assert_eq!(descriptor.category, HookCategory::Enter);
+    }
+
+    #[test]
+    fn classify_exit_when_uppercase() {
+        let descriptor = describe_set_hook("EXIT").expect("descriptor");
+        assert_eq!(descriptor.lookup_key, "exit");
+        assert_eq!(descriptor.category, HookCategory::Exit);
+    }
+
+    #[test]
+    fn classify_camera_change_with_underscore() {
+        let descriptor = describe_set_hook("camera_change").expect("descriptor");
+        assert_eq!(descriptor.lookup_key, "camera_change");
+        assert_eq!(descriptor.category, HookCategory::CameraChange);
+    }
+
+    #[test]
+    fn classify_setup_prefix_variants() {
+        let with_underscore = describe_set_hook("set_up_meche").expect("descriptor");
+        assert_eq!(with_underscore.lookup_key, "setup:set_up_meche");
+        assert_eq!(
+            with_underscore.category,
+            HookCategory::Setup {
+                name: "set_up_meche".to_string()
+            }
+        );
+
+        let compact = describe_set_hook("setup_actors").expect("descriptor");
+        assert_eq!(compact.lookup_key, "setup:setup_actors");
+        assert_eq!(
+            compact.category,
+            HookCategory::Setup {
+                name: "setup_actors".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_other_names() {
+        let descriptor = describe_set_hook("watch_manny").expect("descriptor");
+        assert_eq!(descriptor.lookup_key, "other:watch_manny");
+        assert_eq!(
+            descriptor.category,
+            HookCategory::Other {
+                name: "watch_manny".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ignore_blank_names() {
+        assert!(describe_set_hook("   ").is_none());
     }
 }
 

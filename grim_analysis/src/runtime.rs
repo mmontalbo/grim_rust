@@ -1,4 +1,7 @@
-use crate::resources::{ResourceGraph, SetFunction, SetMetadata};
+use crate::{
+    hook_names::normalize_hook_name,
+    resources::{ResourceGraph, SetFunction, SetMetadata},
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct SetHooks {
@@ -41,13 +44,21 @@ fn classify_hooks(set: &SetMetadata) -> SetHooks {
     let mut hooks = SetHooks::default();
 
     for method in &set.methods {
-        if method.name.eq_ignore_ascii_case("enter") {
+        let Some(normalized) = normalize_hook_name(&method.name) else {
+            continue;
+        };
+
+        if normalized.simplified == "enter" {
             hooks.enter = Some(method.clone());
-        } else if method.name.eq_ignore_ascii_case("exit") {
+        } else if normalized.simplified == "exit" {
             hooks.exit = Some(method.clone());
-        } else if method.name.eq_ignore_ascii_case("camerachange") {
+        } else if normalized.simplified == "camerachange" {
             hooks.camera_change = Some(method.clone());
-        } else if method.name.starts_with("set_up") {
+        } else if normalized
+            .normalized
+            .starts_with("set_up")
+            || normalized.normalized.starts_with("setup")
+        {
             hooks.setup_functions.push(method.clone());
         } else {
             hooks.other_methods.push(method.clone());

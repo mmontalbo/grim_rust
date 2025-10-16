@@ -702,8 +702,14 @@ fn classify_stateful_method(target: &str, method: &str) -> Option<StateSubsystem
     let target_lower = target.to_ascii_lowercase();
     let method_lower = method.to_ascii_lowercase();
 
-    if method_lower == "set_softimage_pos" {
-        return Some(StateSubsystem::Actors);
+    if target_lower.ends_with(".salflowers")
+        || target_lower.ends_with(".suitcase")
+        || target_lower.ends_with(".olivia_obj")
+        || target_lower.ends_with(".car")
+        || target_lower.ends_with(".nitrogen")
+        || target_lower.ends_with(".grinder")
+    {
+        return Some(StateSubsystem::Objects);
     }
 
     const OBJECT_METHODS: &[&str] = &[

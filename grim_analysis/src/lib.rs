@@ -1,5 +1,6 @@
 pub mod boot;
 pub mod coverage;
+pub mod hook_names;
 pub mod registry;
 pub mod report;
 pub mod resources;
