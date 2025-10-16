@@ -7,6 +7,7 @@ use crate::audio_bridge::RecordingAudioCallback;
 use crate::cli::RunLuaArgs;
 use crate::codec3_depth::write_manny_office_depth_stats;
 use crate::lua_host::{self, run_boot_sequence, HotspotOptions, MovementOptions};
+use crate::stream::StreamServer;
 
 pub fn execute(args: RunLuaArgs) -> Result<()> {
     let RunLuaArgs {
@@ -24,6 +25,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         verify_geometry,
         geometry_diff,
         geometry_diff_json,
+        stream_bind,
     } = args;
 
     if verify_geometry {
@@ -79,6 +81,14 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
     let lab_root_path = lab_root
         .clone()
         .unwrap_or_else(|| PathBuf::from("dev-install"));
+    let stream = if let Some(addr) = stream_bind.as_ref() {
+        Some(StreamServer::bind(
+            addr,
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )?)
+    } else {
+        None
+    };
     let run_summary = run_boot_sequence(
         &data_root,
         lab_root.as_deref(),
@@ -87,6 +97,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         audio_callback,
         movement,
         hotspot,
+        stream.as_ref(),
     )?;
 
     if let Some(path) = event_log_json.as_ref() {

@@ -8,3 +8,5 @@ pub mod runtime;
 pub mod simulation;
 pub mod state_catalog;
 pub mod timeline;
+
+pub use hook_names::normalize_hook_name;

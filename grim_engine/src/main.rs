@@ -12,6 +12,7 @@ mod lua_host;
 mod runtime;
 mod scheduler;
 mod state;
+mod stream;
 
 fn main() -> Result<()> {
     match cli::parse()? {

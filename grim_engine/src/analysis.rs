@@ -116,6 +116,7 @@ pub fn execute(args: AnalyzeArgs) -> Result<()> {
             None,
             None,
             None,
+            None,
         )?;
 
         run_geometry_diff(

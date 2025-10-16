@@ -43,10 +43,7 @@ pub(super) use bindings::{
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
-use grim_analysis::{
-    hook_names::normalize_hook_name,
-    resources::{ResourceGraph, SetMetadata},
-};
+use grim_analysis::resources::{ResourceGraph, SetMetadata};
 use mlua::{Lua, RegistryKey, Result as LuaResult};
 
 #[derive(Clone)]
@@ -172,7 +169,7 @@ pub(super) enum HookCategory {
 /// in the same bucket. Hook keys keep the original trimmed name where we need to
 /// surface user-facing labels (e.g. `setup:SetupActors` retains its casing).
 pub(super) fn describe_set_hook(method_name: &str) -> Option<SetHookDescriptor> {
-    let normalized = normalize_hook_name(method_name)?;
+    let normalized = grim_analysis::normalize_hook_name(method_name)?;
 
     if normalized.simplified == "enter" {
         Some(SetHookDescriptor {

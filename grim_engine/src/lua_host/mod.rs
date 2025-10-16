@@ -16,10 +16,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
+use grim_stream::{CoverageCounter, StateUpdate};
 use grim_analysis::resources::ResourceGraph;
 use mlua::{Lua, LuaOptions, StdLib};
 
 use crate::lab_collection::LabCollection;
+use crate::stream::StreamServer;
 
 #[derive(Debug, Clone)]
 pub struct EngineRunSummary {
@@ -45,6 +47,7 @@ pub fn run_boot_sequence(
     audio_callback: Option<Rc<dyn AudioCallback>>,
     movement: Option<MovementOptions>,
     hotspot: Option<HotspotOptions>,
+    stream: Option<&StreamServer>,
 ) -> Result<EngineRunSummary> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
@@ -94,7 +97,7 @@ pub fn run_boot_sequence(
     context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
 
     if let Some(options) = movement.as_ref() {
-        movement::simulate_movement(&lua, &context_handle, options)?;
+        movement::simulate_movement(&lua, &context_handle, options, stream)?;
     }
 
     if let Some(options) = hotspot.as_ref() {
@@ -112,6 +115,31 @@ pub fn run_boot_sequence(
         fs::write(path, &json)
             .with_context(|| format!("writing Lua geometry snapshot to {}", path.display()))?;
         println!("Saved Lua geometry snapshot to {}", path.display());
+    }
+    if let Some(stream) = stream {
+        let coverage_snapshot: Vec<CoverageCounter> = coverage
+            .iter()
+            .map(|(key, value)| CoverageCounter {
+                key: key.clone(),
+                value: *value,
+            })
+            .collect();
+        let update = StateUpdate {
+            seq: 0,
+            host_time_ns: 0,
+            frame: None,
+            position: None,
+            yaw: None,
+            active_setup: None,
+            active_hotspot: None,
+            coverage: coverage_snapshot,
+            events: Vec::new(),
+        };
+        if let Err(err) = stream.send_state_update(update) {
+            eprintln!(
+                "[grim_engine] failed to publish final state update: {err:?}"
+            );
+        }
     }
     Ok(EngineRunSummary { events, coverage })
 }

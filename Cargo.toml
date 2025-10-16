@@ -4,5 +4,7 @@ members = [
   "grim_formats",
   "grim_engine",
   "grim_viewer",
+  "grim_stream",
+  "tools/live_retail_capture",
 ]
 resolver = "2"

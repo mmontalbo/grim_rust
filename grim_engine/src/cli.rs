@@ -92,6 +92,10 @@ pub struct Args {
     /// Run a Manny hotspot demo after boot (requires --run-lua)
     #[arg(long, value_name = "SLUG")]
     pub hotspot_demo: Option<String>,
+
+    /// Bind a GrimStream socket and publish real-time state updates (requires --run-lua)
+    #[arg(long)]
+    pub stream_bind: Option<String>,
 }
 
 #[derive(Debug)]
@@ -116,6 +120,7 @@ pub struct RunLuaArgs {
     pub verify_geometry: bool,
     pub geometry_diff: Option<PathBuf>,
     pub geometry_diff_json: Option<PathBuf>,
+    pub stream_bind: Option<String>,
 }
 
 #[derive(Debug)]
@@ -148,6 +153,9 @@ impl Args {
         if !self.run_lua && self.hotspot_demo.is_some() {
             bail!("--hotspot-demo requires --run-lua");
         }
+        if !self.run_lua && self.stream_bind.is_some() {
+            bail!("--stream-bind requires --run-lua");
+        }
 
         if self.run_lua {
             Ok(Command::RunLua(RunLuaArgs {
@@ -165,6 +173,7 @@ impl Args {
                 verify_geometry: self.verify_geometry,
                 geometry_diff: self.geometry_diff,
                 geometry_diff_json: self.geometry_diff_json,
+                stream_bind: self.stream_bind,
             }))
         } else {
             Ok(Command::Analyze(AnalyzeArgs {

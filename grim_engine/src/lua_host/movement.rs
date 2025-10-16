@@ -2,11 +2,13 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use grim_stream::StateUpdate;
 use mlua::{Function, Lua, Table, Value, Variadic};
 use serde::Serialize;
 
 use super::context::EngineContextHandle;
 use super::types::Vec3;
+use crate::stream::StreamServer;
 
 const WALK_SPEED_SCALE: f32 = 0.009_999_999_78;
 
@@ -88,6 +90,7 @@ pub(crate) fn simulate_movement(
     lua: &Lua,
     context: &EngineContextHandle,
     options: &MovementOptions,
+    stream: Option<&StreamServer>,
 ) -> Result<()> {
     use anyhow::anyhow;
 
@@ -146,6 +149,24 @@ pub(crate) fn simulate_movement(
                     "movement.frame {} {:.3},{:.3}",
                     frame, sample.position[0], sample.position[1]
                 ));
+                if let Some(stream) = stream {
+                    let update = StateUpdate {
+                        seq: 0,
+                        host_time_ns: 0,
+                        frame: Some(sample.frame),
+                        position: Some(sample.position),
+                        yaw: sample.yaw,
+                        active_setup: None,
+                        active_hotspot: sample.sector.clone(),
+                        coverage: Vec::new(),
+                        events: Vec::new(),
+                    };
+                    if let Err(err) = stream.send_state_update(update) {
+                        eprintln!(
+                            "[grim_engine] failed to stream movement sample: {err:?}"
+                        );
+                    }
+                }
                 samples.push(sample);
             }
         }
@@ -176,6 +197,24 @@ pub(crate) fn simulate_movement(
                 "movement.frame {} {:.3},{:.3}",
                 frame, sample.position[0], sample.position[1]
             ));
+            if let Some(stream) = stream {
+                let update = StateUpdate {
+                    seq: 0,
+                    host_time_ns: 0,
+                    frame: Some(sample.frame),
+                    position: Some(sample.position),
+                    yaw: sample.yaw,
+                    active_setup: None,
+                    active_hotspot: sample.sector.clone(),
+                    coverage: Vec::new(),
+                    events: Vec::new(),
+                };
+                if let Err(err) = stream.send_state_update(update) {
+                    eprintln!(
+                        "[grim_engine] failed to stream movement sample: {err:?}"
+                    );
+                }
+            }
             samples.push(sample);
         }
     }

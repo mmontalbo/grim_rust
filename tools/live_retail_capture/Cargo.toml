@@ -1,19 +1,16 @@
 [package]
-name = "grim_engine"
+name = "live_retail_capture"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
-grim_analysis = { path = "../grim_analysis" }
-grim_formats = { path = "../grim_formats" }
-grim_stream = { path = "../grim_stream" }
+grim_stream = { path = "../../grim_stream" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-mlua = { version = "0.9", features = ["lua51", "vendored"] }
-regex = "1"
 thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "net", "io-util", "time", "sync"] }
 
 [dev-dependencies]
 tempfile = "3"
