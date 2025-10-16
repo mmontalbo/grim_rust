@@ -16,6 +16,9 @@ office online.
 - **Surface dependencies:** Tracks which scripts, LAB assets, and hooks are
   required for the Manny office milestone, keeping the broader effort focused on
   first-playable boot coverage.
+- **Retail telemetry bridge:** Hosts the retail instrumentation scaffold under
+  `retail_capture/` so live captures stay versioned alongside the analysis
+  passes they inform.
 
 ## Key Concepts
 - **Resource graph:** Represents every extracted Lua file plus set metadata and
