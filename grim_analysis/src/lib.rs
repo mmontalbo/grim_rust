@@ -4,4 +4,5 @@ pub mod report;
 pub mod resources;
 pub mod runtime;
 pub mod simulation;
+pub mod state_catalog;
 pub mod timeline;

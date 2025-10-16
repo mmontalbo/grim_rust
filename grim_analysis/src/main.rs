@@ -8,6 +8,7 @@ use grim_analysis::report::{build_runtime_report, HookTriggerReport, ScriptCateg
 use grim_analysis::resources::{ResourceGraph, SetFunction};
 use grim_analysis::runtime::build_runtime_model;
 use grim_analysis::simulation::{simulate_set_function, FunctionSimulation, StateSubsystem};
+use grim_analysis::state_catalog::build_state_catalog;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Rust exploration of Grim Fandango's boot flow", long_about = None)]
@@ -27,6 +28,10 @@ struct Args {
     /// Optional path to write a JSON report summarizing parsed hooks
     #[arg(long)]
     json_report: Option<PathBuf>,
+
+    /// Optional path to write the state catalog JSON
+    #[arg(long)]
+    state_catalog_json: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -50,6 +55,13 @@ fn main() -> Result<()> {
         let file = File::create(path)?;
         serde_json::to_writer_pretty(file, &runtime_report)?;
         println!("[grim_analysis] wrote JSON report to {}", path.display());
+    }
+
+    if let Some(path) = args.state_catalog_json.as_deref() {
+        let catalog = build_state_catalog(&args.data_root, &resources, &runtime_model);
+        let file = File::create(path)?;
+        serde_json::to_writer_pretty(file, &catalog)?;
+        println!("[grim_analysis] wrote state catalog to {}", path.display());
     }
 
     registry.save()?;

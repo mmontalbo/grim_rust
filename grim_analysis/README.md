@@ -34,6 +34,9 @@ office online.
 ## Typical Usage
 - `cargo run -p grim_analysis -- --timeline-json out.json` to produce the boot
   timeline and inspect where Manny's office becomes the active set.
+- `cargo run -p grim_analysis -- --state-catalog-json state_catalog.json` to
+  export the enumerated scripts, sets, actors, and hooks that the telemetry
+  bridge must cover.
 - Link the crate as a library to reuse `ResourceGraph`, `BootTimeline`, and
   simulation helpers from other binaries.
 
