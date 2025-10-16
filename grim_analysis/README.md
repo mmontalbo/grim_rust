@@ -37,6 +37,9 @@ office online.
 - `cargo run -p grim_analysis -- --state-catalog-json state_catalog.json` to
   export the enumerated scripts, sets, actors, and hooks that the telemetry
   bridge must cover.
+- Pair the catalog with captured coverage counts using
+  `cargo run -p grim_analysis -- --coverage-counts coverage.json --coverage-summary-json coverage_report.json`
+  to highlight missing or unexpected retail telemetry keys.
 - Link the crate as a library to reuse `ResourceGraph`, `BootTimeline`, and
   simulation helpers from other binaries.
 

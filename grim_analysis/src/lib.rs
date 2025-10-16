@@ -1,4 +1,5 @@
 pub mod boot;
+pub mod coverage;
 pub mod registry;
 pub mod report;
 pub mod resources;

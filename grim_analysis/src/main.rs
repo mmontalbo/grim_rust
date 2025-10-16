@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, fs::File, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 use grim_analysis::boot::{run_boot_pipeline, BootRequest};
+use grim_analysis::coverage::{compare_catalog_with_coverage, load_coverage_counts};
 use grim_analysis::registry::Registry;
 use grim_analysis::report::{build_runtime_report, HookTriggerReport, ScriptCategory};
 use grim_analysis::resources::{ResourceGraph, SetFunction};
@@ -32,6 +33,14 @@ struct Args {
     /// Optional path to write the state catalog JSON
     #[arg(long)]
     state_catalog_json: Option<PathBuf>,
+
+    /// Optional path to read coverage counts emitted by the retail shim
+    #[arg(long)]
+    coverage_counts: Option<PathBuf>,
+
+    /// Optional path to write the coverage comparison JSON (requires --coverage-counts)
+    #[arg(long)]
+    coverage_summary_json: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -51,6 +60,19 @@ fn main() -> Result<()> {
 
     let runtime_report = build_runtime_report(&summary, &runtime_model);
 
+    let need_catalog = args.state_catalog_json.is_some()
+        || args.coverage_counts.is_some()
+        || args.coverage_summary_json.is_some();
+    let catalog = if need_catalog {
+        Some(build_state_catalog(
+            &args.data_root,
+            &resources,
+            &runtime_model,
+        ))
+    } else {
+        None
+    };
+
     if let Some(path) = args.json_report.as_deref() {
         let file = File::create(path)?;
         serde_json::to_writer_pretty(file, &runtime_report)?;
@@ -58,10 +80,52 @@ fn main() -> Result<()> {
     }
 
     if let Some(path) = args.state_catalog_json.as_deref() {
-        let catalog = build_state_catalog(&args.data_root, &resources, &runtime_model);
+        let catalog = catalog
+            .as_ref()
+            .expect("catalog should exist when state_catalog_json is set");
         let file = File::create(path)?;
         serde_json::to_writer_pretty(file, &catalog)?;
         println!("[grim_analysis] wrote state catalog to {}", path.display());
+    }
+
+    if args.coverage_summary_json.is_some() && args.coverage_counts.is_none() {
+        bail!("--coverage-summary-json requires --coverage-counts");
+    }
+
+    if let Some(path) = args.coverage_counts.as_deref() {
+        let catalog = catalog
+            .as_ref()
+            .expect("catalog should exist when coverage counts are requested");
+        let counts = load_coverage_counts(path)?;
+        let comparison = compare_catalog_with_coverage(&catalog.coverage, &counts);
+
+        println!(
+            "[grim_analysis] coverage -> covered: {}, missing: {}, unexpected: {}",
+            comparison.covered.len(),
+            comparison.missing.len(),
+            comparison.unexpected.len()
+        );
+        if !comparison.missing.is_empty() {
+            println!("  missing keys (first 10):");
+            for key in comparison.missing.iter().take(10) {
+                println!("    - {key}");
+            }
+        }
+        if !comparison.unexpected.is_empty() {
+            println!("  unexpected keys (first 10):");
+            for key in comparison.unexpected.iter().take(10) {
+                println!("    - {key}");
+            }
+        }
+
+        if let Some(summary_path) = args.coverage_summary_json.as_deref() {
+            let file = File::create(summary_path)?;
+            serde_json::to_writer_pretty(file, &comparison)?;
+            println!(
+                "[grim_analysis] wrote coverage comparison to {}",
+                summary_path.display()
+            );
+        }
     }
 
     registry.save()?;

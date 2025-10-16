@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use crate::resources::{ResourceGraph, SetMetadata, SetupSlot};
@@ -12,6 +12,7 @@ pub struct StateCatalog<'a> {
     pub scripts: CatalogScripts<'a>,
     pub actors: Vec<CatalogActor<'a>>,
     pub sets: Vec<CatalogSet<'a>>,
+    pub coverage: CatalogCoverage,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +63,11 @@ pub struct CatalogSetHooks {
     pub other: Vec<CatalogFunction>,
 }
 
+#[derive(Debug, Serialize, Default)]
+pub struct CatalogCoverage {
+    pub keys: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CatalogFunction {
     pub name: String,
@@ -105,14 +111,22 @@ pub fn build_state_catalog<'a>(
         .map(|set| (set.variable_name.as_str(), set))
         .collect();
 
+    let mut coverage_keys: BTreeSet<String> = BTreeSet::new();
+    collect_script_keys(&mut coverage_keys, resources);
+    collect_actor_keys(&mut coverage_keys, &resources.actors);
+
     let sets = runtime_model
         .sets
         .iter()
         .map(|runtime_set| {
             let metadata = set_lookup.get(runtime_set.variable_name.as_str());
-            build_catalog_set(runtime_set, metadata.copied())
+            build_catalog_set(runtime_set, metadata.copied(), &mut coverage_keys)
         })
         .collect();
+
+    let coverage = CatalogCoverage {
+        keys: coverage_keys.into_iter().collect(),
+    };
 
     StateCatalog {
         data_root: data_root.display().to_string(),
@@ -120,14 +134,18 @@ pub fn build_state_catalog<'a>(
         scripts,
         actors,
         sets,
+        coverage,
     }
 }
 
 fn build_catalog_set<'a>(
     runtime_set: &'a RuntimeSet,
     metadata: Option<&'a SetMetadata>,
+    coverage_keys: &mut BTreeSet<String>,
 ) -> CatalogSet<'a> {
-    let setup_slots = metadata
+    coverage_keys.insert(format!("set:{}", runtime_set.variable_name));
+
+    let setup_slots: Vec<CatalogSetupSlot<'a>> = metadata
         .map(|meta| {
             meta.setup_slots
                 .iter()
@@ -136,13 +154,68 @@ fn build_catalog_set<'a>(
         })
         .unwrap_or_default();
 
+    for slot in &setup_slots {
+        let slot_label = slot.label.to_string();
+        coverage_keys.insert(format!(
+            "set:{}:setup_slot:{}",
+            runtime_set.variable_name, slot_label
+        ));
+    }
+
+    let hooks = CatalogSetHooks::from(&runtime_set.hooks);
+    register_set_hook_keys(coverage_keys, runtime_set.variable_name.as_str(), &hooks);
+
     CatalogSet {
         variable_name: runtime_set.variable_name.as_str(),
         set_file: runtime_set.set_file.as_str(),
         lua_file: metadata.map(|meta| meta.lua_file.as_str()),
         display_name: runtime_set.display_name.as_deref(),
         setup_slots,
-        hooks: CatalogSetHooks::from(&runtime_set.hooks),
+        hooks,
+    }
+}
+
+fn collect_script_keys(coverage_keys: &mut BTreeSet<String>, resources: &ResourceGraph) {
+    for script in &resources.year_scripts {
+        coverage_keys.insert(format!("script:year:{script}"));
+    }
+    for script in &resources.menu_scripts {
+        coverage_keys.insert(format!("script:menu:{script}"));
+    }
+    for script in &resources.room_scripts {
+        coverage_keys.insert(format!("script:room:{script}"));
+    }
+}
+
+fn collect_actor_keys(
+    coverage_keys: &mut BTreeSet<String>,
+    actors: &[crate::resources::ActorMetadata],
+) {
+    for actor in actors {
+        coverage_keys.insert(format!("actor:{}", actor.variable_name));
+    }
+}
+
+fn register_set_hook_keys(
+    coverage_keys: &mut BTreeSet<String>,
+    set_name: &str,
+    hooks: &CatalogSetHooks,
+) {
+    if hooks.enter.is_some() {
+        coverage_keys.insert(format!("set:{set_name}:hook:enter"));
+    }
+    if hooks.exit.is_some() {
+        coverage_keys.insert(format!("set:{set_name}:hook:exit"));
+    }
+    if hooks.camera_change.is_some() {
+        coverage_keys.insert(format!("set:{set_name}:hook:camera_change"));
+    }
+
+    for function in &hooks.setup {
+        coverage_keys.insert(format!("set:{set_name}:hook:setup:{}", function.name));
+    }
+    for function in &hooks.other {
+        coverage_keys.insert(format!("set:{set_name}:hook:other:{}", function.name));
     }
 }
 
@@ -202,6 +275,7 @@ mod tests {
         assert!(catalog.sets.is_empty());
         assert_eq!(catalog.summary.total_actors, 0);
         assert!(catalog.actors.is_empty());
+        assert!(catalog.coverage.keys.is_empty());
     }
 
     #[test]
@@ -245,5 +319,28 @@ mod tests {
         assert_eq!(catalog.actors[0].variable_name, "manny");
         assert_eq!(catalog.sets[0].lua_file, Some("mo.lua"));
         assert_eq!(catalog.sets[0].setup_slots[0].label, "desk");
+
+        assert!(catalog
+            .coverage
+            .keys
+            .iter()
+            .any(|key| key == "script:year:year1.lua"));
+        assert!(catalog
+            .coverage
+            .keys
+            .iter()
+            .any(|key| key == "script:menu:menu.lua"));
+        assert!(catalog
+            .coverage
+            .keys
+            .iter()
+            .any(|key| key == "script:room:mo.lua"));
+        assert!(catalog.coverage.keys.iter().any(|key| key == "actor:manny"));
+        assert!(catalog.coverage.keys.iter().any(|key| key == "set:mo"));
+        assert!(catalog
+            .coverage
+            .keys
+            .iter()
+            .any(|key| key == "set:mo:setup_slot:desk"));
     }
 }
