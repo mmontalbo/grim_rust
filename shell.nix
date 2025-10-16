@@ -79,6 +79,7 @@ in pkgs.mkShell {
     git
     rsync
     zig               # build the LD_PRELOAD shim
+    qemu              # user-mode emulation for 32-bit binaries
     rustc
     cargo
     rustfmt
