@@ -10,8 +10,13 @@
 #include <sys/stat.h>
 
 typedef int (*lua_dofile_fn)(const char *filename);
+typedef unsigned int lua_Object;
+typedef lua_Object (*lua_getglobal_fn)(const char *name);
+typedef const char *(*lua_getstring_fn)(lua_Object object);
 
 static lua_dofile_fn real_lua_dofile = NULL;
+static lua_getglobal_fn real_lua_getglobal = NULL;
+static lua_getstring_fn real_lua_getstring = NULL;
 
 static pthread_once_t resolve_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t telemetry_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -20,6 +25,7 @@ static bool telemetry_injected = false;
 static const char *const TARGET_SCRIPT = "_system.lua";
 static const char *const TELEMETRY_SCRIPT = "mods/telemetry.lua";
 static const char *const LOG_PATH = "mods/telemetry.log";
+static const char *const TELEMETRY_BOOTSTRAP_ERROR_GLOBAL = "__telemetry_bootstrap_error";
 
 static void ensure_log_directory(void) {
     const char *slash = strrchr(LOG_PATH, '/');
@@ -85,6 +91,33 @@ static void resolve_real_symbols(void) {
     if (err != NULL) {
         log_event("failed to resolve lua_dofile: %s", err);
     }
+
+    dlerror();
+    real_lua_getglobal = (lua_getglobal_fn)dlsym(RTLD_NEXT, "lua_getglobal");
+    err = dlerror();
+    if (err != NULL) {
+        log_event("failed to resolve lua_getglobal: %s", err);
+    }
+
+    dlerror();
+    real_lua_getstring = (lua_getstring_fn)dlsym(RTLD_NEXT, "lua_getstring");
+    err = dlerror();
+    if (err != NULL) {
+        log_event("failed to resolve lua_getstring: %s", err);
+    }
+}
+
+static void log_bootstrap_error(void) {
+    if (!real_lua_getglobal || !real_lua_getstring) {
+        return;
+    }
+    lua_Object obj = real_lua_getglobal(TELEMETRY_BOOTSTRAP_ERROR_GLOBAL);
+    if (obj != 0) {
+        const char *message = real_lua_getstring(obj);
+        if (message && message[0] != '\0') {
+            log_event("telemetry bootstrap error: %s", message);
+        }
+    }
 }
 
 static const char *basename_or_self(const char *path) {
@@ -107,6 +140,7 @@ static void inject_telemetry(void) {
     int result = real_lua_dofile(TELEMETRY_SCRIPT);
     if (result != 0) {
         log_event("telemetry script %s returned error code %d", TELEMETRY_SCRIPT, result);
+        log_bootstrap_error();
     } else {
         log_event("telemetry script %s executed", TELEMETRY_SCRIPT);
     }
@@ -148,6 +182,9 @@ static int forward_lua_call(const char *filename, lua_dofile_fn real_fn, const c
     int result = real_fn(filename);
     if (filename && filename[0] != '\0') {
         log_event("%s called for %s -> %d", label, filename, result);
+        if (result != 0 && filename && strcmp(filename, TELEMETRY_SCRIPT) == 0) {
+            log_bootstrap_error();
+        }
     }
     maybe_inject(filename, result);
     return result;

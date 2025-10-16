@@ -39,9 +39,38 @@ let
     '';
   };
 
+  lua32 = pkgs.stdenv.mkDerivation {
+    pname = "lua";
+    version = "3.2";
+
+    src = pkgs.fetchurl {
+      url = "https://www.lua.org/ftp/lua-3.2.tar.gz";
+      sha256 = "sha256-v4vqvUHmXL+MtBxojsoFiP/4Hh5fZ8tCvTcOHsxYXDM=";
+    };
+
+    nativeBuildInputs = with pkgs; [ ];
+    dontConfigure = true;
+
+    buildPhase = ''
+      make all
+    '';
+
+    installPhase = ''
+      mkdir -p $out/bin
+      mkdir -p $out/share/lua32
+
+      # provide distinct binaries so they can coexist with lua5.1
+      cp bin/lua $out/bin/lua32
+      cp bin/luac $out/bin/luac32
+
+      cp -r include lib doc $out/share/lua32/
+    '';
+  };
+
 in pkgs.mkShell {
   packages = with pkgs; [
     scummvmTools      # extraction tooling for reference data
+    lua32             # legacy runtime matching the retail game's Lua 3.x lineage
     lua5_1            # many scripts target classic Lua semantics
     python3           # quick one-off analysis helpers
     p7zip             # archive handling when spelunking assets
@@ -49,6 +78,7 @@ in pkgs.mkShell {
     jq                # lightweight JSON inspection for reports
     git
     rsync
+    zig               # build the LD_PRELOAD shim
     rustc
     cargo
     rustfmt
