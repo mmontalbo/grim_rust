@@ -19,7 +19,7 @@ struct Args {
     #[arg(long)]
     dest: PathBuf,
 
-    /// Directory containing LAB archives (defaults to $GRIM_INSTALL_PATH)
+    /// Directory containing LAB archives (defaults to $GRIM_INSTALL_PATH, which the dev shell points at dev-install/)
     #[arg(long)]
     root: Option<PathBuf>,
 

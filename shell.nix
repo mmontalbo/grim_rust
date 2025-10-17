@@ -128,13 +128,18 @@ in pkgs.mkShell {
       pkgs.xorg.libXtst
     ]}:$LD_LIBRARY_PATH"
 
+    if command -v git >/dev/null 2>&1; then
+      REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    else
+      REPO_ROOT="$(pwd)"
+    fi
+    export DEV_INSTALL_PATH="$REPO_ROOT/dev-install"
+
     if [ -z "$GRIM_INSTALL_PATH" ]; then
-      export GRIM_INSTALL_PATH="$HOME/.local/share/Steam/steamapps/common/Grim Fandango Remastered"
+      export GRIM_INSTALL_PATH="$DEV_INSTALL_PATH"
     fi
 
     export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
     export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.glibc.dev}/include"
-
-    echo "GRIM_INSTALL_PATH=$GRIM_INSTALL_PATH"
   '';
 }

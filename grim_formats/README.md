@@ -101,7 +101,7 @@ into a directory tree:
 
 ```bash
 cargo run -p grim_formats --bin lab_extract -- \
-  --root "$GRIM_INSTALL_PATH" \
+  --root dev-install \
   --dest extracted
 ```
 
