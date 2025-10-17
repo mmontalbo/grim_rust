@@ -62,7 +62,6 @@ impl EngineContextHandle {
             .resolve_actor_handle(candidates)
             .map(|(handle, id)| (handle, id.clone()))
     }
-
 }
 
 #[derive(Debug, Default)]

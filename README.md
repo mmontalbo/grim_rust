@@ -19,7 +19,7 @@ flow and prototype modern tooling around it.
   `grim_analysis/README.md`.
 - `grim_engine/` – prototype runtime host; see `grim_engine/README.md`.
 - `grim_formats/` – asset format helpers and CLIs; see `grim_formats/README.md`.
-- `grim_viewer/` – visual tooling built on the extracted data; see
+- `grim_viewer/` – minimal live preview UI for retail + intro stream; see
   `grim_viewer/README.md`.
 - `docs/` – reference material:
   - `docs/runtime_smoke_tests.md` now tracks the trimmed intro playback scope

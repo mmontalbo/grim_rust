@@ -10,8 +10,8 @@ has been shelved while we focus on the minimal intro playback loop.
   way to drive the live intro preview today.
 - `grim_engine` exposes a GrimStream socket when invoked with `--stream-bind`.
   The stream only carries the intro playback state needed for the viewer UI.
-- The viewer still understands the GrimStream handshake and will render the
-  intro overlay when the engine connects.
+- The viewer still understands the GrimStream handshake and renders a minimal
+  overlay (Manny trail + current position) when the engine connects.
 
 ## What Was Removed
 - No CLI flags remain for timeline dumps, hotspot demos, or coverage exports.
