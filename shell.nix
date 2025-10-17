@@ -87,6 +87,10 @@ in pkgs.mkShell {
     rustfmt
     rust-analyzer
     pkg-config
+    llvmPackages.libclang
+    llvmPackages.libclang.lib
+    llvmPackages.clang-unwrapped
+    glibc.dev
     ffmpeg-full
     alsa-lib
     vulkan-loader
@@ -127,6 +131,9 @@ in pkgs.mkShell {
     if [ -z "$GRIM_INSTALL_PATH" ]; then
       export GRIM_INSTALL_PATH="$HOME/.local/share/Steam/steamapps/common/Grim Fandango Remastered"
     fi
+
+    export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+    export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.glibc.dev}/include"
 
     echo "GRIM_INSTALL_PATH=$GRIM_INSTALL_PATH"
   '';
