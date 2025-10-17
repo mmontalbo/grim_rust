@@ -1,12 +1,15 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
-    time::Instant,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use glam::Vec3;
+use grim_formats::{SnmFile, blocky16::Blocky16Decoder};
 use grim_stream::{CoverageCounter, StateUpdate};
+use walkdir::WalkDir;
 
 use crate::scene::{
     CameraProjector, EntityOrientation, MovementTrace, SceneEntityKind, ViewerScene,
@@ -23,6 +26,7 @@ pub struct LiveSceneConfig {
     pub movement_log: Option<PathBuf>,
     pub hotspot_log: Option<PathBuf>,
     pub active_asset: Option<String>,
+    pub movies_root: Option<PathBuf>,
 }
 
 impl LiveSceneConfig {
@@ -76,6 +80,11 @@ impl LiveSceneConfig {
             )
         });
 
+        let movies_root = locate(
+            &repo_root,
+            &["extracted", "artifacts/extracted", "dev-install/extracted"],
+        );
+
         let active_asset = args
             .scene_active_asset
             .clone()
@@ -88,6 +97,7 @@ impl LiveSceneConfig {
             movement_log,
             hotspot_log,
             active_asset,
+            movies_root,
         }))
     }
 }
@@ -127,6 +137,99 @@ pub struct EngineFrame<'a> {
     pub pixels: &'a [u8],
 }
 
+struct MoviePlaybackState {
+    name: String,
+    snm: Arc<SnmFile>,
+    decoder: Blocky16Decoder,
+    rgba_buffer: Vec<u8>,
+    current_frame: Option<u32>,
+    start_host_time_ns: u64,
+    frame_duration: Duration,
+}
+
+impl MoviePlaybackState {
+    fn new(name: String, snm: Arc<SnmFile>, start_host_time_ns: u64) -> Result<Self> {
+        let decoder = snm
+            .blocky16_decoder()
+            .with_context(|| format!("failed to create Blocky16 decoder for {}", name))?;
+        let rgba_len = snm.blocky16_rgba_len();
+        let rgba_buffer = vec![0u8; rgba_len.max(4)];
+        let frame_duration = if snm.header.frame_rate > 0 {
+            Duration::from_micros(snm.header.frame_rate as u64)
+        } else {
+            Duration::from_micros(33_333)
+        };
+        Ok(Self {
+            name,
+            snm,
+            decoder,
+            rgba_buffer,
+            current_frame: None,
+            start_host_time_ns,
+            frame_duration,
+        })
+    }
+
+    fn width(&self) -> u32 {
+        self.decoder.width() as u32
+    }
+
+    fn height(&self) -> u32 {
+        self.decoder.height() as u32
+    }
+
+    fn frame_count(&self) -> usize {
+        self.snm.frames.len()
+    }
+
+    fn frame_for_host_time(&mut self, host_time_ns: u64) -> Result<&[u8]> {
+        if self.frame_count() == 0 {
+            return Ok(&self.rgba_buffer);
+        }
+        let elapsed_ns = host_time_ns.saturating_sub(self.start_host_time_ns) as u128;
+        let frame_duration_ns = self.frame_duration.as_nanos();
+        let frame_idx = if frame_duration_ns > 0 {
+            (elapsed_ns / frame_duration_ns) as u32
+        } else {
+            0
+        };
+        let max_index = (self.frame_count() - 1) as u32;
+        self.advance_to(frame_idx.min(max_index))?;
+        Ok(&self.rgba_buffer)
+    }
+
+    fn advance_to(&mut self, target: u32) -> Result<()> {
+        if self.frame_count() == 0 {
+            return Ok(());
+        }
+        let max_index = (self.frame_count() - 1) as u32;
+        let clamped = target.min(max_index);
+        if let Some(current) = self.current_frame {
+            if current >= clamped {
+                return Ok(());
+            }
+        }
+        let start = self
+            .current_frame
+            .map(|value| value.saturating_add(1))
+            .unwrap_or(0);
+        if start > clamped {
+            return Ok(());
+        }
+        for index in start..=clamped {
+            let frame = &self.snm.frames[index as usize];
+            let decoded = frame
+                .decode_blocky16_rgba(&mut self.decoder, &mut self.rgba_buffer)
+                .with_context(|| format!("failed to decode frame {} of {}", index, self.name))?;
+            if !decoded && self.current_frame.is_none() && !self.rgba_buffer.is_empty() {
+                self.rgba_buffer.fill(0);
+            }
+        }
+        self.current_frame = Some(clamped);
+        Ok(())
+    }
+}
+
 const COLOR_BACKGROUND_FALLBACK: [u8; 4] = [32, 36, 44, 255];
 const COLOR_MANNY_FILL: [u8; 4] = [51, 242, 217, 240];
 const COLOR_MANNY_OUTLINE: [u8; 4] = [18, 128, 112, 200];
@@ -144,6 +247,12 @@ pub struct LiveSceneState {
     overlay_buffer: Vec<u8>,
     runtime: EngineRuntimeState,
     manny_index: Option<usize>,
+    movies_root: Option<PathBuf>,
+    movie_index: HashMap<String, PathBuf>,
+    movie_assets: HashMap<String, Arc<SnmFile>>,
+    movie_playback: Option<MoviePlaybackState>,
+    movie_frame_rgba: Vec<u8>,
+    missing_movies: HashSet<String>,
 }
 
 impl LiveSceneState {
@@ -211,6 +320,35 @@ impl LiveSceneState {
             .map(|plate| plate.pixels.clone())
             .unwrap_or_else(|| COLOR_BACKGROUND_FALLBACK.to_vec());
 
+        let movies_root = config.movies_root.clone();
+        let movie_index = match movies_root.as_ref() {
+            Some(root) => match build_movie_index(root) {
+                Ok(index) => {
+                    if index.is_empty() {
+                        eprintln!(
+                            "[grim_viewer] warning: no SNM movies found under {}",
+                            root.display()
+                        );
+                    } else {
+                        println!(
+                            "[grim_viewer] indexed {} SNM movie(s) from {}",
+                            index.len(),
+                            root.display()
+                        );
+                    }
+                    index
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[grim_viewer] warning: failed to index SNM movies under {}: {err:?}",
+                        root.display()
+                    );
+                    HashMap::new()
+                }
+            },
+            None => HashMap::new(),
+        };
+
         Ok(Self {
             scene,
             _movement_trace: movement_trace,
@@ -218,6 +356,12 @@ impl LiveSceneState {
             overlay_buffer,
             runtime,
             manny_index,
+            movies_root,
+            movie_index,
+            movie_assets: HashMap::new(),
+            movie_playback: None,
+            movie_frame_rgba: Vec::new(),
+            missing_movies: HashSet::new(),
         })
     }
 
@@ -273,16 +417,89 @@ impl LiveSceneState {
 
         for event in &update.events {
             if let Some(movie) = event.strip_prefix("cut_scene.fullscreen.start ") {
-                self.runtime.active_movie = Some(movie.to_string());
-                self.runtime.movie_started_at = Some(Instant::now());
+                self.start_fullscreen_movie(movie, update.host_time_ns);
             } else if event.starts_with("cut_scene.fullscreen.end ") {
-                self.runtime.active_movie = None;
-                self.runtime.movie_started_at = None;
+                self.stop_fullscreen_movie();
             }
         }
 
         self.runtime.apply_coverage(&update.coverage);
         self.render_engine_overlay()
+    }
+
+    fn start_fullscreen_movie(&mut self, movie: &str, host_time_ns: u64) {
+        self.runtime.active_movie = Some(movie.to_string());
+        self.runtime.movie_started_at = Some(Instant::now());
+        self.movie_playback = self.prepare_movie_playback(movie, host_time_ns);
+    }
+
+    fn stop_fullscreen_movie(&mut self) {
+        self.runtime.active_movie = None;
+        self.runtime.movie_started_at = None;
+        self.movie_playback = None;
+    }
+
+    fn prepare_movie_playback(
+        &mut self,
+        movie: &str,
+        host_time_ns: u64,
+    ) -> Option<MoviePlaybackState> {
+        let key = normalize_movie_key(movie);
+        match self.load_movie_asset(&key) {
+            Ok(Some(asset)) => {
+                self.missing_movies.remove(&key);
+                match MoviePlaybackState::new(movie.to_string(), asset, host_time_ns) {
+                    Ok(playback) => Some(playback),
+                    Err(err) => {
+                        if self.missing_movies.insert(key.clone()) {
+                            eprintln!(
+                                "[grim_viewer] warning: failed to initialize movie '{}': {err:?}",
+                                movie
+                            );
+                        }
+                        None
+                    }
+                }
+            }
+            Ok(None) => {
+                if self.missing_movies.insert(key.clone()) {
+                    let root = self
+                        .movies_root
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "<unspecified>".to_string());
+                    eprintln!(
+                        "[grim_viewer] warning: cutscene movie '{}' not found under {}",
+                        movie, root
+                    );
+                }
+                None
+            }
+            Err(err) => {
+                if self.missing_movies.insert(key.clone()) {
+                    eprintln!(
+                        "[grim_viewer] warning: failed to load movie '{}': {err:?}",
+                        movie
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    fn load_movie_asset(&mut self, key: &str) -> Result<Option<Arc<SnmFile>>> {
+        if let Some(cached) = self.movie_assets.get(key) {
+            return Ok(Some(cached.clone()));
+        }
+        let Some(path) = self.movie_index.get(key) else {
+            return Ok(None);
+        };
+        let snm = Arc::new(
+            SnmFile::open(path)
+                .with_context(|| format!("failed to open SNM {}", path.display()))?,
+        );
+        self.movie_assets.insert(key.to_string(), snm.clone());
+        Ok(Some(snm))
     }
 
     fn render_engine_overlay(&mut self) -> Option<EngineFrame<'_>> {
@@ -309,6 +526,49 @@ impl LiveSceneState {
 
         if width == 0 || height == 0 {
             return None;
+        }
+
+        let mut drop_playback = false;
+        if let Some(playback) = self.movie_playback.as_mut() {
+            let movie_width = playback.width();
+            let movie_height = playback.height();
+            let movie_name = playback.name.clone();
+            match playback.frame_for_host_time(self.runtime.host_time_ns) {
+                Ok(pixels) => {
+                    let expected_len = (movie_width as usize)
+                        .saturating_mul(movie_height as usize)
+                        .saturating_mul(4);
+                    if pixels.len() != expected_len {
+                        eprintln!(
+                            "[grim_viewer] warning: movie '{}' produced {} bytes (expected {})",
+                            movie_name,
+                            pixels.len(),
+                            expected_len
+                        );
+                        drop_playback = true;
+                    } else {
+                        if self.movie_frame_rgba.len() != expected_len {
+                            self.movie_frame_rgba.resize(expected_len, 0);
+                        }
+                        self.movie_frame_rgba[..expected_len].copy_from_slice(pixels);
+                        return Some(EngineFrame {
+                            width: movie_width,
+                            height: movie_height,
+                            pixels: &self.movie_frame_rgba,
+                        });
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[grim_viewer] warning: movie playback for '{}' failed: {err:?}",
+                        movie_name
+                    );
+                    drop_playback = true;
+                }
+            }
+        }
+        if drop_playback {
+            self.movie_playback = None;
         }
 
         if self.runtime.active_movie.is_some() {
@@ -615,6 +875,17 @@ fn scaled_radius(width: u32, height: u32, fraction: f32, minimum: f32) -> i32 {
     scaled.round().max(1.0) as i32
 }
 
+fn normalize_movie_key(movie: &str) -> String {
+    let trimmed = movie.trim();
+    let replaced = trimmed.replace('\\', "/");
+    let segment = replaced.rsplit('/').next().unwrap_or(&replaced);
+    let mut key = segment.to_ascii_lowercase();
+    if !key.ends_with(".snm") {
+        key.push_str(".snm");
+    }
+    key
+}
+
 fn locate(repo_root: &Path, candidates: &[&str]) -> Option<PathBuf> {
     for relative in candidates {
         let path = repo_root.join(relative);
@@ -623,4 +894,39 @@ fn locate(repo_root: &Path, candidates: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn build_movie_index(root: &Path) -> Result<HashMap<String, PathBuf>> {
+    let mut index = HashMap::new();
+    for entry in WalkDir::new(root).into_iter() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                eprintln!(
+                    "[grim_viewer] warning: failed to traverse {}: {err}",
+                    root.display()
+                );
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(ext) = entry.path().extension() else {
+            continue;
+        };
+        if !ext.eq_ignore_ascii_case("snm") {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if let Some(previous) = index.insert(name.clone(), entry.path().to_path_buf()) {
+            eprintln!(
+                "[grim_viewer] warning: duplicate SNM key '{}' (keeping {}, skipping {})",
+                name,
+                previous.display(),
+                entry.path().display()
+            );
+        }
+    }
+    Ok(index)
 }
