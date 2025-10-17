@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use grim_analysis::resources::ResourceGraph;
@@ -22,6 +24,7 @@ use mlua::{Lua, LuaOptions, StdLib};
 
 use crate::lab_collection::LabCollection;
 use crate::stream::StreamServer;
+use context::EngineContextHandle;
 
 #[derive(Debug, Clone)]
 pub struct EngineRunSummary {
@@ -47,8 +50,8 @@ pub fn run_boot_sequence(
     audio_callback: Option<Rc<dyn AudioCallback>>,
     movement: Option<MovementOptions>,
     hotspot: Option<HotspotOptions>,
-    stream: Option<&StreamServer>,
-) -> Result<EngineRunSummary> {
+    stream: Option<StreamServer>,
+) -> Result<(EngineRunSummary, Option<EngineRuntime>)> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
             .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
@@ -96,8 +99,10 @@ pub fn run_boot_sequence(
     context::call_boot(&lua, context.clone())?;
     context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
 
+    let mut stream = stream;
+
     if let Some(options) = movement.as_ref() {
-        movement::simulate_movement(&lua, &context_handle, options, stream)?;
+        movement::simulate_movement(&lua, &context_handle, options, stream.as_ref())?;
     }
 
     if let Some(options) = hotspot.as_ref() {
@@ -116,28 +121,220 @@ pub fn run_boot_sequence(
             .with_context(|| format!("writing Lua geometry snapshot to {}", path.display()))?;
         println!("Saved Lua geometry snapshot to {}", path.display());
     }
-    if let Some(stream) = stream {
-        let coverage_snapshot: Vec<CoverageCounter> = coverage
-            .iter()
-            .map(|(key, value)| CoverageCounter {
-                key: key.clone(),
-                value: *value,
-            })
-            .collect();
+    drop(snapshot);
+
+    let summary = EngineRunSummary { events, coverage };
+    let runtime = stream.take().map(|stream| {
+        EngineRuntime::new(
+            lua,
+            context,
+            context_handle,
+            stream,
+            summary.events.len(),
+            summary.coverage.clone(),
+        )
+    });
+
+    Ok((summary, runtime))
+}
+
+pub struct EngineRuntime {
+    lua: Lua,
+    context: Rc<RefCell<context::EngineContext>>,
+    context_handle: EngineContextHandle,
+    stream: StreamServer,
+    frame: u32,
+    event_cursor: usize,
+    prev_coverage: BTreeMap<String, u64>,
+    last_position: Option<[f32; 3]>,
+    last_yaw: Option<f32>,
+    last_setup: Option<String>,
+    last_hotspot: Option<String>,
+    manny_handle: Option<u32>,
+    manny_actor_id: Option<String>,
+    sent_initial: bool,
+}
+
+impl EngineRuntime {
+    fn new(
+        lua: Lua,
+        context: Rc<RefCell<context::EngineContext>>,
+        context_handle: EngineContextHandle,
+        stream: StreamServer,
+        initial_event_cursor: usize,
+        initial_coverage: BTreeMap<String, u64>,
+    ) -> Self {
+        Self {
+            lua,
+            context,
+            context_handle,
+            stream,
+            frame: 0,
+            event_cursor: initial_event_cursor,
+            prev_coverage: initial_coverage,
+            last_position: None,
+            last_yaw: None,
+            last_setup: None,
+            last_hotspot: None,
+            manny_handle: None,
+            manny_actor_id: None,
+            sent_initial: false,
+        }
+    }
+
+    pub fn run(mut self) -> Result<()> {
+        const FRAME_DURATION: Duration = Duration::from_millis(33);
+        loop {
+            let tick_start = Instant::now();
+            context::drive_active_scripts(&self.lua, self.context.clone(), 8, 32)?;
+            self.frame = self.frame.wrapping_add(1);
+
+            if let Some(update) = self.build_state_update()? {
+                if let Err(err) = self.stream.send_state_update(update) {
+                    eprintln!(
+                        "[grim_engine] failed to publish state update: {err:?}; continuing"
+                    );
+                }
+            }
+
+            let elapsed = tick_start.elapsed();
+            if elapsed < FRAME_DURATION {
+                thread::sleep(FRAME_DURATION - elapsed);
+            }
+        }
+    }
+
+    fn ensure_manny_handle(&mut self) {
+        if self.manny_handle.is_some() {
+            return;
+        }
+        if let Some((handle, id)) = self
+            .context_handle
+            .resolve_actor_handle(&["manny", "Manny"])
+        {
+            self.manny_handle = Some(handle);
+            self.manny_actor_id = Some(id);
+        }
+    }
+
+    fn build_state_update(&mut self) -> Result<Option<StateUpdate>> {
+        self.ensure_manny_handle();
+
+        let (
+            position_opt,
+            yaw_opt,
+            active_setup_opt,
+            active_hotspot_opt,
+            events_len,
+            new_events,
+            coverage_samples,
+        ) = {
+            let ctx = self.context.borrow();
+
+            let position_opt = self
+                .manny_handle
+                .and_then(|handle| ctx.actor_position_by_handle(handle))
+                .map(|vec| [vec.x, vec.y, vec.z]);
+
+            let yaw_opt = self
+                .manny_handle
+                .and_then(|handle| ctx.actor_rotation_by_handle(handle))
+                .map(|rot| rot.y);
+
+            let active_setup_opt = ctx.active_setup_label();
+
+            let active_hotspot_opt = self.manny_actor_id.as_ref().and_then(|actor_id| {
+                ctx.geometry_sector_name(actor_id, "hot")
+                    .or_else(|| ctx.geometry_sector_name(actor_id, "walk"))
+            });
+
+            let events = ctx.events();
+            let events_len = events.len();
+            let new_events = if self.event_cursor < events_len {
+                events[self.event_cursor..].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            let coverage_samples: Vec<(String, u64)> = ctx
+                .coverage_counts()
+                .iter()
+                .map(|(key, value)| (key.clone(), *value))
+                .collect();
+
+            (
+                position_opt,
+                yaw_opt,
+                active_setup_opt,
+                active_hotspot_opt,
+                events_len,
+                new_events,
+                coverage_samples,
+            )
+        };
+
+        self.event_cursor = events_len;
+
+        let mut coverage_updates = Vec::new();
+        for (key, value) in coverage_samples {
+            let previous = self.prev_coverage.insert(key.clone(), value);
+            if !self.sent_initial || previous != Some(value) {
+                coverage_updates.push(CoverageCounter { key, value });
+            }
+        }
+
+        let mut changed = !self.sent_initial;
+
+        if let Some(pos) = position_opt {
+            if self.last_position != Some(pos) {
+                self.last_position = Some(pos);
+                changed = true;
+            }
+        }
+
+        if let Some(yaw) = yaw_opt {
+            if self.last_yaw != Some(yaw) {
+                self.last_yaw = Some(yaw);
+                changed = true;
+            }
+        }
+
+        if let Some(setup) = active_setup_opt.as_ref() {
+            if self.last_setup.as_deref() != Some(setup.as_str()) {
+                self.last_setup = Some(setup.clone());
+                changed = true;
+            }
+        }
+
+        if let Some(hotspot) = active_hotspot_opt.as_ref() {
+            if self.last_hotspot.as_deref() != Some(hotspot.as_str()) {
+                self.last_hotspot = Some(hotspot.clone());
+                changed = true;
+            }
+        }
+
+        if !coverage_updates.is_empty() {
+            changed = true;
+        }
+
+        if new_events.is_empty() && !changed {
+            return Ok(None);
+        }
+
+        self.sent_initial = true;
+
         let update = StateUpdate {
             seq: 0,
             host_time_ns: 0,
-            frame: None,
-            position: None,
-            yaw: None,
-            active_setup: None,
-            active_hotspot: None,
-            coverage: coverage_snapshot,
-            events: Vec::new(),
+            frame: Some(self.frame),
+            position: self.last_position,
+            yaw: self.last_yaw,
+            active_setup: self.last_setup.clone(),
+            active_hotspot: self.last_hotspot.clone(),
+            coverage: coverage_updates,
+            events: new_events,
         };
-        if let Err(err) = stream.send_state_update(update) {
-            eprintln!("[grim_engine] failed to publish final state update: {err:?}");
-        }
+
+        Ok(Some(update))
     }
-    Ok(EngineRunSummary { events, coverage })
 }

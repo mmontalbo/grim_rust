@@ -947,6 +947,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )?;
 
         let diff_file = NamedTempFile::new()?;

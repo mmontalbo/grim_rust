@@ -967,6 +967,14 @@ impl EngineContext {
         self.set_view().current_setup_for(set_file)
     }
 
+    pub(super) fn active_setup_label(&self) -> Option<String> {
+        let view = self.set_view();
+        let current = view.current_set()?;
+        let set_file = current.set_file.as_str();
+        let index = view.current_setup_for(set_file)?;
+        view.setup_label_for(set_file, index)
+    }
+
     fn set_actor_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
         self.actor_runtime().set_actor_costume(id, label, costume);
     }

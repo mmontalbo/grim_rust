@@ -89,7 +89,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
     } else {
         None
     };
-    let run_summary = run_boot_sequence(
+    let (run_summary, runtime) = run_boot_sequence(
         &data_root,
         lab_root.as_deref(),
         verbose,
@@ -97,7 +97,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         audio_callback,
         movement,
         hotspot,
-        stream.as_ref(),
+        stream,
     )?;
 
     if let Some(path) = event_log_json.as_ref() {
@@ -127,6 +127,10 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
 
     if let Some(path) = depth_stats_json.as_ref() {
         write_manny_office_depth_stats(&lab_root_path, path)?;
+    }
+
+    if let Some(runtime) = runtime {
+        runtime.run()?;
     }
 
     Ok(())
