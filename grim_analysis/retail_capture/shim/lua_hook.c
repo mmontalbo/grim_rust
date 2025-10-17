@@ -8,7 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
-#include "../../../lua/include/lua.h"
+#include <lua.h>
 
 typedef int (*lua_dofile_fn)(char *filename);
 typedef lua_Object (*lua_getglobal_fn)(const char *name);

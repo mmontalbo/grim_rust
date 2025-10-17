@@ -1,6 +1,6 @@
 #include <stdio.h>
-#include "lua/include/lua.h"
-#include "lua/include/lualib.h"
+#include <lua.h>
+#include <lualib.h>
 
 int main(void) {
     lua_open();
