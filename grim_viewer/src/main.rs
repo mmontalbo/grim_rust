@@ -145,6 +145,16 @@ fn main() -> Result<()> {
         None => None,
     };
 
+    if let Some(scene) = live_scene.as_mut() {
+        if let Some(frame) = scene.compose_engine_frame() {
+            if let Err(err) = viewer.upload_engine_frame(frame.width, frame.height, frame.pixels) {
+                eprintln!(
+                    "[grim_viewer] warning: failed to upload initial engine overlay: {err:?}"
+                );
+            }
+        }
+    }
+
     let mut retail_stream = RetailStreamState {
         rx: spawn_retail_client(args.retail_stream.clone()),
         config: None,
@@ -210,7 +220,7 @@ fn main() -> Result<()> {
             }
             Event::AboutToWait => {
                 drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
-                drain_engine_events(engine_stream.as_mut(), live_scene.as_mut());
+                drain_engine_events(engine_stream.as_mut(), &mut live_scene, &mut viewer);
                 update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
                 update_debug_panel(
                     &mut viewer,
@@ -339,16 +349,14 @@ fn present_frame(stream: &mut RetailStreamState, viewer: &mut ViewerState, queue
 
 fn drain_engine_events(
     stream: Option<&mut EngineStreamState>,
-    live_scene: Option<&mut LiveSceneState>,
+    live_scene: &mut Option<LiveSceneState>,
+    viewer: &mut ViewerState,
 ) {
     let Some(stream) = stream else {
         let _ = live_scene;
+        let _ = viewer;
         return;
     };
-
-    // TODO: hydrate live_scene with incoming StateUpdate values once the
-    // engine viewport consumes the Manny overlays.
-    let _ = live_scene;
 
     loop {
         match stream.rx.try_recv() {
@@ -370,7 +378,16 @@ fn drain_engine_events(
                 }
                 EngineEvent::State(update) => {
                     stream.last_update_received = Some(Instant::now());
-                    stream.last_update = Some(update);
+                    stream.last_update = Some(update.clone());
+                    if let Some(scene) = live_scene.as_mut() {
+                        if let Some(frame) = scene.ingest_state_update(&update) {
+                            if let Err(err) =
+                                viewer.upload_engine_frame(frame.width, frame.height, frame.pixels)
+                            {
+                                eprintln!("[grim_viewer] engine frame upload failed: {err:?}");
+                            }
+                        }
+                    }
                 }
                 EngineEvent::ProtocolError(message) => {
                     eprintln!("[grim_viewer] engine protocol: {message}");

@@ -22,9 +22,10 @@ pub struct ViewerState {
     retail_texture_view: wgpu::TextureView,
     retail_sampler: wgpu::Sampler,
     retail_texture_size: (u32, u32),
-    _placeholder_texture: wgpu::Texture,
-    _placeholder_view: wgpu::TextureView,
-    placeholder_bind_group: wgpu::BindGroup,
+    engine_bind_group: wgpu::BindGroup,
+    engine_texture: wgpu::Texture,
+    engine_texture_view: wgpu::TextureView,
+    engine_texture_size: (u32, u32),
     frame_aspect: f32,
     layout: ViewerLayout,
     retail_rect: Rect,
@@ -149,7 +150,7 @@ impl ViewerState {
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
 
             render_pass.set_vertex_buffer(0, self.engine_vertex_buffer.slice(..));
-            render_pass.set_bind_group(0, &self.placeholder_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.engine_bind_group, &[]);
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
 
             if self.debug_panel_overlay.is_visible() {
@@ -188,7 +189,7 @@ impl ViewerState {
         }
 
         if (width, height) != self.retail_texture_size {
-            self.recreate_texture(width, height)?;
+            self.recreate_retail_texture(width, height)?;
         }
 
         let row_bytes = width
@@ -239,6 +240,53 @@ impl ViewerState {
                 rows_per_image: Some(height),
             },
             extent,
+        );
+        Ok(())
+    }
+
+    pub fn upload_engine_frame(&mut self, width: u32, height: u32, data: &[u8]) -> Result<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let expected_len = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| anyhow!("engine frame dimensions overflow: {}x{}", width, height))?
+            as usize;
+
+        if data.len() < expected_len {
+            return Err(anyhow!(
+                "engine frame data {} smaller than expected {} ({}x{})",
+                data.len(),
+                expected_len,
+                width,
+                height
+            ));
+        }
+
+        if (width, height) != self.engine_texture_size {
+            self.recreate_engine_texture(width, height)?;
+        }
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.engine_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data[..expected_len],
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(width.saturating_mul(4)),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         Ok(())
     }
@@ -451,23 +499,10 @@ impl ViewerState {
         let debug_vertex_buffer =
             create_vertex_buffer_for_rect(&device, window_size, layout.debug_panel, "debug-panel");
 
-        let placeholder_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("grim-viewer-placeholder-texture"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let (engine_texture, engine_texture_view) = create_texture(&device, 1, 1)?;
         queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &placeholder_texture,
+                texture: &engine_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -484,15 +519,13 @@ impl ViewerState {
                 depth_or_array_layers: 1,
             },
         );
-        let placeholder_view =
-            placeholder_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let placeholder_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("grim-viewer-placeholder-bind-group"),
+        let engine_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grim-viewer-engine-bind-group"),
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&placeholder_view),
+                    resource: wgpu::BindingResource::TextureView(&engine_texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -557,9 +590,10 @@ impl ViewerState {
             retail_texture_view,
             retail_sampler,
             retail_texture_size: (texture_width, texture_height),
-            _placeholder_texture: placeholder_texture,
-            _placeholder_view: placeholder_view,
-            placeholder_bind_group,
+            engine_bind_group,
+            engine_texture,
+            engine_texture_view,
+            engine_texture_size: (1, 1),
             frame_aspect,
             layout,
             retail_rect: layout.retail_view,
@@ -579,7 +613,7 @@ impl ViewerState {
         })
     }
 
-    fn recreate_texture(&mut self, width: u32, height: u32) -> Result<()> {
+    fn recreate_retail_texture(&mut self, width: u32, height: u32) -> Result<()> {
         let (texture, texture_view) = create_texture(&self.device, width, height)?;
         self.retail_texture = texture;
         self.retail_texture_view = texture_view;
@@ -592,6 +626,29 @@ impl ViewerState {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&self.retail_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.retail_sampler),
+                },
+            ],
+        });
+        Ok(())
+    }
+
+    fn recreate_engine_texture(&mut self, width: u32, height: u32) -> Result<()> {
+        let (texture, texture_view) = create_texture(&self.device, width, height)?;
+        self.engine_texture = texture;
+        self.engine_texture_view = texture_view;
+        self.engine_texture_size = (width, height);
+
+        self.engine_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grim-viewer-engine-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.engine_texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

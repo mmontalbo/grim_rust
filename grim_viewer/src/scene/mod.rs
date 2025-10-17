@@ -324,6 +324,8 @@ pub fn load_scene_from_timeline(
         set_context.display_name(),
     );
 
+    fill_missing_entity_pose(&mut entities);
+
     ensure_entities_have_pose(&entities)?;
 
     if let Some(snapshot) = geometry {
@@ -365,6 +367,23 @@ pub fn load_scene_from_timeline(
     }
 
     Ok(scene)
+}
+
+fn fill_missing_entity_pose(entities: &mut [SceneEntity]) {
+    for entity in entities.iter_mut() {
+        if entity.position.is_none() {
+            if entity.name.eq_ignore_ascii_case("manny") {
+                entity.position = Some([0.0, 0.0, 0.0]);
+                entity.orientation = Some(EntityOrientation::from_degrees([0.0, 0.0, 0.0]));
+            }
+        } else if entity.orientation.is_none() && entity.rotation.is_some() {
+            entity.orientation = entity.rotation.map(EntityOrientation::from_degrees);
+        }
+
+        if matches!(entity.kind, SceneEntityKind::Actor) && entity.scale_multiplier().is_none() {
+            entity.actor_scale = entity.actor_scale.or(Some(1.0));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
