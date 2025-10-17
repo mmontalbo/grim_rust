@@ -81,6 +81,7 @@ in pkgs.mkShell {
     zig               # build the LD_PRELOAD shim
     qemu              # user-mode emulation for 32-bit binaries
     gdb               # inspect qemu-i386 core dumps
+    xdotool           # locate X11 windows for targeted capture
     rustc
     cargo
     rustfmt
@@ -102,6 +103,7 @@ in pkgs.mkShell {
     xorg.libXinerama
     xorg.libXxf86vm
     xorg.libXtst
+    xorg.xwininfo
   ];
 
   shellHook = ''

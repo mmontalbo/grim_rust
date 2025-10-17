@@ -11,9 +11,13 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+
+VIEWER_PADDING = 24  # keep in sync with grim_viewer/src/layout.rs
+VIEWER_LABEL_HEIGHT = 32  # keep in sync with grim_viewer/src/layout.rs::LABEL_HEIGHT
+VIEWER_LABEL_GAP = 8  # keep in sync with grim_viewer/src/layout.rs::LABEL_GAP
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -23,6 +27,50 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=720, help="Captured framebuffer height")
     parser.add_argument("--fps", type=float, default=30.0, help="Captured framerate")
     parser.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg executable for capture")
+    parser.add_argument(
+        "--retail-window-id",
+        help="X11 window id for the retail game (hex like 0x3a00007 or decimal). "
+        "When omitted we auto-detect the window by title.",
+    )
+    parser.add_argument(
+        "--retail-window-title",
+        default="Grim Fandango",
+        help="Window title (substring or regex) used to auto-detect the retail window.",
+    )
+    parser.add_argument(
+        "--retail-window-retries",
+        type=int,
+        default=30,
+        help="How many times to poll for the retail window when auto-detecting.",
+    )
+    parser.add_argument(
+        "--retail-window-wait",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between retail window discovery attempts.",
+    )
+    parser.add_argument(
+        "--viewer-debug-width",
+        type=int,
+        default=400,
+        help="Extra horizontal space reserved for debug UI inside the viewer window.",
+    )
+    parser.add_argument(
+        "--viewer-debug-height",
+        type=int,
+        default=300,
+        help="Extra vertical space reserved for debug UI inside the viewer window.",
+    )
+    parser.add_argument(
+        "--retail-timeout",
+        help="Override timeout passed to tools/run_dev_install.sh when using --launch-retail "
+        "(examples: 60s, 5m).",
+    )
+    parser.add_argument(
+        "--retail-no-timeout",
+        action="store_true",
+        help="Disable the run_dev_install timeout when launching retail via --launch-retail.",
+    )
 
     parser.add_argument("--release", action="store_true", help="Run all cargo commands with --release")
     parser.add_argument("--steam-run", action="store_true", help="Wrap the viewer invocation in steam-run")
@@ -50,11 +98,17 @@ def main() -> None:
     if args.viewer_only:
         args.no_capture = True
         args.no_engine = True
+    if args.retail_no_timeout and args.retail_timeout:
+        parser.error("--retail-no-timeout cannot be used together with --retail-timeout")
 
     procs: list[ManagedProcess] = []
     try:
         if args.launch_retail:
-            launch_retail_game(args.release)
+            retail_process = launch_retail_game(args)
+            if retail_process:
+                procs.append(retail_process)
+
+        prepare_layout(args)
 
         if not args.no_capture:
             capture_cmd = build_capture_command(args)
@@ -85,6 +139,16 @@ class ManagedProcess:
     process: subprocess.Popen
 
 
+@dataclass
+class WindowCaptureLayout:
+    window_id_hex: str
+    window_id_decimal: int
+    capture_width: int
+    capture_height: int
+    viewer_width: int
+    viewer_height: int
+
+
 def build_capture_command(args) -> List[str]:
     command = ["cargo", "run"]
     if args.release:
@@ -106,6 +170,9 @@ def build_capture_command(args) -> List[str]:
             args.ffmpeg,
         ]
     )
+    window_id = getattr(args, "window_id", None)
+    if window_id:
+        command.extend(["--window-id", window_id])
     return command
 
 
@@ -118,13 +185,15 @@ def build_engine_command(args) -> List[str]:
 
 
 def build_viewer_command(args) -> List[str]:
+    viewer_width = getattr(args, "viewer_window_width", args.width)
+    viewer_height = getattr(args, "viewer_window_height", args.height)
     viewer_args: List[str] = [
         "--retail-stream",
         args.retail_addr,
         "--window-width",
-        str(args.width),
+        str(viewer_width),
         "--window-height",
-        str(args.height),
+        str(viewer_height),
     ]
 
     if not args.no_engine:
@@ -146,6 +215,167 @@ def build_viewer_command(args) -> List[str]:
     return command
 
 
+def prepare_layout(args: argparse.Namespace) -> None:
+    capture_layout: Optional[WindowCaptureLayout] = None
+    require_window = not args.no_capture or args.retail_window_id is not None
+
+    if require_window:
+        try:
+            capture_layout = discover_window_layout(args)
+        except RuntimeError as err:
+            print(f"[run_live_preview] error preparing retail window capture: {err}", file=sys.stderr)
+            sys.exit(1)
+
+    if capture_layout:
+        args.width = capture_layout.capture_width
+        args.height = capture_layout.capture_height
+        args.window_id = capture_layout.window_id_hex
+        args.viewer_window_width = capture_layout.viewer_width
+        args.viewer_window_height = capture_layout.viewer_height
+        print(
+            "[run_live_preview] configured retail capture window "
+            f"{capture_layout.window_id_hex} (decimal {capture_layout.window_id_decimal}) "
+            f"size {capture_layout.capture_width}x{capture_layout.capture_height}"
+        )
+        print(
+            "[run_live_preview] viewer window sized to "
+            f"{capture_layout.viewer_width}x{capture_layout.viewer_height} "
+            "(room for retail + engine viewports and debug UI)"
+        )
+    else:
+        args.window_id = None
+        args.viewer_window_width = compute_viewer_width(args.width, args.viewer_debug_width)
+        args.viewer_window_height = compute_viewer_height(args.height, args.viewer_debug_height)
+        print(
+            "[run_live_preview] retail window detection skipped; "
+            f"using viewer size {args.viewer_window_width}x{args.viewer_window_height}"
+        )
+
+
+def discover_window_layout(args: argparse.Namespace) -> WindowCaptureLayout:
+    raw_id = args.retail_window_id
+    if raw_id:
+        print(f"[run_live_preview] using provided retail window id {raw_id}")
+    else:
+        raw_id = poll_for_window_id(args.retail_window_title, args.retail_window_retries, args.retail_window_wait)
+
+    window_id_hex, window_id_decimal = normalize_window_id(raw_id)
+    width, height = query_window_geometry(raw_id)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"window {window_id_hex} reported invalid size {width}x{height}")
+
+    viewer_width = compute_viewer_width(width, args.viewer_debug_width)
+    viewer_height = compute_viewer_height(height, args.viewer_debug_height)
+
+    return WindowCaptureLayout(
+        window_id_hex=window_id_hex,
+        window_id_decimal=window_id_decimal,
+        capture_width=width,
+        capture_height=height,
+        viewer_width=viewer_width,
+        viewer_height=viewer_height,
+    )
+
+
+def compute_viewer_width(base_width: int, debug_width: int) -> int:
+    base_width = max(1, base_width)
+    debug_width = max(0, debug_width)
+    return base_width * 2 + debug_width + VIEWER_PADDING * 3
+
+
+def compute_viewer_height(base_height: int, debug_height: int) -> int:
+    base_height = max(1, base_height)
+    debug_height = max(0, debug_height)
+    top_offset = VIEWER_PADDING + VIEWER_LABEL_HEIGHT + VIEWER_LABEL_GAP
+    bottom_offset = VIEWER_PADDING + debug_height
+    return base_height + top_offset + bottom_offset
+
+
+def poll_for_window_id(title: str, retries: int, wait_seconds: float) -> str:
+    retries = max(1, retries)
+    wait_seconds = max(0.0, wait_seconds)
+    search_cmd = ["xdotool", "search", "--name", title]
+    last_error: Optional[subprocess.CalledProcessError] = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            proc = subprocess.run(
+                search_cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as err:
+            raise RuntimeError(
+                "xdotool not found on PATH; ensure xdotool is installed (add pkgs.xdotool to shell.nix)"
+            ) from err
+        except subprocess.CalledProcessError as err:
+            last_error = err
+        else:
+            window_ids = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            if window_ids:
+                if len(window_ids) > 1:
+                    print(
+                        "[run_live_preview] multiple windows matched title pattern; "
+                        f"using the most recent (attempt {attempt}/{retries})"
+                    )
+                return window_ids[-1]
+
+        if attempt < retries:
+            time.sleep(wait_seconds)
+
+    message = f"failed to locate a window matching title '{title}' after {retries} attempts"
+    if last_error:
+        message += f" (last error code {last_error.returncode})"
+    raise RuntimeError(message)
+
+
+def query_window_geometry(window_id: str) -> tuple[int, int]:
+    try:
+        proc = subprocess.run(
+            ["xwininfo", "-id", window_id],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as err:
+        raise RuntimeError(
+            "xwininfo not found on PATH; ensure xorg.xwininfo is installed (see shell.nix)"
+        ) from err
+    except subprocess.CalledProcessError as err:
+        raise RuntimeError(f"xwininfo failed for window {window_id}: {err}") from err
+
+    width = height = None
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("Width:"):
+            width = parse_int_from_line(line)
+        elif line.startswith("Height:"):
+            height = parse_int_from_line(line)
+        if width is not None and height is not None:
+            break
+
+    if width is None or height is None:
+        raise RuntimeError(f"could not parse window dimensions from xwininfo output for window {window_id}")
+    return width, height
+
+
+def parse_int_from_line(line: str) -> int:
+    _, _, value = line.partition(":")
+    try:
+        return int(value.strip())
+    except ValueError as err:
+        raise RuntimeError(f"unexpected numeric value in xwininfo output line '{line}'") from err
+
+
+def normalize_window_id(raw_id: str) -> tuple[str, int]:
+    try:
+        value = int(raw_id, 0)
+    except ValueError as err:
+        raise RuntimeError(f"invalid window id '{raw_id}' (expected hex like 0x3a00007 or decimal)") from err
+    return f"0x{value:x}", value
+
+
 def spawn(name: str, command: Sequence[str], foreground: bool = False, inherit_env: bool = False) -> ManagedProcess:
     env = os.environ.copy() if inherit_env else None
     print(f"[run_live_preview] launching {name}: {' '.join(command)}")
@@ -155,17 +385,22 @@ def spawn(name: str, command: Sequence[str], foreground: bool = False, inherit_e
     return ManagedProcess(name, proc)
 
 
-def launch_retail_game(release: bool) -> None:
+def launch_retail_game(args: argparse.Namespace) -> Optional[ManagedProcess]:
     env = os.environ.copy()
     command: List[str] = ["bash", "./tools/run_dev_install.sh"]
     if "DISPLAY" in env:
         env.setdefault("DISPLAY", env["DISPLAY"])
     if "WAYLAND_DISPLAY" in env:
         env.setdefault("WAYLAND_DISPLAY", env["WAYLAND_DISPLAY"])
-    if release:
+    if args.retail_no_timeout:
+        command.append("--no-timeout")
+    elif args.retail_timeout:
+        command.extend(["--timeout", args.retail_timeout])
+    if args.release:
         env["GRIM_BUILD_PROFILE"] = "release"
     print(f"[run_live_preview] launching retail game: {' '.join(command)}")
-    subprocess.Popen(command, cwd=ROOT_DIR, env=env)
+    proc = subprocess.Popen(command, cwd=ROOT_DIR, env=env)
+    return ManagedProcess("retail_game", proc)
 
 
 def shutdown_processes(processes: Sequence[ManagedProcess]) -> None:

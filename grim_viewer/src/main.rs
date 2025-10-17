@@ -8,7 +8,9 @@ use std::{
 };
 
 mod display;
+mod layout;
 mod live_stream;
+mod overlay;
 
 use anyhow::Result;
 use clap::Parser;
@@ -163,12 +165,14 @@ fn main() -> Result<()> {
             Event::AboutToWait => {
                 drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
                 drain_engine_events(engine_stream.as_mut());
-                update_window_title(
-                    viewer.window(),
+                update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
+                update_debug_panel(
+                    &mut viewer,
                     &controls,
                     &retail_stream,
                     engine_stream.as_ref(),
                 );
+                update_window_title(viewer.window(), &controls);
                 viewer.window().request_redraw();
             }
             _ => {}
@@ -209,7 +213,10 @@ fn drain_retail_events(
                         config.pixel_format,
                         config.nominal_fps
                     );
+                    let width = config.width;
+                    let height = config.height;
                     stream.config = Some(config);
+                    viewer.set_frame_dimensions(width, height);
                 }
                 RetailEvent::Frame(frame) => {
                     stream.pending_frames.push_back(QueuedFrame {
@@ -275,6 +282,8 @@ fn present_frame(stream: &mut RetailStreamState, viewer: &mut ViewerState, queue
         return;
     }
 
+    viewer.set_frame_dimensions(config.width, config.height);
+
     stream.last_frame = Some(FrameStats {
         frame_id: queued.frame.frame_id,
         host_time_ns: queued.frame.host_time_ns,
@@ -326,13 +335,60 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>) {
     }
 }
 
-fn update_window_title(
-    window: &winit::window::Window,
+fn update_window_title(window: &winit::window::Window, controls: &SyncControls) {
+    let label = if controls.paused {
+        if controls.pending_steps > 0 {
+            format!(
+                "Grim Viewer - paused ({} steps queued)",
+                controls.pending_steps
+            )
+        } else {
+            "Grim Viewer - paused".to_string()
+        }
+    } else {
+        "Grim Viewer - live".to_string()
+    };
+    window.set_title(&label);
+}
+
+fn update_view_labels(
+    viewer: &mut ViewerState,
+    retail: &RetailStreamState,
+    engine: Option<&EngineStreamState>,
+) {
+    let retail_label = if retail.hello.is_some() {
+        if let Some(frame) = retail.last_frame.as_ref() {
+            format!("Retail Capture (frame {})", frame.frame_id)
+        } else {
+            "Retail Capture (connected)".to_string()
+        }
+    } else {
+        "Retail Capture (offline)".to_string()
+    };
+    viewer.set_retail_label(&retail_label);
+
+    let engine_label = match engine {
+        Some(stream) if stream.hello.is_some() => {
+            if let Some(update) = stream.last_update.as_ref() {
+                format!("Rust Engine (seq {})", update.seq)
+            } else {
+                "Rust Engine (connected)".to_string()
+            }
+        }
+        Some(_) => "Rust Engine (offline)".to_string(),
+        None => "Rust Engine".to_string(),
+    };
+    viewer.set_engine_label(&engine_label);
+}
+
+fn update_debug_panel(
+    viewer: &mut ViewerState,
     controls: &SyncControls,
     retail: &RetailStreamState,
     engine: Option<&EngineStreamState>,
 ) {
-    let mode = if controls.paused {
+    let mut lines = Vec::new();
+    let mode_label = if controls.paused {
         if controls.pending_steps > 0 {
             format!("paused ({} steps queued)", controls.pending_steps)
         } else {
@@ -341,45 +397,67 @@ fn update_window_title(
     } else {
         "live".to_string()
     };
+    lines.push("Session Status".to_string());
+    lines.push(format!("Mode: {mode_label}"));
+    lines.push(format!(
+        "Diff overlay: {}",
+        if controls.diff_enabled { "on" } else { "off" }
+    ));
 
-    let mut parts = vec![format!("Grim Viewer - {}", mode)];
-
+    lines.push(String::new());
+    lines.push("Retail Stream".to_string());
     if let Some(frame) = retail.last_frame.as_ref() {
-        let age = Instant::now().saturating_duration_since(frame.received_at);
-        parts.push(format!(
-            "frame {} ({} ms old)",
-            frame.frame_id,
-            age.as_millis()
-        ));
+        let age_ms = Instant::now()
+            .saturating_duration_since(frame.received_at)
+            .as_millis();
+        lines.push(format!("Frame: {} (age {} ms)", frame.frame_id, age_ms));
     } else if retail.hello.is_some() {
-        parts.push("waiting for frames".to_string());
+        lines.push("Frame: pending".to_string());
     } else {
-        parts.push("retail offline".to_string());
+        lines.push("Status: offline".to_string());
+    }
+    if let Some(config) = retail.config.as_ref() {
+        let fps_label = config
+            .nominal_fps
+            .map(|fps| format!(" @ {:.1} fps", fps))
+            .unwrap_or_default();
+        lines.push(format!(
+            "Config: {}x{}{}",
+            config.width, config.height, fps_label
+        ));
     }
 
-    if let Some(engine) = engine {
-        if let Some(update) = engine.last_update.as_ref() {
-            let age = engine
-                .last_update_received
-                .map(|ts| Instant::now().saturating_duration_since(ts).as_millis())
-                .unwrap_or(0);
-            let mut engine_part = format!("engine seq {}", update.seq);
-            if let Some(frame) = retail.last_frame.as_ref() {
-                let delta = update.host_time_ns as i128 - frame.host_time_ns as i128;
+    lines.push(String::new());
+    lines.push("Engine Stream".to_string());
+    match engine {
+        Some(stream) if stream.hello.is_some() => {
+            if let Some(update) = stream.last_update.as_ref() {
+                let age_ms = stream
+                    .last_update_received
+                    .map(|ts| Instant::now().saturating_duration_since(ts).as_millis())
+                    .unwrap_or(0);
+                lines.push(format!("Seq: {} (age {} ms)", update.seq, age_ms));
                 if controls.diff_enabled {
-                    engine_part.push_str(&format!(" Δt {} ms", (delta as f64) / 1_000_000.0));
+                    if let Some(frame) = retail.last_frame.as_ref() {
+                        let delta_ms = (update.host_time_ns as i128 - frame.host_time_ns as i128)
+                            as f64
+                            / 1_000_000.0;
+                        lines.push(format!("Frame Δt: {delta_ms:.2} ms"));
+                    }
                 }
+            } else {
+                lines.push("Seq: awaiting updates".to_string());
             }
-            engine_part.push_str(&format!(" ({} ms old)", age));
-            parts.push(engine_part);
-        } else if engine.hello.is_some() {
-            parts.push("engine awaiting state".to_string());
-        } else {
-            parts.push("engine offline".to_string());
+        }
+        Some(_) => {
+            lines.push("Status: offline".to_string());
+        }
+        None => {
+            lines.push("Status: disabled".to_string());
         }
     }
 
-    window.set_title(&parts.join(" | "));
+    viewer.set_debug_lines(&lines);
 }
 
 fn handle_sync_key(event: &KeyEvent, controls: &mut SyncControls) -> bool {

@@ -1,7 +1,10 @@
 use anyhow::{Result, anyhow};
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, cast_slice};
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
+
+use crate::layout::{Rect, ViewerLayout};
+use crate::overlay::{TextOverlay, TextOverlayConfig};
 
 pub struct ViewerState {
     window: std::sync::Arc<Window>,
@@ -11,15 +14,33 @@ pub struct ViewerState {
     config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
     pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
     bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
-    texture: wgpu::Texture,
-    texture_view: wgpu::TextureView,
-    sampler: wgpu::Sampler,
-    texture_size: (u32, u32),
+    retail_bind_group: wgpu::BindGroup,
+    retail_texture: wgpu::Texture,
+    retail_texture_view: wgpu::TextureView,
+    retail_sampler: wgpu::Sampler,
+    retail_texture_size: (u32, u32),
+    _placeholder_texture: wgpu::Texture,
+    _placeholder_view: wgpu::TextureView,
+    placeholder_bind_group: wgpu::BindGroup,
+    frame_aspect: f32,
+    layout: ViewerLayout,
+    retail_rect: Rect,
+    engine_rect: Rect,
+    debug_rect: Rect,
+    retail_label_rect: Rect,
+    engine_label_rect: Rect,
+    retail_vertex_buffer: wgpu::Buffer,
+    engine_vertex_buffer: wgpu::Buffer,
+    debug_vertex_buffer: wgpu::Buffer,
+    retail_label_vertex_buffer: wgpu::Buffer,
+    engine_label_vertex_buffer: wgpu::Buffer,
+    debug_panel_overlay: TextOverlay,
+    retail_label_overlay: TextOverlay,
+    engine_label_overlay: TextOverlay,
+    debug_lines: Vec<String>,
 }
 
 impl ViewerState {
@@ -83,10 +104,17 @@ impl ViewerState {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.configure_surface();
+            if let Err(err) = self.update_layout() {
+                eprintln!("[grim_viewer] layout update failed after resize: {err:?}");
+            }
         }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        self.debug_panel_overlay.upload(&self.queue);
+        self.retail_label_overlay.upload(&self.queue);
+        self.engine_label_overlay.upload(&self.queue);
+
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -114,10 +142,33 @@ impl ViewerState {
             });
 
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
+            render_pass.set_vertex_buffer(0, self.retail_vertex_buffer.slice(..));
+            render_pass.set_bind_group(0, &self.retail_bind_group, &[]);
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+
+            render_pass.set_vertex_buffer(0, self.engine_vertex_buffer.slice(..));
+            render_pass.set_bind_group(0, &self.placeholder_bind_group, &[]);
+            render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+
+            if self.debug_panel_overlay.is_visible() {
+                render_pass.set_vertex_buffer(0, self.debug_vertex_buffer.slice(..));
+                render_pass.set_bind_group(0, self.debug_panel_overlay.bind_group(), &[]);
+                render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+
+            if self.retail_label_overlay.is_visible() {
+                render_pass.set_vertex_buffer(0, self.retail_label_vertex_buffer.slice(..));
+                render_pass.set_bind_group(0, self.retail_label_overlay.bind_group(), &[]);
+                render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+
+            if self.engine_label_overlay.is_visible() {
+                render_pass.set_vertex_buffer(0, self.engine_label_vertex_buffer.slice(..));
+                render_pass.set_bind_group(0, self.engine_label_overlay.bind_group(), &[]);
+                render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -136,7 +187,7 @@ impl ViewerState {
             return Ok(());
         }
 
-        if (width, height) != self.texture_size {
+        if (width, height) != self.retail_texture_size {
             self.recreate_texture(width, height)?;
         }
 
@@ -176,7 +227,7 @@ impl ViewerState {
 
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &self.texture,
+                texture: &self.retail_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -189,6 +240,82 @@ impl ViewerState {
             },
             extent,
         );
+        Ok(())
+    }
+
+    pub fn set_frame_dimensions(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let aspect = (width as f32) / (height as f32);
+        if (aspect - self.frame_aspect).abs() > 0.001 {
+            self.frame_aspect = aspect;
+            if let Err(err) = self.update_layout() {
+                eprintln!("[grim_viewer] layout update failed for new frame config: {err:?}");
+            }
+        }
+    }
+
+    pub fn set_debug_lines(&mut self, lines: &[String]) {
+        self.debug_lines = lines.to_vec();
+        self.debug_panel_overlay.set_lines(&self.debug_lines);
+    }
+
+    pub fn set_retail_label(&mut self, text: &str) {
+        self.retail_label_overlay.set_label(text);
+    }
+
+    pub fn set_engine_label(&mut self, text: &str) {
+        self.engine_label_overlay.set_label(text);
+    }
+
+    fn update_layout(&mut self) -> Result<()> {
+        self.layout = ViewerLayout::compute(self.size, self.frame_aspect);
+        self.retail_rect = self.layout.retail_view;
+        self.engine_rect = self.layout.engine_view;
+        self.debug_rect = self.layout.debug_panel;
+
+        self.retail_vertex_buffer =
+            create_vertex_buffer_for_rect(&self.device, self.size, self.retail_rect, "retail-view");
+        self.engine_vertex_buffer =
+            create_vertex_buffer_for_rect(&self.device, self.size, self.engine_rect, "engine-view");
+        self.debug_vertex_buffer =
+            create_vertex_buffer_for_rect(&self.device, self.size, self.debug_rect, "debug-panel");
+
+        let debug_width = self.debug_rect.width.round().max(64.0) as u32;
+        let debug_height = self.debug_rect.height.round().max(64.0) as u32;
+        self.debug_panel_overlay.resize(
+            &self.device,
+            &self.queue,
+            &self.bind_group_layout,
+            debug_width,
+            debug_height,
+        )?;
+        self.debug_panel_overlay.set_lines(&self.debug_lines);
+
+        self.retail_label_rect = label_rect_for(
+            self.retail_rect,
+            self.retail_label_overlay.size(),
+            self.size,
+        );
+        self.engine_label_rect = label_rect_for(
+            self.engine_rect,
+            self.engine_label_overlay.size(),
+            self.size,
+        );
+        self.retail_label_vertex_buffer = create_vertex_buffer_for_rect(
+            &self.device,
+            self.size,
+            self.retail_label_rect,
+            "retail-label",
+        );
+        self.engine_label_vertex_buffer = create_vertex_buffer_for_rect(
+            &self.device,
+            self.size,
+            self.engine_label_rect,
+            "engine-label",
+        );
+
         Ok(())
     }
 
@@ -213,8 +340,9 @@ impl ViewerState {
             view_formats: vec![],
         };
 
-        let (texture, texture_view) = create_texture(&device, texture_width, texture_height)?;
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let (retail_texture, retail_texture_view) =
+            create_texture(&device, texture_width, texture_height)?;
+        let retail_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("grim-viewer-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -247,17 +375,17 @@ impl ViewerState {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("grim-viewer-bind-group"),
+        let retail_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grim-viewer-retail-bind-group"),
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                    resource: wgpu::BindingResource::TextureView(&retail_texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(&retail_sampler),
                 },
             ],
         });
@@ -291,7 +419,7 @@ impl ViewerState {
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -302,17 +430,116 @@ impl ViewerState {
             multiview: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("grim-viewer-vertices"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("grim-viewer-indices"),
             contents: bytemuck::cast_slice(INDICES),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let index_count = INDICES.len() as u32;
+
+        let frame_aspect = if texture_height == 0 {
+            16.0 / 9.0
+        } else {
+            (texture_width.max(1) as f32) / (texture_height.max(1) as f32)
+        };
+        let layout = ViewerLayout::compute(window_size, frame_aspect);
+
+        let retail_vertex_buffer =
+            create_vertex_buffer_for_rect(&device, window_size, layout.retail_view, "retail-view");
+        let engine_vertex_buffer =
+            create_vertex_buffer_for_rect(&device, window_size, layout.engine_view, "engine-view");
+        let debug_vertex_buffer =
+            create_vertex_buffer_for_rect(&device, window_size, layout.debug_panel, "debug-panel");
+
+        let placeholder_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("grim-viewer-placeholder-texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &placeholder_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[32, 36, 44, 255],
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let placeholder_view =
+            placeholder_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let placeholder_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grim-viewer-placeholder-bind-group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&placeholder_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&retail_sampler),
+                },
+            ],
+        });
+
+        let debug_panel_config = TextOverlayConfig::new(
+            layout.debug_panel.width.round().max(64.0) as u32,
+            layout.debug_panel.height.round().max(64.0) as u32,
+            16,
+            12,
+            "debug-panel",
+        );
+        let mut debug_panel_overlay =
+            TextOverlay::new(&device, &queue, &bind_group_layout, debug_panel_config)?;
+        debug_panel_overlay.set_lines(&[]);
+        debug_panel_overlay.upload(&queue);
+
+        let mut retail_label_overlay = TextOverlay::new(
+            &device,
+            &queue,
+            &bind_group_layout,
+            TextOverlayConfig::new(320, 32, 12, 8, "retail-label"),
+        )?;
+        retail_label_overlay.set_label("Retail Capture");
+        retail_label_overlay.upload(&queue);
+
+        let mut engine_label_overlay = TextOverlay::new(
+            &device,
+            &queue,
+            &bind_group_layout,
+            TextOverlayConfig::new(320, 32, 12, 8, "engine-label"),
+        )?;
+        engine_label_overlay.set_label("Rust Engine");
+        engine_label_overlay.upload(&queue);
+
+        let retail_label_rect =
+            label_rect_for(layout.retail_view, retail_label_overlay.size(), window_size);
+        let engine_label_rect =
+            label_rect_for(layout.engine_view, engine_label_overlay.size(), window_size);
+
+        let retail_label_vertex_buffer =
+            create_vertex_buffer_for_rect(&device, window_size, retail_label_rect, "retail-label");
+        let engine_label_vertex_buffer =
+            create_vertex_buffer_for_rect(&device, window_size, engine_label_rect, "engine-label");
 
         Ok(Self {
             window,
@@ -322,35 +549,53 @@ impl ViewerState {
             config,
             size: window_size,
             pipeline,
-            vertex_buffer,
             index_buffer,
-            index_count: INDICES.len() as u32,
+            index_count,
             bind_group_layout,
-            bind_group,
-            texture,
-            texture_view,
-            sampler,
-            texture_size: (texture_width, texture_height),
+            retail_bind_group,
+            retail_texture,
+            retail_texture_view,
+            retail_sampler,
+            retail_texture_size: (texture_width, texture_height),
+            _placeholder_texture: placeholder_texture,
+            _placeholder_view: placeholder_view,
+            placeholder_bind_group,
+            frame_aspect,
+            layout,
+            retail_rect: layout.retail_view,
+            engine_rect: layout.engine_view,
+            debug_rect: layout.debug_panel,
+            retail_label_rect,
+            engine_label_rect,
+            retail_vertex_buffer,
+            engine_vertex_buffer,
+            debug_vertex_buffer,
+            retail_label_vertex_buffer,
+            engine_label_vertex_buffer,
+            debug_panel_overlay,
+            retail_label_overlay,
+            engine_label_overlay,
+            debug_lines: Vec::new(),
         })
     }
 
     fn recreate_texture(&mut self, width: u32, height: u32) -> Result<()> {
         let (texture, texture_view) = create_texture(&self.device, width, height)?;
-        self.texture = texture;
-        self.texture_view = texture_view;
-        self.texture_size = (width, height);
+        self.retail_texture = texture;
+        self.retail_texture_view = texture_view;
+        self.retail_texture_size = (width, height);
 
-        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("grim-viewer-bind-group"),
+        self.retail_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grim-viewer-retail-bind-group"),
             layout: &self.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.texture_view),
+                    resource: wgpu::BindingResource::TextureView(&self.retail_texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.retail_sampler),
                 },
             ],
         });
@@ -385,6 +630,70 @@ fn create_texture(
     Ok((texture, view))
 }
 
+fn create_vertex_buffer_for_rect(
+    device: &wgpu::Device,
+    window: PhysicalSize<u32>,
+    rect: Rect,
+    label: &str,
+) -> wgpu::Buffer {
+    let vertices = rect_vertices(rect, window);
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    })
+}
+
+fn rect_vertices(rect: Rect, window: PhysicalSize<u32>) -> [Vertex; 4] {
+    let width = window.width.max(1) as f32;
+    let height = window.height.max(1) as f32;
+
+    let left = (rect.x / width) * 2.0 - 1.0;
+    let right = ((rect.x + rect.width) / width) * 2.0 - 1.0;
+    let top = 1.0 - (rect.y / height) * 2.0;
+    let bottom = 1.0 - ((rect.y + rect.height) / height) * 2.0;
+
+    [
+        Vertex {
+            position: [left, top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            position: [right, top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            position: [right, bottom],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            position: [left, bottom],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
+fn label_rect_for(view: Rect, overlay_size: (u32, u32), window: PhysicalSize<u32>) -> Rect {
+    let width = overlay_size.0.max(1) as f32;
+    let height = overlay_size.1.max(1) as f32;
+    let gap = 8.0;
+    let mut x = view.x;
+    let max_x = window.width.max(1) as f32 - width - gap;
+    if x > max_x {
+        x = max_x.max(gap);
+    }
+    let mut y = view.y - height - gap;
+    if y < gap {
+        y = gap;
+    }
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 fn repack_rows(row_bytes: usize, stride: usize, rows: usize, data: &[u8]) -> Vec<u8> {
     let mut output = vec![0u8; row_bytes * rows];
     for row in 0..rows {
@@ -416,25 +725,6 @@ struct Vertex {
     position: [f32; 2],
     uv: [f32; 2],
 }
-
-const VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [-1.0, -1.0],
-        uv: [0.0, 1.0],
-    },
-    Vertex {
-        position: [-1.0, 1.0],
-        uv: [0.0, 0.0],
-    },
-    Vertex {
-        position: [1.0, 1.0],
-        uv: [1.0, 0.0],
-    },
-    Vertex {
-        position: [1.0, -1.0],
-        uv: [1.0, 1.0],
-    },
-];
 
 const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 

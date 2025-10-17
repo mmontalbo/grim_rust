@@ -21,10 +21,25 @@ if ! command -v steam-run >/dev/null 2>&1; then
 fi
 
 TIMEOUT="20s"
-if [[ $# -ge 2 && "$1" == "--timeout" ]]; then
-  TIMEOUT="$2"
-  shift 2
-fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --timeout)
+      if [[ $# -lt 2 ]]; then
+        echo "[run_dev_install] --timeout expects a value" >&2
+        exit 1
+      fi
+      TIMEOUT="$2"
+      shift 2
+      ;;
+    --no-timeout)
+      TIMEOUT=""
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 if [[ -n "${TIMEOUT}" ]]; then
   exec timeout "${TIMEOUT}" steam-run "${DEV_RUN_SCRIPT}" "$@"
