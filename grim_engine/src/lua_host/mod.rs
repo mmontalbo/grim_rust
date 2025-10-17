@@ -1,14 +1,8 @@
 mod context;
-mod hotspot;
-mod movement;
 mod state_update;
 mod types;
 
 pub use context::AudioCallback;
-pub use hotspot::HotspotOptions;
-pub use movement::MovementOptions;
-#[allow(unused_imports)]
-pub use movement::MovementPlan;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -28,33 +22,15 @@ use crate::stream::{StreamServer, StreamViewerGate};
 use context::EngineContextHandle;
 use state_update::StateUpdateBuilder;
 
-#[derive(Debug, Clone)]
-pub struct EngineRunSummary {
-    events: Vec<String>,
-    coverage: BTreeMap<String, u64>,
-}
-
-impl EngineRunSummary {
-    pub fn events(&self) -> &[String] {
-        &self.events
-    }
-
-    pub fn coverage(&self) -> &BTreeMap<String, u64> {
-        &self.coverage
-    }
-}
-
 pub fn run_boot_sequence(
     data_root: &Path,
     lab_root: Option<&Path>,
     verbose: bool,
     geometry_json: Option<&Path>,
     audio_callback: Option<Rc<dyn AudioCallback>>,
-    movement: Option<MovementOptions>,
-    hotspot: Option<HotspotOptions>,
     stream: Option<StreamServer>,
     stream_ready: Option<PathBuf>,
-) -> Result<(EngineRunSummary, Option<EngineRuntime>)> {
+) -> Result<Option<EngineRuntime>> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
             .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
@@ -108,19 +84,10 @@ pub fn run_boot_sequence(
     let mut stream = stream;
     let mut stream_ready = stream_ready;
 
-    if let Some(options) = movement.as_ref() {
-        movement::simulate_movement(&lua, &context_handle, options, stream.as_ref())?;
-    }
-
-    if let Some(options) = hotspot.as_ref() {
-        hotspot::simulate_hotspot_demo(&lua, &context_handle, options)?;
-    }
-
     let snapshot = context.borrow();
     context::dump_runtime_summary(&snapshot);
-    let events = snapshot.events().to_vec();
-    let coverage = snapshot.coverage_counts().clone();
-    let initial_event_cursor = events.len();
+    let initial_event_cursor = snapshot.events().len();
+    let initial_coverage = snapshot.coverage_counts().clone();
     if let Some(path) = geometry_json {
         let snapshot_data = snapshot.geometry_snapshot();
         let json = serde_json::to_string_pretty(&snapshot_data)
@@ -131,7 +98,6 @@ pub fn run_boot_sequence(
     }
     drop(snapshot);
 
-    let summary = EngineRunSummary { events, coverage };
     let runtime = stream.take().map(|stream| {
         // The EngineRuntime owns the Lua VM when we are actively streaming state.
         EngineRuntime::new(
@@ -140,12 +106,12 @@ pub fn run_boot_sequence(
             context_handle,
             stream,
             initial_event_cursor,
-            summary.coverage.clone(),
+            initial_coverage.clone(),
             stream_ready.take().map(StreamReadyGate::new),
         )
     });
 
-    Ok((summary, runtime))
+    Ok(runtime)
 }
 
 /// Drives the embedded Lua runtime and publishes live state over GrimStream.

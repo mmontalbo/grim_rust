@@ -44,7 +44,7 @@ use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
 use grim_analysis::resources::{ResourceGraph, SetMetadata};
-use mlua::{Lua, RegistryKey, Result as LuaResult};
+use mlua::RegistryKey;
 
 #[derive(Clone)]
 pub struct EngineContextHandle {
@@ -63,56 +63,6 @@ impl EngineContextHandle {
             .map(|(handle, id)| (handle, id.clone()))
     }
 
-    pub fn walk_actor_vector(
-        &self,
-        handle: u32,
-        delta: Vec3,
-        adjust_y: Option<f32>,
-        heading_offset: Option<f32>,
-    ) -> bool {
-        self.inner
-            .borrow_mut()
-            .walk_actor_vector(handle, delta, adjust_y, heading_offset)
-    }
-
-    pub fn log_event(&self, event: impl Into<String>) {
-        self.inner.borrow_mut().log_event(event);
-    }
-
-    pub fn actor_position(&self, handle: u32) -> Option<Vec3> {
-        self.inner.borrow().actor_position_by_handle(handle)
-    }
-
-    pub fn actor_rotation_y(&self, handle: u32) -> Option<f32> {
-        self.inner
-            .borrow()
-            .actor_rotation_by_handle(handle)
-            .map(|rot| rot.y)
-    }
-
-    pub fn geometry_sector_name(&self, actor_id: &str, kind: &str) -> Option<String> {
-        self.inner.borrow().geometry_sector_name(actor_id, kind)
-    }
-
-    pub fn actor_costume(&self, actor: &str) -> Option<String> {
-        self.inner
-            .borrow()
-            .actor_costume(actor)
-            .map(|costume| costume.to_string())
-    }
-
-    pub fn is_message_active(&self) -> bool {
-        self.inner.borrow().is_message_active()
-    }
-
-    pub fn run_scripts(
-        &self,
-        lua: &Lua,
-        max_passes: usize,
-        max_yields_per_script: u32,
-    ) -> LuaResult<()> {
-        drive_active_scripts(lua, self.inner.clone(), max_passes, max_yields_per_script)
-    }
 }
 
 #[derive(Debug, Default)]
