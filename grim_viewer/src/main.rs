@@ -243,6 +243,12 @@ fn drain_retail_events(
                         stream.pending_frames.pop_front();
                     }
                 }
+                RetailEvent::Timeline(mark) => {
+                    println!(
+                        "[grim_viewer] retail timeline: {} seq={} host_time_ns={}",
+                        mark.label, mark.seq, mark.host_time_ns
+                    );
+                }
                 RetailEvent::ProtocolError(message) => {
                     eprintln!("[grim_viewer] retail protocol: {message}");
                 }
@@ -353,6 +359,12 @@ fn drain_engine_events(
                             eprintln!("[grim_viewer] engine frame upload failed: {err:?}");
                         }
                     }
+                }
+                EngineEvent::Timeline(mark) => {
+                    println!(
+                        "[grim_viewer] engine timeline: {} seq={} host_time_ns={}",
+                        mark.label, mark.seq, mark.host_time_ns
+                    );
                 }
                 EngineEvent::ProtocolError(message) => {
                     eprintln!("[grim_viewer] engine protocol: {message}");

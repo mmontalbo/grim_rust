@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use grim_stream::{
     Control, Frame, HEADER_LEN, Hello, MessageHeader, MessageKind, PROTOCOL_VERSION, ProtocolError,
-    StateUpdate, StreamConfig, Telemetry, decode_payload, encode_message,
+    StateUpdate, StreamConfig, Telemetry, TimelineMark, decode_payload, encode_message,
 };
 use thiserror::Error;
 
@@ -18,6 +18,7 @@ pub enum RetailEvent {
     Connected(Hello),
     StreamConfig(StreamConfig),
     Frame(Frame),
+    Timeline(TimelineMark),
     ProtocolError(String),
     Disconnected { reason: String },
 }
@@ -28,6 +29,7 @@ pub enum EngineEvent {
     Connected(Hello),
     ViewerReady,
     State(StateUpdate),
+    Timeline(TimelineMark),
     ProtocolError(String),
     Disconnected { reason: String },
 }
@@ -146,6 +148,18 @@ fn retail_session(stream: &mut TcpStream, tx: &Sender<RetailEvent>) -> Result<()
                     break;
                 }
             }
+            MessageKind::TimelineMark => match decode_payload::<TimelineMark>(&payload) {
+                Ok(mark) => {
+                    if tx.send(RetailEvent::Timeline(mark)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(RetailEvent::ProtocolError(format!(
+                        "timeline decode error: {err}"
+                    )));
+                }
+            },
             MessageKind::Telemetry => {
                 let _ = decode_payload::<Telemetry>(&payload);
             }
@@ -186,6 +200,18 @@ fn engine_session(stream: &mut TcpStream, tx: &Sender<EngineEvent>) -> Result<()
                     break;
                 }
             }
+            MessageKind::TimelineMark => match decode_payload::<TimelineMark>(&payload) {
+                Ok(mark) => {
+                    if tx.send(EngineEvent::Timeline(mark)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::ProtocolError(format!(
+                        "timeline decode error: {err}"
+                    )));
+                }
+            },
             other => {
                 let _ = tx.send(EngineEvent::ProtocolError(format!(
                     "ignored engine message kind {other:?}"

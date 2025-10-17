@@ -5,7 +5,7 @@ use std::{fs, io::BufRead};
 use anyhow::{Context, Result};
 use clap::Parser;
 use grim_stream::{
-    encode_message, Frame, Hello, MessageKind, PixelFormat, StreamConfig, Telemetry,
+    encode_message, Frame, Hello, MessageKind, PixelFormat, StreamConfig, Telemetry, TimelineMark,
     PROTOCOL_VERSION,
 };
 use thiserror::Error;
@@ -198,6 +198,25 @@ async fn run(args: Args) -> Result<()> {
             while let Ok(event) = rx.try_recv() {
                 ready.mark_ready("telemetry");
                 send_message(&mut writer, MessageKind::Telemetry, &event).await?;
+                if event.label == "intro.timeline" {
+                    match event.data.get("event").and_then(|value| value.as_str()) {
+                        Some(label) => {
+                            let mark = TimelineMark {
+                                seq: event.seq,
+                                host_time_ns: stream_start.elapsed().as_nanos() as u64,
+                                label: label.to_string(),
+                                data: event.data.clone(),
+                            };
+                            send_message(&mut writer, MessageKind::TimelineMark, &mark).await?;
+                        }
+                        None => {
+                            eprintln!(
+                                "[live_retail_capture] intro.timeline event missing 'event' key (seq {})",
+                                event.seq
+                            );
+                        }
+                    }
+                }
             }
         }
 

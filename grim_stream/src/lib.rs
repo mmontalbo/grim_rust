@@ -167,6 +167,16 @@ pub struct Telemetry {
     pub data: Value,
 }
 
+/// Timeline markers used to align engine and retail event streams.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineMark {
+    pub seq: u64,
+    pub host_time_ns: u64,
+    pub label: String,
+    #[serde(default)]
+    pub data: Value,
+}
+
 /// Coverage counter delta or snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageCounter {

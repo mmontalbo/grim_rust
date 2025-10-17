@@ -290,6 +290,185 @@ function telemetry.event(label, fields)
 end
 
 -- ---------------------------------------------------------------------------
+-- Intro timeline instrumentation
+-- ---------------------------------------------------------------------------
+
+local function telemetry_intro_unpack(results)
+    if type(unpack) == "function" then
+        return unpack(results)
+    end
+    if type(table) == "table" and type(table.unpack) == "function" then
+        return table.unpack(results)
+    end
+    return results[1]
+end
+
+local telemetry_intro_hooks = {
+    installed = false,
+    pending_movie = nil,
+    scripts = {},
+}
+
+local function telemetry_intro_event(name, extra)
+    if type(name) ~= "string" or name == "" then
+        return
+    end
+    local payload = { event = name }
+    if type(extra) == "table" then
+        local key, value = next(extra, nil)
+        while key do
+            payload[key] = value
+            key, value = next(extra, key)
+        end
+    end
+    telemetry.event("intro.timeline", payload)
+end
+
+local function telemetry_intro_clear_scripts(label)
+    local removals = {}
+    local count = 0
+    local key, value = next(telemetry_intro_hooks.scripts, nil)
+    while key do
+        if value == label then
+            count = count + 1
+            removals[count] = key
+        end
+        key, value = next(telemetry_intro_hooks.scripts, key)
+    end
+    local index = 1
+    while index <= count do
+        telemetry_intro_hooks.scripts[removals[index]] = nil
+        index = index + 1
+    end
+end
+
+local function telemetry_intro_install()
+    if telemetry_intro_hooks.installed then
+        return
+    end
+    if type(cut_scene) ~= "table" then
+        return
+    end
+    if type(RunFullscreenMovie) ~= "function" or type(StartMovie) ~= "function" or type(wait_for_movie) ~= "function" then
+        return
+    end
+    if type(start_script) ~= "function" or type(wait_for_script) ~= "function" then
+        return
+    end
+    if type(Actor) ~= "table" or type(Actor.say_line) ~= "function" then
+        return
+    end
+    if type(manny) ~= "table" then
+        return
+    end
+
+    if type(cut_scene.logos) == "function" then
+        local original_logos = cut_scene.logos
+        cut_scene.logos = function(...)
+            telemetry_intro_event("cut_scene.logos.begin")
+            local results = { original_logos(...) }
+            telemetry_intro_event("cut_scene.logos.end")
+            return telemetry_intro_unpack(results)
+        end
+    end
+
+    if type(cut_scene.intro) == "function" then
+        local original_intro = cut_scene.intro
+        cut_scene.intro = function(...)
+            telemetry_intro_event("cut_scene.intro.begin")
+            local results = { original_intro(...) }
+            telemetry_intro_event("cut_scene.intro.end")
+            return telemetry_intro_unpack(results)
+        end
+    end
+
+    local original_run_fullscreen_movie = RunFullscreenMovie
+    RunFullscreenMovie = function(name, ...)
+        local label = nil
+        if name == "logos.snm" then
+            label = "movie.logos"
+        elseif name == "intro.snm" then
+            label = "movie.intro"
+        end
+        if label then
+            telemetry_intro_event(label .. ".start", { movie = name })
+        end
+        local results = { original_run_fullscreen_movie(name, ...) }
+        if label then
+            telemetry_intro_event(label .. ".end", { movie = name })
+        end
+        return telemetry_intro_unpack(results)
+    end
+
+    local original_start_movie = StartMovie
+    local original_wait_for_movie = wait_for_movie
+    StartMovie = function(name, ...)
+        if name == "mo_ts.snm" then
+            telemetry_intro_event("movie.mo_ts.start", { movie = name })
+            telemetry_intro_hooks.pending_movie = name
+        end
+        return original_start_movie(name, ...)
+    end
+    wait_for_movie = function(...)
+        local results = { original_wait_for_movie(...) }
+        if telemetry_intro_hooks.pending_movie ~= nil then
+            telemetry_intro_event("movie.mo_ts.end", { movie = telemetry_intro_hooks.pending_movie })
+            telemetry_intro_hooks.pending_movie = nil
+        end
+        return telemetry_intro_unpack(results)
+    end
+
+    local original_start_script = start_script
+    local original_wait_for_script = wait_for_script
+    start_script = function(fn, ...)
+        local results = { original_start_script(fn, ...) }
+        if manny and fn == manny.walk_and_face then
+            telemetry_intro_event("script.manny.walk_and_face.start")
+            telemetry_intro_hooks.scripts[fn] = "script.manny.walk_and_face"
+            local handle = results[1]
+            if handle ~= nil then
+                telemetry_intro_hooks.scripts[handle] = "script.manny.walk_and_face"
+            end
+        end
+        return telemetry_intro_unpack(results)
+    end
+    wait_for_script = function(target, ...)
+        local label = telemetry_intro_hooks.scripts[target]
+        local results = { original_wait_for_script(target, ...) }
+        if label then
+            telemetry_intro_event(label .. ".end")
+            telemetry_intro_clear_scripts(label)
+        end
+        return telemetry_intro_unpack(results)
+    end
+
+    local original_say_line = Actor.say_line
+    Actor.say_line = function(self, line, ...)
+        if self == manny and line == "/intma39/" then
+            telemetry_intro_event("dialog.manny.intma39", { line = line })
+        end
+        return original_say_line(self, line, ...)
+    end
+
+    telemetry_intro_hooks.installed = true
+end
+
+local telemetry_original_dofile = dofile
+if type(telemetry_original_dofile) == "function" then
+    dofile = function(path)
+        local results = { telemetry_original_dofile(path) }
+        if type(path) == "string" then
+            if path == "_cut_scenes.lua" or path == "year_1.lua" then
+                telemetry_intro_install()
+            end
+        end
+        return telemetry_intro_unpack(results)
+    end
+end
+
+telemetry_intro_install()
+
+-- ---------------------------------------------------------------------------
 -- Utilities for tests & dev harness
 -- ---------------------------------------------------------------------------
 
