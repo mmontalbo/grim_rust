@@ -12,6 +12,7 @@ mod display;
 mod layout;
 mod live_scene;
 mod live_stream;
+mod movie;
 mod overlay;
 #[allow(dead_code)]
 mod scene;

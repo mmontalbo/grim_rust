@@ -104,6 +104,10 @@ def main() -> None:
 
     procs: list[ManagedProcess] = []
     ready_path: Optional[Path] = None
+    viewer_process: Optional[ManagedProcess] = None
+    engine_process: Optional[ManagedProcess] = None
+    exit_code: int = 0
+    layout_ready = False
     try:
         if not args.no_engine and not args.no_capture:
             ready_path = Path(tempfile.gettempdir()) / f"grim_live_ready_{os.getpid()}_{int(time.time() * 1000)}"
@@ -119,32 +123,68 @@ def main() -> None:
         else:
             args.stream_ready_file = None
 
-        if args.launch_retail:
-            retail_process = launch_retail_game(args)
-            if retail_process:
-                procs.append(retail_process)
+        # Seed default viewer sizing; updated later if we discover the retail window.
+        args.viewer_window_width = compute_viewer_width(args.width, args.viewer_debug_width)
+        args.viewer_window_height = compute_viewer_height(args.height, args.viewer_debug_height)
+        args.window_id = None
 
-        prepare_layout(args)
+        try:
+            prepare_layout(args)
+            layout_ready = True
+        except RuntimeError as err:
+            if args.launch_retail and args.retail_window_id is None:
+                print(
+                    "[run_live_preview] retail window not detected yet; "
+                    "deferring capture layout until after the game launches"
+                )
+                print(f"[run_live_preview]   detail: {err}", file=sys.stderr)
+            else:
+                raise
 
         viewer_cmd = build_viewer_command(args)
         viewer_process = spawn("grim_viewer", viewer_cmd, inherit_env=True)
         procs.append(viewer_process)
-        time.sleep(0.5)
-
-        if not args.no_capture:
-            capture_cmd = build_capture_command(args)
-            procs.append(spawn("retail_capture", capture_cmd))
-            time.sleep(0.5)
+        wait_for_viewer_ready(viewer_process)
 
         if not args.no_engine:
             engine_cmd = build_engine_command(args)
-            procs.append(spawn("grim_engine", engine_cmd))
-            time.sleep(0.5)
+            engine_process = spawn("grim_engine", engine_cmd)
+            procs.append(engine_process)
+            wait_for_process_healthy(engine_process, "grim_engine", warmup_seconds=2.0)
+
+        if args.launch_retail:
+            ensure_process_running(viewer_process, "grim_viewer")
+            if engine_process is not None:
+                ensure_process_running(engine_process, "grim_engine")
+            retail_process = launch_retail_game(args)
+            if retail_process:
+                procs.append(retail_process)
+            if not layout_ready and not args.no_capture:
+                wait_for_retail_layout(args, args.retail_window_retries, args.retail_window_wait)
+                layout_ready = True
+                resize_viewer_window(args.viewer_window_width, args.viewer_window_height)
+
+        if not args.no_capture:
+            if not layout_ready:
+                wait_for_retail_layout(args, args.retail_window_retries, args.retail_window_wait)
+                layout_ready = True
+                resize_viewer_window(args.viewer_window_width, args.viewer_window_height)
+            capture_cmd = build_capture_command(args)
+            capture_process = spawn("retail_capture", capture_cmd)
+            procs.append(capture_process)
+
+        if engine_process is None and not args.no_engine:
+            raise RuntimeError("grim_engine failed to launch")
+        if viewer_process is None:
+            raise RuntimeError("grim_viewer failed to launch")
 
         exit_code = viewer_process.process.wait()
     except KeyboardInterrupt:
         print("[run_live_preview] interrupted; shutting down children")
         exit_code = 130
+    except RuntimeError as err:
+        print(f"[run_live_preview] error: {err}", file=sys.stderr)
+        exit_code = 1
     finally:
         shutdown_processes(procs)
         if ready_path and ready_path.exists():
@@ -173,6 +213,114 @@ class WindowCaptureLayout:
     capture_height: int
     viewer_width: int
     viewer_height: int
+
+
+def ensure_process_running(managed: Optional[ManagedProcess], label: str) -> None:
+    if managed is None:
+        raise RuntimeError(f"{label} process handle is unavailable")
+    code = managed.process.poll()
+    if code is not None:
+        raise RuntimeError(f"{label} exited early with status {code}")
+
+
+def wait_for_process_healthy(
+    managed: ManagedProcess,
+    label: str,
+    *,
+    warmup_seconds: float = 1.0,
+    interval: float = 0.1,
+) -> None:
+    deadline = time.monotonic() + max(0.0, warmup_seconds)
+    interval = max(0.01, interval)
+    if warmup_seconds > 0.0:
+        print(
+            f"[run_live_preview] waiting up to {warmup_seconds:.1f}s for {label} "
+            "to report healthy"
+        )
+    while time.monotonic() < deadline:
+        ensure_process_running(managed, label)
+        time.sleep(interval)
+    ensure_process_running(managed, label)
+    if warmup_seconds > 0.0:
+        print(f"[run_live_preview] {label} is running")
+
+
+def wait_for_viewer_ready(managed: ManagedProcess) -> None:
+    ensure_process_running(managed, "grim_viewer")
+    try:
+        print("[run_live_preview] waiting for grim_viewer window …")
+        window_id = poll_for_window_id("Grim Viewer", 40, 0.25)
+    except RuntimeError as err:
+        if managed.process.poll() is not None:
+            raise RuntimeError("grim_viewer exited before creating a window") from err
+        print(
+            f"[run_live_preview] warning: viewer window detection skipped ({err})",
+            file=sys.stderr,
+        )
+        wait_for_process_healthy(managed, "grim_viewer", warmup_seconds=1.0)
+    else:
+        print(f"[run_live_preview] viewer window ready ({window_id})")
+        wait_for_process_healthy(managed, "grim_viewer", warmup_seconds=0.5)
+
+
+def wait_for_retail_layout(args: argparse.Namespace, retries: int, wait_seconds: float) -> None:
+    retries = max(1, retries)
+    wait_seconds = max(0.1, wait_seconds)
+    last_error: Optional[RuntimeError] = None
+    for attempt in range(1, retries + 1):
+        print(
+            f"[run_live_preview] waiting for retail window "
+            f"(attempt {attempt}/{retries}, delay {wait_seconds:.1f}s)"
+        )
+        try:
+            prepare_layout(args)
+        except RuntimeError as err:
+            last_error = err
+            if attempt < retries:
+                time.sleep(wait_seconds)
+                continue
+        else:
+            print(
+                "[run_live_preview] retail window detected "
+                f"(id {args.window_id}, size {args.width}x{args.height})"
+            )
+            return
+    message = "retail window detection timed out"
+    if last_error:
+        message += f" ({last_error})"
+    raise RuntimeError(message)
+
+
+def resize_viewer_window(width: int, height: int) -> None:
+    try:
+        window_id = poll_for_window_id("Grim Viewer", 10, 0.2)
+    except RuntimeError as err:
+        print(
+            f"[run_live_preview] warning: unable to resize viewer window ({err})",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        subprocess.run(
+            ["xdotool", "windowsize", window_id, str(width), str(height)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(
+            f"[run_live_preview] resized viewer window {window_id} to {width}x{height}"
+        )
+    except FileNotFoundError:
+        print(
+            "[run_live_preview] warning: xdotool not available; viewer window size unchanged",
+            file=sys.stderr,
+        )
+    except subprocess.CalledProcessError as err:
+        print(
+            f"[run_live_preview] warning: failed to resize viewer window {window_id}: {err}",
+            file=sys.stderr,
+        )
 
 
 def build_capture_command(args) -> List[str]:
@@ -252,11 +400,7 @@ def prepare_layout(args: argparse.Namespace) -> None:
     require_window = not args.no_capture or args.retail_window_id is not None
 
     if require_window:
-        try:
-            capture_layout = discover_window_layout(args)
-        except RuntimeError as err:
-            print(f"[run_live_preview] error preparing retail window capture: {err}", file=sys.stderr)
-            sys.exit(1)
+        capture_layout = discover_window_layout(args)
 
     if capture_layout:
         args.width = capture_layout.capture_width
