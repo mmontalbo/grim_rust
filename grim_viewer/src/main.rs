@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::{
         Arc,
         mpsc::{Receiver, TryRecvError},
@@ -9,14 +10,22 @@ use std::{
 
 mod display;
 mod layout;
+mod live_scene;
 mod live_stream;
 mod overlay;
+#[allow(dead_code)]
+mod scene;
+#[allow(dead_code)]
+mod texture;
+#[allow(dead_code)]
+mod timeline;
 
 use anyhow::Result;
 use clap::Parser;
 use display::ViewerState;
 use env_logger;
 use grim_stream::{Frame, Hello, StateUpdate, StreamConfig};
+use live_scene::{LiveSceneConfig, LiveSceneState};
 use live_stream::{EngineEvent, RetailEvent, spawn_engine_client, spawn_retail_client};
 use wgpu::SurfaceError;
 use winit::{
@@ -45,6 +54,30 @@ struct Args {
     /// Initial window height in pixels
     #[arg(long, default_value_t = 720)]
     window_height: u32,
+
+    /// Optional asset manifest that enumerates Manny office resources
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    scene_assets_manifest: Option<PathBuf>,
+
+    /// Optional timeline manifest exported by grim_engine
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    scene_timeline: Option<PathBuf>,
+
+    /// Optional Lua geometry snapshot to validate entity placement
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    scene_geometry: Option<PathBuf>,
+
+    /// Optional movement log to seed the Manny scrubber
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    scene_movement_log: Option<PathBuf>,
+
+    /// Optional hotspot event log for Manny office fixtures
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    scene_hotspot_log: Option<PathBuf>,
+
+    /// Preferred Manny office background asset (e.g. mo_0_ddtws.bm)
+    #[arg(long)]
+    scene_active_asset: Option<String>,
 }
 
 struct RetailStreamState {
@@ -98,6 +131,19 @@ fn main() -> Result<()> {
         args.window_width,
         args.window_height,
     ))?;
+
+    let mut live_scene = match LiveSceneConfig::from_args(&args)? {
+        Some(config) => match LiveSceneState::load(config) {
+            Ok(state) => Some(state),
+            Err(err) => {
+                eprintln!(
+                    "[grim_viewer] warning: failed to bootstrap Manny scene overlays: {err:?}"
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
     let mut retail_stream = RetailStreamState {
         rx: spawn_retail_client(args.retail_stream.clone()),
@@ -164,7 +210,7 @@ fn main() -> Result<()> {
             }
             Event::AboutToWait => {
                 drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
-                drain_engine_events(engine_stream.as_mut());
+                drain_engine_events(engine_stream.as_mut(), live_scene.as_mut());
                 update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
                 update_debug_panel(
                     &mut viewer,
@@ -291,10 +337,18 @@ fn present_frame(stream: &mut RetailStreamState, viewer: &mut ViewerState, queue
     });
 }
 
-fn drain_engine_events(stream: Option<&mut EngineStreamState>) {
+fn drain_engine_events(
+    stream: Option<&mut EngineStreamState>,
+    live_scene: Option<&mut LiveSceneState>,
+) {
     let Some(stream) = stream else {
+        let _ = live_scene;
         return;
     };
+
+    // TODO: hydrate live_scene with incoming StateUpdate values once the
+    // engine viewport consumes the Manny overlays.
+    let _ = live_scene;
 
     loop {
         match stream.rx.try_recv() {

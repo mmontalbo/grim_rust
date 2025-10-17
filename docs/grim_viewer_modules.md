@@ -12,7 +12,9 @@ split without a desktop session.
   decoding colour/depth frames, and servicing `--dump-frame` PNG exports.
 - `scene.rs` owns the timeline bootstrap: it reads the Lua geometry snapshot,
   movement trace, and hotspot event log, builds the entity catalogue, and keeps
-  helper routines for CLI summaries.
+  helper routines for CLI summaries. The live viewer reuses these loaders when
+  `grim_viewer` is launched with the `--scene-*` flags (or when it auto-detects
+  the standard Manny fixtures under `artifacts/` and `tools/tests/`).
 - `audio.rs` tracks the optional audio overlay by tailing the runtime JSON log
   and exposing a watcher that the window thread can poll.
 - `viewer.rs` hosts all wgpu state, overlay layout, and per-frame rendering for
@@ -60,4 +62,11 @@ split without a desktop session.
 
 Keep this flow in sync with new overlay affordances; any future module split or
 CLI change should be reflected here so engineers can validate the first-playable
-loop quickly.
+loop quickly. When running the live viewer directly, the CLI supports:
+
+- `--scene-assets-manifest`, `--scene-timeline`, `--scene-geometry`,
+  `--scene-movement-log`, and `--scene-hotspot-log` to point at explicit files.
+- If those are omitted, `grim_viewer` searches the repo-root defaults (for
+  example `artifacts/manny_office_assets.json`,
+  `artifacts/run_cache/manny_office_timeline.json`, and their `tools/tests/`
+  counterparts) so Manny’s office renders before live engine updates stream in.
