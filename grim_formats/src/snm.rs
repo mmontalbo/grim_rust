@@ -1,6 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use crate::blocky16::Blocky16Decoder;
 use anyhow::{Context, Result, bail};
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 
@@ -49,6 +50,34 @@ pub struct SnmFrame {
     pub blocky16: Option<Vec<u8>>,
     pub wave: Option<Vec<u8>>,
     pub extra_chunks: Vec<SnmSubChunk>,
+}
+
+impl SnmFrame {
+    /// Decode the Blocky16 payload into 1555 output. Returns `false` when absent.
+    pub fn decode_blocky16(&self, decoder: &mut Blocky16Decoder, out: &mut [u8]) -> Result<bool> {
+        match self.blocky16.as_deref() {
+            Some(payload) => {
+                decoder.decode(out, payload)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Decode the Blocky16 payload into RGBA output. Returns `false` when absent.
+    pub fn decode_blocky16_rgba(
+        &self,
+        decoder: &mut Blocky16Decoder,
+        out: &mut [u8],
+    ) -> Result<bool> {
+        match self.blocky16.as_deref() {
+            Some(payload) => {
+                decoder.decode_rgba(out, payload)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 /// Unhandled sub-chunk captured for inspection/debugging.
@@ -177,6 +206,21 @@ impl SnmFile {
             audio,
             frames,
         })
+    }
+
+    /// Instantiate a Blocky16 decoder sized to this movie.
+    pub fn blocky16_decoder(&self) -> Result<Blocky16Decoder> {
+        Blocky16Decoder::new(self.header.width, self.header.height)
+    }
+
+    /// Number of bytes needed to hold a decoded Blocky16 frame (1555 pixels).
+    pub fn blocky16_frame_len(&self) -> usize {
+        self.header.width as usize * self.header.height as usize * 2
+    }
+
+    /// Number of bytes needed to hold a decoded Blocky16 frame in RGBA.
+    pub fn blocky16_rgba_len(&self) -> usize {
+        self.header.width as usize * self.header.height as usize * 4
     }
 }
 

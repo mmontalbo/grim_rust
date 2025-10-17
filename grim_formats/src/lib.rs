@@ -1,3 +1,4 @@
+pub mod blocky16;
 pub mod bm;
 pub mod cos;
 pub mod lab;
@@ -5,6 +6,7 @@ pub mod set;
 pub mod snm;
 pub mod three_do;
 
+pub use blocky16::Blocky16Decoder;
 pub use bm::{
     BmFile, BmFrame, BmMetadata, DepthStats, decode_bm, decode_bm_with_seed, peek_bm_metadata,
 };
