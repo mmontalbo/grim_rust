@@ -12,9 +12,9 @@ WIP_DATA: Dict[str, Any] = {
         {
             "title": "Milestone Goal",
             "body": [
-                "Deliver a first-playable Manny office where the viewer renders initial Manny's office scene.",
-                "User should be able to provide input to the viewer and have game state update in the same exact way the real game does",
-                "Every task should accelerate implementing the initial office gameplay, before thinking about work keep this ultimate goal in mind",
+                "Stream the full Grim intro (boot logos through Manny’s cube cutscene) with the minimal Rust engine and viewer.",
+                "Ensure the viewer reflects engine state throughout the intro; the initial interactive office beat comes next.",
+                "Keep the scope tight: anything outside the intro cinematic can wait until the live playback loop is solid.",
             ],
         },
         {
