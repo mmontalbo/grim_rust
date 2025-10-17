@@ -24,3 +24,6 @@ grim_formats = { path = "../grim_formats" }
 image = { version = "0.24", default-features = false, features = ["png"] }
 walkdir = "2"
 theorafile-rs = "0.1.2"
+
+[dev-dependencies]
+tempfile = "3"

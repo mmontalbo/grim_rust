@@ -11,11 +11,12 @@ pub use movement::MovementPlan;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use grim_analysis::resources::ResourceGraph;
@@ -23,7 +24,7 @@ use grim_stream::{CoverageCounter, StateUpdate};
 use mlua::{Lua, LuaOptions, StdLib};
 
 use crate::lab_collection::LabCollection;
-use crate::stream::StreamServer;
+use crate::stream::{StreamServer, StreamViewerGate};
 use context::EngineContextHandle;
 
 #[derive(Debug, Clone)]
@@ -162,6 +163,8 @@ pub struct EngineRuntime {
     manny_actor_id: Option<String>,
     sent_initial: bool,
     start_gate: Option<StreamReadyGate>,
+    viewer_gate: Option<StreamViewerGate>,
+    log_file: Option<File>,
 }
 
 impl EngineRuntime {
@@ -174,6 +177,7 @@ impl EngineRuntime {
         initial_coverage: BTreeMap<String, u64>,
         start_gate: Option<StreamReadyGate>,
     ) -> Self {
+        let viewer_gate = stream.viewer_gate();
         Self {
             lua,
             context,
@@ -191,14 +195,26 @@ impl EngineRuntime {
             manny_actor_id: None,
             sent_initial: false,
             start_gate,
+            viewer_gate: Some(viewer_gate),
+            log_file: open_live_preview_log(),
         }
     }
 
     pub fn run(mut self) -> Result<()> {
         const FRAME_DURATION: Duration = Duration::from_millis(33);
 
+        if let Some(gate) = self.viewer_gate.clone() {
+            if !gate.is_ready() {
+                self.log_gate_event("viewer_ready.wait");
+            }
+            gate.wait_for_ready();
+            self.log_gate_event("viewer_ready.open");
+        }
+
         if let Some(gate) = self.start_gate.take() {
+            self.log_gate_event("capture_ready.wait");
             gate.wait()?;
+            self.log_gate_event("capture_ready.open");
         }
 
         loop {
@@ -382,6 +398,20 @@ impl EngineRuntime {
 
         Ok(Some(update))
     }
+
+    fn log_gate_event(&mut self, message: &str) {
+        eprintln!("[grim_engine] {message}");
+        if let Some(file) = self.log_file.as_mut() {
+            if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
+                let secs = now.as_secs();
+                let nanos = now.subsec_nanos();
+                let _ = writeln!(file, "[{secs}.{nanos:09}] {message}");
+            } else {
+                let _ = writeln!(file, "[0.000000000] {message}");
+            }
+            let _ = file.flush();
+        }
+    }
 }
 
 struct StreamReadyGate {
@@ -420,6 +450,20 @@ impl StreamReadyGate {
                 last_log = Instant::now();
             }
             thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+fn open_live_preview_log() -> Option<File> {
+    match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/live_preview.log")
+    {
+        Ok(file) => Some(file),
+        Err(err) => {
+            eprintln!("[grim_engine] warning: failed to open /tmp/live_preview.log: {err:?}");
+            None
         }
     }
 }

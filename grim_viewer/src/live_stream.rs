@@ -1,12 +1,12 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
 use grim_stream::{
-    Frame, HEADER_LEN, Hello, MessageHeader, MessageKind, ProtocolError, StateUpdate, StreamConfig,
-    Telemetry, decode_payload,
+    Control, Frame, HEADER_LEN, Hello, MessageHeader, MessageKind, PROTOCOL_VERSION, ProtocolError,
+    StateUpdate, StreamConfig, Telemetry, decode_payload, encode_message,
 };
 use thiserror::Error;
 
@@ -26,6 +26,7 @@ pub enum RetailEvent {
 pub enum EngineEvent {
     Connecting { addr: String, attempt: u32 },
     Connected(Hello),
+    ViewerReady,
     State(StateUpdate),
     ProtocolError(String),
     Disconnected { reason: String },
@@ -159,6 +160,7 @@ fn retail_session(stream: &mut TcpStream, tx: &Sender<RetailEvent>) -> Result<()
 }
 
 fn engine_session(stream: &mut TcpStream, tx: &Sender<EngineEvent>) -> Result<(), StreamReadError> {
+    let mut sent_ready = false;
     loop {
         let (header, payload) = read_message(stream)?;
         match header.kind {
@@ -166,6 +168,16 @@ fn engine_session(stream: &mut TcpStream, tx: &Sender<EngineEvent>) -> Result<()
                 let hello = decode_payload::<Hello>(&payload)?;
                 if tx.send(EngineEvent::Connected(hello)).is_err() {
                     break;
+                }
+                if !sent_ready {
+                    if let Err(err) = send_viewer_ready(stream) {
+                        let _ = tx.send(EngineEvent::ProtocolError(format!(
+                            "failed to send viewer-ready control: {err}"
+                        )));
+                        return Err(StreamReadError::Io(err));
+                    }
+                    let _ = tx.send(EngineEvent::ViewerReady);
+                    sent_ready = true;
                 }
             }
             MessageKind::StateUpdate => {
@@ -199,4 +211,14 @@ enum StreamReadError {
     Io(#[from] std::io::Error),
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
+}
+
+fn send_viewer_ready(stream: &mut TcpStream) -> Result<(), std::io::Error> {
+    let message = Control::ViewerReady {
+        protocol: PROTOCOL_VERSION,
+        features: Vec::new(),
+    };
+    let bytes = encode_message(MessageKind::Control, &message)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+    stream.write_all(&bytes)
 }

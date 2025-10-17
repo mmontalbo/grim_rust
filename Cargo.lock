@@ -928,6 +928,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "tempfile",
  "theorafile-rs",
  "thiserror",
  "walkdir",

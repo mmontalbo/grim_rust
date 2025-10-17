@@ -384,6 +384,9 @@ fn drain_engine_events(
                     );
                     stream.hello = Some(hello);
                 }
+                EngineEvent::ViewerReady => {
+                    println!("[grim_viewer] engine viewer-ready acknowledged");
+                }
                 EngineEvent::State(update) => {
                     println!(
                         "[grim_viewer] received engine update events={} seq={}",

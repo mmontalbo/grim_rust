@@ -20,11 +20,21 @@ except ImportError:  # pragma: no cover - unavailable on non-Unix platforms
     termios = None  # type: ignore[assignment]
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+LIVE_PREVIEW_LOG = Path("/tmp/live_preview.log")
 
 VIEWER_PADDING = 24  # keep in sync with grim_viewer/src/layout.rs
 VIEWER_LABEL_HEIGHT = 32  # keep in sync with grim_viewer/src/layout.rs::LABEL_HEIGHT
 VIEWER_LABEL_GAP = 8  # keep in sync with grim_viewer/src/layout.rs::LABEL_GAP
 DEFAULT_RETAIL_TIMEOUT_SECONDS = 20.0
+VIEWER_READY_TIMEOUT_SECONDS = 20.0
+
+
+def current_log_offset(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -115,6 +125,7 @@ def main() -> None:
     capture_process: Optional[ManagedProcess] = None
     retail_process: Optional[ManagedProcess] = None
     exit_code: int = 0
+    viewer_ready_offset = current_log_offset(LIVE_PREVIEW_LOG) if not args.no_engine else 0
     layout_ready = False
     tty_state = capture_tty_state()
     try:
@@ -160,6 +171,9 @@ def main() -> None:
             engine_process = spawn("grim_engine", engine_cmd)
             procs.append(engine_process)
             wait_for_process_healthy(engine_process, "grim_engine", warmup_seconds=2.0)
+
+        if not args.no_engine and not args.no_capture:
+            wait_for_viewer_handshake(viewer_ready_offset, VIEWER_READY_TIMEOUT_SECONDS)
 
         if args.launch_retail:
             ensure_process_running(viewer_process, "grim_viewer")
@@ -277,6 +291,25 @@ def wait_for_viewer_ready(managed: ManagedProcess) -> None:
     else:
         print(f"[run_live_preview] viewer window ready ({window_id})")
         wait_for_process_healthy(managed, "grim_viewer", warmup_seconds=0.5)
+
+
+def wait_for_viewer_handshake(offset: int, timeout: float) -> None:
+    deadline = time.monotonic() + max(0.1, timeout)
+    offset = max(0, offset)
+    print("[run_live_preview] waiting for viewer-ready handshake …")
+    while time.monotonic() < deadline:
+        try:
+            with LIVE_PREVIEW_LOG.open("rb") as handle:
+                handle.seek(offset)
+                data = handle.read()
+                offset = handle.tell()
+                if b"viewer_ready.open" in data:
+                    print("[run_live_preview] viewer handshake acknowledged")
+                    return
+        except FileNotFoundError:
+            pass
+        time.sleep(0.2)
+    raise RuntimeError("viewer handshake timed out")
 
 
 def wait_for_retail_layout(args: argparse.Namespace, retries: int, wait_seconds: float) -> None:
@@ -707,3 +740,10 @@ def shutdown_processes(processes: Sequence[ManagedProcess]) -> None:
                 pass
 if __name__ == "__main__":
     main()
+
+
+def current_log_offset(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0

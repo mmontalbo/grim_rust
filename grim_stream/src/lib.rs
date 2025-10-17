@@ -35,6 +35,20 @@ pub enum MessageKind {
     Heartbeat = 0x0008,
 }
 
+/// Control-plane messages exchanged alongside the primary stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Control {
+    /// Indicates the viewer has connected, processed the initial hello, and is ready for updates.
+    ViewerReady {
+        /// Protocol version understood by the viewer.
+        protocol: u16,
+        /// Optional feature toggles advertised by the viewer.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
+}
+
 /// Envelope describing the upcoming payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageHeader {
@@ -247,4 +261,26 @@ where
 {
     let value = rmp_serde::from_slice(payload)?;
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_round_trips() {
+        let message = Control::ViewerReady {
+            protocol: PROTOCOL_VERSION,
+            features: vec!["test".to_string()],
+        };
+        let bytes = encode_message(MessageKind::Control, &message).unwrap();
+        let (_, payload) = decode_envelope(&bytes).unwrap();
+        let decoded: Control = decode_payload(payload).unwrap();
+        match decoded {
+            Control::ViewerReady { protocol, features } => {
+                assert_eq!(protocol, PROTOCOL_VERSION);
+                assert_eq!(features, vec!["test".to_string()]);
+            }
+        }
+    }
 }
