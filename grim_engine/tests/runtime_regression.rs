@@ -14,7 +14,6 @@ struct MovementSample {
     sector: Option<String>,
 }
 
-
 #[test]
 fn manny_office_runtime_regression() -> Result<()> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

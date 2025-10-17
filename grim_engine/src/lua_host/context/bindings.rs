@@ -4412,6 +4412,7 @@ fn make_cut_scene_intro<'lua>(
             ctx.log_event("cut_scene.intro scheduled");
             ctx.push_cut_scene(Some("cut_scene.intro".to_string()), Vec::new());
             ctx.push_override("cut_scene.intro_override".to_string());
+            ctx.start_fullscreen_movie("intro".to_string(), None);
             ctx.put_actor_in_set("manny", "Manny", "mo.set");
             ctx.set_actor_position("manny", "Manny", MANNY_INTRO_START_POS);
             ctx.set_actor_rotation("manny", "Manny", MANNY_INTRO_FINAL_ROT);
