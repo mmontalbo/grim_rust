@@ -741,6 +741,12 @@ impl EngineContext {
         self.cutscene_view().is_message_active()
     }
 
+    pub(super) fn active_fullscreen_movie(&self) -> Option<String> {
+        self.cutscene_view()
+            .fullscreen_movie_name()
+            .map(|value| value.to_string())
+    }
+
     fn speaking_actor(&self) -> Option<String> {
         let view = self.cutscene_view();
         view.speaking_actor().map(|value| value.to_string())

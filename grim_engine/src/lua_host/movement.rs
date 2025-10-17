@@ -160,6 +160,7 @@ pub(crate) fn simulate_movement(
                         active_hotspot: sample.sector.clone(),
                         coverage: Vec::new(),
                         events: Vec::new(),
+                        active_movie: None,
                     };
                     if let Err(err) = stream.send_state_update(update) {
                         eprintln!("[grim_engine] failed to stream movement sample: {err:?}");
@@ -206,6 +207,7 @@ pub(crate) fn simulate_movement(
                     active_hotspot: sample.sector.clone(),
                     coverage: Vec::new(),
                     events: Vec::new(),
+                    active_movie: None,
                 };
                 if let Err(err) = stream.send_state_update(update) {
                     eprintln!("[grim_engine] failed to stream movement sample: {err:?}");

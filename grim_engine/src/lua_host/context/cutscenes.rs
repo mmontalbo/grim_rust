@@ -408,4 +408,11 @@ impl<'a> CutsceneRuntimeView<'a> {
     pub(super) fn cut_scene_stack(&self) -> &[CutSceneRecord] {
         self.runtime.cut_scene_stack()
     }
+
+    pub(super) fn fullscreen_movie_name(&self) -> Option<&str> {
+        self.runtime
+            .fullscreen_movie
+            .as_ref()
+            .map(|state| state.name.as_str())
+    }
 }

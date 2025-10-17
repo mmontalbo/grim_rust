@@ -183,6 +183,8 @@ pub struct StateUpdate {
     pub coverage: Vec<CoverageCounter>,
     #[serde(skip_serializing_if = "vec_is_empty", default)]
     pub events: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_movie: Option<String>,
 }
 
 /// Error conditions returned by the protocol helpers.

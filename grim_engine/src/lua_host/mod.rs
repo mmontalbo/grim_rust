@@ -118,6 +118,7 @@ pub fn run_boot_sequence(
     context::dump_runtime_summary(&snapshot);
     let events = snapshot.events().to_vec();
     let coverage = snapshot.coverage_counts().clone();
+    let initial_event_cursor = events.len();
     if let Some(path) = geometry_json {
         let snapshot_data = snapshot.geometry_snapshot();
         let json = serde_json::to_string_pretty(&snapshot_data)
@@ -135,7 +136,7 @@ pub fn run_boot_sequence(
             context,
             context_handle,
             stream,
-            summary.events.len(),
+            initial_event_cursor,
             summary.coverage.clone(),
             stream_ready.take().map(StreamReadyGate::new),
         )
@@ -156,6 +157,7 @@ pub struct EngineRuntime {
     last_yaw: Option<f32>,
     last_setup: Option<String>,
     last_hotspot: Option<String>,
+    last_movie: Option<String>,
     manny_handle: Option<u32>,
     manny_actor_id: Option<String>,
     sent_initial: bool,
@@ -184,6 +186,7 @@ impl EngineRuntime {
             last_yaw: None,
             last_setup: None,
             last_hotspot: None,
+            last_movie: None,
             manny_handle: None,
             manny_actor_id: None,
             sent_initial: false,
@@ -238,8 +241,9 @@ impl EngineRuntime {
             active_setup_opt,
             active_hotspot_opt,
             events_len,
-            new_events,
+            mut new_events,
             coverage_samples,
+            active_movie_opt,
         ) = {
             let ctx = self.context.borrow();
 
@@ -274,6 +278,8 @@ impl EngineRuntime {
                 .map(|(key, value)| (key.clone(), *value))
                 .collect();
 
+            let active_movie_opt = ctx.active_fullscreen_movie();
+
             (
                 position_opt,
                 yaw_opt,
@@ -282,6 +288,7 @@ impl EngineRuntime {
                 events_len,
                 new_events,
                 coverage_samples,
+                active_movie_opt,
             )
         };
 
@@ -329,11 +336,36 @@ impl EngineRuntime {
             changed = true;
         }
 
+        let mut movie_state_changed = false;
+        if active_movie_opt.as_deref() != self.last_movie.as_deref() {
+            changed = true;
+            movie_state_changed = true;
+        }
+
+        if movie_state_changed {
+            if let Some(name) = active_movie_opt.as_ref() {
+                if !new_events
+                    .iter()
+                    .any(|event| event.starts_with("cut_scene.fullscreen.start "))
+                {
+                    new_events.push(format!("cut_scene.fullscreen.start {name}"));
+                }
+            } else if let Some(previous) = self.last_movie.as_ref() {
+                if !new_events
+                    .iter()
+                    .any(|event| event.starts_with("cut_scene.fullscreen.end "))
+                {
+                    new_events.push(format!("cut_scene.fullscreen.end {previous}"));
+                }
+            }
+        }
+
         if new_events.is_empty() && !changed {
             return Ok(None);
         }
 
         self.sent_initial = true;
+        self.last_movie = active_movie_opt.clone();
 
         let update = StateUpdate {
             seq: 0,
@@ -345,6 +377,7 @@ impl EngineRuntime {
             active_hotspot: self.last_hotspot.clone(),
             coverage: coverage_updates,
             events: new_events,
+            active_movie: self.last_movie.clone(),
         };
 
         Ok(Some(update))
