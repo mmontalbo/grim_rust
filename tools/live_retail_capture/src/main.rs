@@ -1,6 +1,6 @@
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::{fs, io::BufRead};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -56,12 +56,56 @@ struct Args {
     /// Skip forwarding telemetry events.
     #[arg(long)]
     no_telemetry: bool,
+
+    /// Path to a file that should be created when the first frame or telemetry event is forwarded.
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    ready_notify: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
 enum CaptureError {
     #[error("captured video size must be greater than zero")]
     EmptyFrame,
+}
+
+struct ReadyNotifier {
+    path: Option<PathBuf>,
+    triggered: bool,
+}
+
+impl ReadyNotifier {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            triggered: false,
+        }
+    }
+
+    fn mark_ready(&mut self, reason: &str) {
+        if self.triggered {
+            return;
+        }
+        let Some(path) = self.path.as_ref() else {
+            return;
+        };
+
+        let contents = format!("{reason}\n");
+        match fs::write(path, contents) {
+            Ok(_) => {
+                eprintln!(
+                    "[live_retail_capture] signalled readiness at {} (reason: {reason})",
+                    path.display()
+                );
+                self.triggered = true;
+            }
+            Err(err) => {
+                eprintln!(
+                    "[live_retail_capture] failed to write readiness marker {}: {err:?}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -137,6 +181,8 @@ async fn run(args: Args) -> Result<()> {
         }
     };
 
+    let mut ready = ReadyNotifier::new(args.ready_notify.clone());
+
     let mut ffmpeg_child = spawn_ffmpeg(&args, frame_size).await?;
     let stdout = ffmpeg_child
         .stdout
@@ -150,6 +196,7 @@ async fn run(args: Args) -> Result<()> {
     loop {
         if let Some(rx) = telemetry_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
+                ready.mark_ready("telemetry");
                 send_message(&mut writer, MessageKind::Telemetry, &event).await?;
             }
         }
@@ -163,6 +210,7 @@ async fn run(args: Args) -> Result<()> {
                     telemetry_time_ns: None,
                     data: frame_buffer.clone(),
                 };
+                ready.mark_ready("frame");
                 send_message(&mut writer, MessageKind::Frame, &frame).await?;
                 frame_id = frame_id.wrapping_add(1);
             }

@@ -96,6 +96,10 @@ pub struct Args {
     /// Bind a GrimStream socket and publish real-time state updates (requires --run-lua)
     #[arg(long)]
     pub stream_bind: Option<String>,
+
+    /// Path to a file that unblocks the live stream loop once the retail capture is ready
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    pub stream_ready_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -121,6 +125,7 @@ pub struct RunLuaArgs {
     pub geometry_diff: Option<PathBuf>,
     pub geometry_diff_json: Option<PathBuf>,
     pub stream_bind: Option<String>,
+    pub stream_ready_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -174,6 +179,7 @@ impl Args {
                 geometry_diff: self.geometry_diff,
                 geometry_diff_json: self.geometry_diff_json,
                 stream_bind: self.stream_bind,
+                stream_ready_file: self.stream_ready_file,
             }))
         } else {
             Ok(Command::Analyze(AnalyzeArgs {

@@ -117,6 +117,7 @@ pub fn execute(args: AnalyzeArgs) -> Result<()> {
             None,
             None,
             None,
+            None,
         )?;
 
         run_geometry_diff(
@@ -944,6 +945,7 @@ mod tests {
             Some(lab_root.as_path()),
             false,
             Some(snapshot_file.path()),
+            None,
             None,
             None,
             None,

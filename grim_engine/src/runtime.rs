@@ -26,6 +26,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         geometry_diff,
         geometry_diff_json,
         stream_bind,
+        stream_ready_file,
     } = args;
 
     if verify_geometry {
@@ -98,6 +99,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         movement,
         hotspot,
         stream,
+        stream_ready_file,
     )?;
 
     if let Some(path) = event_log_json.as_ref() {

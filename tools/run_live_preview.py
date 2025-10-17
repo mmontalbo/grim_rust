@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,13 +103,33 @@ def main() -> None:
         parser.error("--retail-no-timeout cannot be used together with --retail-timeout")
 
     procs: list[ManagedProcess] = []
+    ready_path: Optional[Path] = None
     try:
+        if not args.no_engine and not args.no_capture:
+            ready_path = Path(tempfile.gettempdir()) / f"grim_live_ready_{os.getpid()}_{int(time.time() * 1000)}"
+            if ready_path.exists():
+                try:
+                    ready_path.unlink()
+                except OSError as err:
+                    print(
+                        f"[run_live_preview] warning: failed to remove stale stream ready marker {ready_path}: {err}",
+                        file=sys.stderr,
+                    )
+            args.stream_ready_file = ready_path
+        else:
+            args.stream_ready_file = None
+
         if args.launch_retail:
             retail_process = launch_retail_game(args)
             if retail_process:
                 procs.append(retail_process)
 
         prepare_layout(args)
+
+        viewer_cmd = build_viewer_command(args)
+        viewer_process = spawn("grim_viewer", viewer_cmd, inherit_env=True)
+        procs.append(viewer_process)
+        time.sleep(0.5)
 
         if not args.no_capture:
             capture_cmd = build_capture_command(args)
@@ -120,15 +141,20 @@ def main() -> None:
             procs.append(spawn("grim_engine", engine_cmd))
             time.sleep(0.5)
 
-        viewer_cmd = build_viewer_command(args)
-        viewer_process = spawn("grim_viewer", viewer_cmd, inherit_env=True)
-        procs.append(viewer_process)
         exit_code = viewer_process.process.wait()
     except KeyboardInterrupt:
         print("[run_live_preview] interrupted; shutting down children")
         exit_code = 130
     finally:
         shutdown_processes(procs)
+        if ready_path and ready_path.exists():
+            try:
+                ready_path.unlink()
+            except OSError as err:
+                print(
+                    f"[run_live_preview] warning: failed to remove stream ready marker {ready_path}: {err}",
+                    file=sys.stderr,
+                )
 
     sys.exit(exit_code)
 
@@ -173,6 +199,9 @@ def build_capture_command(args) -> List[str]:
     window_id = getattr(args, "window_id", None)
     if window_id:
         command.extend(["--window-id", window_id])
+    stream_ready = getattr(args, "stream_ready_file", None)
+    if stream_ready:
+        command.extend(["--ready-notify", str(stream_ready)])
     return command
 
 
@@ -181,6 +210,9 @@ def build_engine_command(args) -> List[str]:
     if args.release:
         command.append("--release")
     command.extend(["-p", "grim_engine", "--", "--run-lua", "--stream-bind", args.engine_addr])
+    stream_ready = getattr(args, "stream_ready_file", None)
+    if stream_ready:
+        command.extend(["--stream-ready-file", str(stream_ready)])
     return command
 
 

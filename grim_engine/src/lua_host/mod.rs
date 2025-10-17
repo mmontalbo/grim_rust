@@ -51,6 +51,7 @@ pub fn run_boot_sequence(
     movement: Option<MovementOptions>,
     hotspot: Option<HotspotOptions>,
     stream: Option<StreamServer>,
+    stream_ready: Option<PathBuf>,
 ) -> Result<(EngineRunSummary, Option<EngineRuntime>)> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
@@ -100,6 +101,7 @@ pub fn run_boot_sequence(
     context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
 
     let mut stream = stream;
+    let mut stream_ready = stream_ready;
 
     if let Some(options) = movement.as_ref() {
         movement::simulate_movement(&lua, &context_handle, options, stream.as_ref())?;
@@ -132,6 +134,7 @@ pub fn run_boot_sequence(
             stream,
             summary.events.len(),
             summary.coverage.clone(),
+            stream_ready.take().map(StreamReadyGate::new),
         )
     });
 
@@ -153,6 +156,7 @@ pub struct EngineRuntime {
     manny_handle: Option<u32>,
     manny_actor_id: Option<String>,
     sent_initial: bool,
+    start_gate: Option<StreamReadyGate>,
 }
 
 impl EngineRuntime {
@@ -163,6 +167,7 @@ impl EngineRuntime {
         stream: StreamServer,
         initial_event_cursor: usize,
         initial_coverage: BTreeMap<String, u64>,
+        start_gate: Option<StreamReadyGate>,
     ) -> Self {
         Self {
             lua,
@@ -179,11 +184,17 @@ impl EngineRuntime {
             manny_handle: None,
             manny_actor_id: None,
             sent_initial: false,
+            start_gate,
         }
     }
 
     pub fn run(mut self) -> Result<()> {
         const FRAME_DURATION: Duration = Duration::from_millis(33);
+
+        if let Some(gate) = self.start_gate.take() {
+            gate.wait()?;
+        }
+
         loop {
             let tick_start = Instant::now();
             context::drive_active_scripts(&self.lua, self.context.clone(), 8, 32)?;
@@ -191,9 +202,7 @@ impl EngineRuntime {
 
             if let Some(update) = self.build_state_update()? {
                 if let Err(err) = self.stream.send_state_update(update) {
-                    eprintln!(
-                        "[grim_engine] failed to publish state update: {err:?}; continuing"
-                    );
+                    eprintln!("[grim_engine] failed to publish state update: {err:?}; continuing");
                 }
             }
 
@@ -336,5 +345,45 @@ impl EngineRuntime {
         };
 
         Ok(Some(update))
+    }
+}
+
+struct StreamReadyGate {
+    path: PathBuf,
+}
+
+impl StreamReadyGate {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn wait(self) -> Result<()> {
+        if self.path.exists() {
+            eprintln!(
+                "[grim_engine] live stream ready marker already present at {}",
+                self.path.display()
+            );
+            return Ok(());
+        }
+
+        let mut last_log = Instant::now();
+        let log_interval = Duration::from_secs(5);
+        loop {
+            if self.path.exists() {
+                eprintln!(
+                    "[grim_engine] live stream ready marker observed at {}",
+                    self.path.display()
+                );
+                return Ok(());
+            }
+            if last_log.elapsed() >= log_interval {
+                eprintln!(
+                    "[grim_engine] waiting for retail capture to signal readiness via {}",
+                    self.path.display()
+                );
+                last_log = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 }
