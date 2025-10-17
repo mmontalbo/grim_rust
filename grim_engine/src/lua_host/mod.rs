@@ -99,6 +99,9 @@ pub fn run_boot_sequence(
     context::override_boot_stubs(&lua, context.clone())?;
     context::call_boot(&lua, context.clone())?;
     context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
+    if context::ensure_intro_cutscene(&lua, context.clone())? {
+        context::drive_active_scripts(&lua, context.clone(), 16, 64)?;
+    }
 
     let mut stream = stream;
     let mut stream_ready = stream_ready;

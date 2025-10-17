@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::Result;
@@ -108,6 +109,8 @@ struct EngineRuntimeState {
     active_setup: Option<String>,
     active_hotspot: Option<String>,
     coverage: BTreeMap<String, u64>,
+    active_movie: Option<String>,
+    movie_started_at: Option<Instant>,
 }
 
 impl EngineRuntimeState {
@@ -268,6 +271,16 @@ impl LiveSceneState {
             self.runtime.active_hotspot = Some(hotspot.clone());
         }
 
+        for event in &update.events {
+            if let Some(movie) = event.strip_prefix("cut_scene.fullscreen.start ") {
+                self.runtime.active_movie = Some(movie.to_string());
+                self.runtime.movie_started_at = Some(Instant::now());
+            } else if event.starts_with("cut_scene.fullscreen.end ") {
+                self.runtime.active_movie = None;
+                self.runtime.movie_started_at = None;
+            }
+        }
+
         self.runtime.apply_coverage(&update.coverage);
         self.render_engine_overlay()
     }
@@ -296,6 +309,17 @@ impl LiveSceneState {
 
         if width == 0 || height == 0 {
             return None;
+        }
+
+        if self.runtime.active_movie.is_some() {
+            for pixel in self.overlay_buffer.chunks_mut(4) {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
+            }
+            return Some(EngineFrame {
+                width,
+                height,
+                pixels: &self.overlay_buffer,
+            });
         }
 
         if let Some(projector) = self.scene.camera_projector(width as f32 / height as f32) {

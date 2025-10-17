@@ -1515,26 +1515,8 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     globals.set("Inventory", inventory)?;
 
     let cut_scene = lua.create_table()?;
-    let runtime_clone = context.clone();
-    cut_scene.set(
-        "logos",
-        lua.create_function(move |_, ()| {
-            runtime_clone
-                .borrow_mut()
-                .log_event("cut_scene.logos scheduled");
-            Ok(())
-        })?,
-    )?;
-    let runtime_clone = context.clone();
-    cut_scene.set(
-        "intro",
-        lua.create_function(move |_, ()| {
-            runtime_clone
-                .borrow_mut()
-                .log_event("cut_scene.intro scheduled");
-            Ok(())
-        })?,
-    )?;
+    cut_scene.set("logos", make_cut_scene_logos(lua, context.clone())?)?;
+    cut_scene.set("intro", make_cut_scene_intro(lua, context.clone())?)?;
     globals.set("cut_scene", cut_scene)?;
 
     Ok(())
@@ -3460,10 +3442,10 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
                 .get(0)
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
-            start_movie_context
+            let playing = start_movie_context
                 .borrow_mut()
-                .log_event(format!("cut_scene.fullscreen.start {movie}"));
-            Ok(true)
+                .start_fullscreen_movie(movie);
+            Ok(playing)
         })?,
     )?;
 
@@ -3471,10 +3453,12 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
     globals.set(
         "IsFullscreenMoviePlaying",
         lua.create_function(move |_, _: Variadic<Value>| {
-            movie_state_context
-                .borrow_mut()
-                .log_event("cut_scene.fullscreen.poll".to_string());
-            Ok(false)
+            let mut ctx = movie_state_context.borrow_mut();
+            let playing = ctx.poll_fullscreen_movie();
+            if playing {
+                ctx.log_event("cut_scene.fullscreen.poll".to_string());
+            }
+            Ok(playing)
         })?,
     )?;
 
@@ -4391,6 +4375,53 @@ fn create_single_start_script(
     Ok(func)
 }
 
+fn make_cut_scene_logos<'lua>(
+    lua: &'lua Lua,
+    context: Rc<RefCell<EngineContext>>,
+) -> LuaResult<Function<'lua>> {
+    let logos_context = context;
+    let func = lua.create_function(move |_, ()| {
+        let mut ctx = logos_context.borrow_mut();
+        ctx.record_script_name("cut_scene.logos");
+        ctx.log_event("cut_scene.logos scheduled");
+        ctx.push_cut_scene(Some("cut_scene.logos".to_string()), Vec::new());
+        ctx.pop_cut_scene();
+        Ok(())
+    })?;
+    Ok(func)
+}
+
+fn make_cut_scene_intro<'lua>(
+    lua: &'lua Lua,
+    context: Rc<RefCell<EngineContext>>,
+) -> LuaResult<Function<'lua>> {
+    let intro_context = context;
+    let func = lua.create_function(move |lua_ctx, ()| {
+        {
+            let mut ctx = intro_context.borrow_mut();
+            ctx.record_script_name("cut_scene.intro");
+            ctx.log_event("cut_scene.intro scheduled");
+            ctx.push_cut_scene(Some("cut_scene.intro".to_string()), Vec::new());
+            ctx.push_override("cut_scene.intro_override".to_string());
+            ctx.put_actor_in_set("manny", "Manny", "mo.set");
+            ctx.set_actor_position("manny", "Manny", MANNY_INTRO_START_POS);
+            ctx.set_actor_rotation("manny", "Manny", MANNY_INTRO_FINAL_ROT);
+            ctx.record_current_setup("mo.set", MO_INTRO_SETUP_INDEX);
+            ctx.log_event(format!("set.setup.make mo.set -> {}", MO_INTRO_SETUP_INDEX));
+            ctx.set_actor_position("manny", "Manny", MANNY_INTRO_FINAL_POS);
+            ctx.set_actor_rotation("manny", "Manny", MANNY_INTRO_FINAL_ROT);
+            ctx.actor_at_interest("manny", "Manny");
+            let _ = ctx.pop_override();
+            ctx.pop_cut_scene();
+            ctx.log_event("cut_scene.intro complete");
+        }
+        let globals = lua_ctx.globals();
+        globals.set("time_to_run_intro", false)?;
+        Ok(())
+    })?;
+    Ok(func)
+}
+
 enum ScriptStep {
     Yielded,
     Completed,
@@ -4430,6 +4461,60 @@ pub(crate) fn drive_active_scripts(
         }
     }
     Ok(())
+}
+
+pub(crate) fn ensure_intro_cutscene(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+) -> Result<bool> {
+    let setup_matches = {
+        let state = context.borrow();
+        state
+            .current_setup_for("mo.set")
+            .map(|setup| setup == MO_INTRO_SETUP_INDEX)
+            .unwrap_or(false)
+    };
+    if setup_matches {
+        return Ok(false);
+    }
+
+    let globals = lua.globals();
+    let intro_requested = match globals.get::<_, Value>("time_to_run_intro") {
+        Ok(Value::Boolean(flag)) => flag,
+        Ok(Value::Nil) => true,
+        Ok(_) => true,
+        Err(_) => true,
+    };
+    if !intro_requested {
+        return Ok(false);
+    }
+
+    let start_script: Function = globals
+        .get("start_script")
+        .context("start_script missing while scheduling cut_scene.intro")?;
+    let cut_scene: Table = match globals.get("cut_scene") {
+        Ok(table) => table,
+        Err(_) => {
+            let table = lua.create_table()?;
+            table.set("logos", make_cut_scene_logos(lua, context.clone())?)?;
+            table.set("intro", make_cut_scene_intro(lua, context.clone())?)?;
+            globals.set("cut_scene", table.clone())?;
+            table
+        }
+    };
+    let intro: Function = match cut_scene.get("intro") {
+        Ok(func) => func,
+        Err(_) => {
+            let replacement = make_cut_scene_intro(lua, context.clone())
+                .context("failed to install host intro cutscene")?;
+            cut_scene.set("intro", replacement.clone())?;
+            replacement
+        }
+    };
+
+    let _: u32 = start_script.call((intro,))?;
+    drive_active_scripts(lua, context.clone(), 32, 64)?;
+    Ok(true)
 }
 
 fn resume_script(
@@ -4569,7 +4654,9 @@ use mlua::{
     ThreadStatus, Value, Variadic,
 };
 
-use super::super::types::Vec3;
+use super::super::types::{
+    Vec3, MANNY_INTRO_FINAL_POS, MANNY_INTRO_FINAL_ROT, MANNY_INTRO_START_POS, MO_INTRO_SETUP_INDEX,
+};
 use super::audio::{install_music_scaffold, FOOTSTEP_PROFILES, IM_SOUND_PLAY_COUNT, IM_SOUND_VOL};
 use super::menus::{
     install_boot_warning_menu, install_dialog_scaffold, install_loading_menu, install_menu_common,

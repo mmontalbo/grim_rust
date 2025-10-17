@@ -35,9 +35,9 @@ use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeV
 use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot, SetRuntimeView};
 
 pub(super) use bindings::{
-    call_boot, describe_value, drive_active_scripts, dump_runtime_summary, install_globals,
-    install_package_path, install_render_helpers, load_system_script, override_boot_stubs,
-    split_self, strip_self, value_to_bool, value_to_f32, value_to_string,
+    call_boot, describe_value, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene,
+    install_globals, install_package_path, install_render_helpers, load_system_script,
+    override_boot_stubs, split_self, strip_self, value_to_bool, value_to_f32, value_to_string,
 };
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
@@ -688,6 +688,14 @@ impl EngineContext {
 
     fn clear_overrides(&mut self) {
         self.cutscene_runtime().clear_overrides();
+    }
+
+    fn start_fullscreen_movie(&mut self, movie: String) -> bool {
+        self.cutscene_runtime().start_fullscreen_movie(movie, None)
+    }
+
+    fn poll_fullscreen_movie(&mut self) -> bool {
+        self.cutscene_runtime().poll_fullscreen_movie()
     }
 
     fn begin_dialog_line(&mut self, id: &str, label: &str, line: &str) {

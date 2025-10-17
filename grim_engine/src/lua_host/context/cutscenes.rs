@@ -39,6 +39,14 @@ pub(super) struct OverrideRecord {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct FullscreenMovieState {
+    pub(super) name: String,
+    pub(super) play_yields_remaining: u32,
+}
+
+const DEFAULT_FULLSCREEN_YIELDS: u32 = 6;
+
+#[derive(Debug, Clone)]
 pub(super) struct DialogState {
     pub(super) actor_id: String,
     pub(super) actor_label: String,
@@ -53,6 +61,7 @@ pub(super) struct CutsceneRuntime {
     active_dialog: Option<DialogState>,
     speaking_actor: Option<String>,
     message_active: bool,
+    fullscreen_movie: Option<FullscreenMovieState>,
 }
 
 impl CutsceneRuntime {
@@ -249,6 +258,30 @@ impl CutsceneRuntime {
     pub(super) fn speaking_actor(&self) -> Option<&str> {
         self.speaking_actor.as_deref()
     }
+
+    pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> String {
+        let play_yields = yields.unwrap_or(DEFAULT_FULLSCREEN_YIELDS).max(1);
+        self.fullscreen_movie = Some(FullscreenMovieState {
+            name: movie.clone(),
+            play_yields_remaining: play_yields,
+        });
+        format!("cut_scene.fullscreen.start {movie}")
+    }
+
+    pub(super) fn poll_fullscreen_movie(&mut self) -> (bool, Option<String>) {
+        let Some(state) = self.fullscreen_movie.as_mut() else {
+            return (false, None);
+        };
+
+        if state.play_yields_remaining > 1 {
+            state.play_yields_remaining -= 1;
+            return (true, None);
+        }
+
+        let movie = state.name.clone();
+        self.fullscreen_movie = None;
+        (false, Some(format!("cut_scene.fullscreen.end {movie}")))
+    }
 }
 
 /// Couples cutscene runtime state with the engine event log.
@@ -334,6 +367,20 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
         {
             self.events.push(message);
         }
+    }
+
+    pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
+        let message = self.runtime.start_fullscreen_movie(movie, yields);
+        self.events.push(message);
+        true
+    }
+
+    pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
+        let (active, maybe_message) = self.runtime.poll_fullscreen_movie();
+        if let Some(message) = maybe_message {
+            self.events.push(message);
+        }
+        active
     }
 }
 

@@ -93,6 +93,7 @@ struct EngineStreamState {
     hello: Option<Hello>,
     last_update: Option<StateUpdate>,
     last_update_received: Option<Instant>,
+    active_movie: Option<ActiveMovieStatus>,
 }
 
 struct QueuedFrame {
@@ -105,6 +106,11 @@ struct FrameStats {
     frame_id: u64,
     host_time_ns: u64,
     received_at: Instant,
+}
+
+struct ActiveMovieStatus {
+    name: String,
+    started: Instant,
 }
 
 #[derive(Default)]
@@ -175,6 +181,7 @@ fn main() -> Result<()> {
             hello: None,
             last_update: None,
             last_update_received: None,
+            active_movie: None,
         }
     });
 
@@ -379,6 +386,7 @@ fn drain_engine_events(
                 EngineEvent::State(update) => {
                     stream.last_update_received = Some(Instant::now());
                     stream.last_update = Some(update.clone());
+                    apply_engine_events(stream, &update.events);
                     if let Some(scene) = live_scene.as_mut() {
                         if let Some(frame) = scene.ingest_state_update(&update) {
                             if let Err(err) =
@@ -395,6 +403,7 @@ fn drain_engine_events(
                 EngineEvent::Disconnected { reason } => {
                     eprintln!("[grim_viewer] engine disconnected: {reason}");
                     stream.hello = None;
+                    stream.active_movie = None;
                 }
             },
             Err(TryRecvError::Empty) => break,
@@ -402,6 +411,19 @@ fn drain_engine_events(
                 eprintln!("[grim_viewer] engine stream channel closed");
                 break;
             }
+        }
+    }
+}
+
+fn apply_engine_events(stream: &mut EngineStreamState, events: &[String]) {
+    for event in events {
+        if let Some(movie) = event.strip_prefix("cut_scene.fullscreen.start ") {
+            stream.active_movie = Some(ActiveMovieStatus {
+                name: movie.to_string(),
+                started: Instant::now(),
+            });
+        } else if event.starts_with("cut_scene.fullscreen.end ") {
+            stream.active_movie = None;
         }
     }
 }
@@ -440,11 +462,15 @@ fn update_view_labels(
 
     let engine_label = match engine {
         Some(stream) if stream.hello.is_some() => {
-            if let Some(update) = stream.last_update.as_ref() {
+            let mut label = if let Some(update) = stream.last_update.as_ref() {
                 format!("Rust Engine (seq {})", update.seq)
             } else {
                 "Rust Engine (connected)".to_string()
+            };
+            if let Some(movie) = stream.active_movie.as_ref() {
+                label.push_str(&format!(" ⋅ {}", movie.name));
             }
+            label
         }
         Some(_) => "Rust Engine (offline)".to_string(),
         None => "Rust Engine".to_string(),
@@ -515,6 +541,10 @@ fn update_debug_panel(
                             / 1_000_000.0;
                         lines.push(format!("Frame Δt: {delta_ms:.2} ms"));
                     }
+                }
+                if let Some(movie) = stream.active_movie.as_ref() {
+                    let movie_age = movie.started.elapsed().as_millis();
+                    lines.push(format!("Cutscene: {} ({} ms)", movie.name, movie_age));
                 }
             } else {
                 lines.push("Seq: awaiting updates".to_string());
