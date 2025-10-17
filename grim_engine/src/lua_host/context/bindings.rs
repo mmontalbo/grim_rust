@@ -3438,13 +3438,22 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
     globals.set(
         "StartFullscreenMovie",
         lua.create_function(move |_, args: Variadic<Value>| {
+            fn parse_yields(value: &Value) -> Option<u32> {
+                match value {
+                    Value::Integer(i) if *i >= 0 => Some(*i as u32),
+                    Value::Number(n) if *n >= 0.0 => Some(n.trunc() as u32),
+                    Value::String(text) => text.to_str().ok()?.trim().parse().ok(),
+                    _ => None,
+                }
+            }
             let movie = args
                 .get(0)
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
+            let yields_override = args.get(1).and_then(parse_yields);
             let playing = start_movie_context
                 .borrow_mut()
-                .start_fullscreen_movie(movie);
+                .start_fullscreen_movie(movie, yields_override);
             Ok(playing)
         })?,
     )?;

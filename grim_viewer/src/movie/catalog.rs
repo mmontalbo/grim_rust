@@ -25,6 +25,26 @@ pub struct MovieCatalog {
 impl MovieCatalog {
     pub fn from_root(root: &Path) -> Result<Self> {
         let mut catalog = MovieCatalog::default();
+        catalog.extend_from_root(root)?;
+        Ok(catalog)
+    }
+
+    pub fn from_roots<I, P>(roots: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut catalog = MovieCatalog::default();
+        for root in roots {
+            catalog.extend_from_root(root.as_ref())?;
+        }
+        Ok(catalog)
+    }
+
+    pub fn extend_from_root(&mut self, root: &Path) -> Result<()> {
+        if !root.exists() {
+            return Ok(());
+        }
         for entry in WalkDir::new(root).into_iter() {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -43,12 +63,12 @@ impl MovieCatalog {
                 continue;
             };
             if ext.eq_ignore_ascii_case("snm") {
-                catalog.insert_snm(entry.path());
+                self.insert_snm(entry.path());
             } else if ext.eq_ignore_ascii_case("ogv") {
-                catalog.insert_ogv(entry.path());
+                self.insert_ogv(entry.path());
             }
         }
-        Ok(catalog)
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<&MovieSource> {

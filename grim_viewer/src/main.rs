@@ -385,6 +385,11 @@ fn drain_engine_events(
                     stream.hello = Some(hello);
                 }
                 EngineEvent::State(update) => {
+                    println!(
+                        "[grim_viewer] received engine update events={} seq={}",
+                        update.events.len(),
+                        update.seq
+                    );
                     stream.last_update_received = Some(Instant::now());
                     stream.last_update = Some(update.clone());
                     apply_engine_events(stream, &update.events);
@@ -418,6 +423,7 @@ fn drain_engine_events(
 
 fn apply_engine_events(stream: &mut EngineStreamState, events: &[String]) {
     for event in events {
+        println!("[grim_viewer] engine event: {event}");
         if let Some(movie) = event.strip_prefix("cut_scene.fullscreen.start ") {
             stream.active_movie = Some(ActiveMovieStatus {
                 name: movie.to_string(),

@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 
-COMPONENT_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+COMPONENT_SEGMENT_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,12 +41,20 @@ def lint_message(text: str) -> int:
         return fail("commit message is empty")
 
     first_line = lines[0]
-    match = re.match(r"^([a-z][a-z0-9_]*): (.+)$", first_line)
+    match = re.match(r"^([a-z][a-z0-9_]*(?:\+[a-z][a-z0-9_]*)*): (.+)$", first_line)
     if not match:
-        return fail("first line must match '<component>: <summary>' with lowercase component")
+        return fail(
+            "first line must match '<component>: <summary>' with lowercase component "
+            "(components may be joined with '+')"
+        )
     component, summary = match.groups()
-    if not COMPONENT_PATTERN.match(component):
-        return fail("component must be lowercase alphanumeric/underscore (e.g. grim_viewer, docs, tools)")
+    parts = component.split("+")
+    invalid_parts = [part for part in parts if not COMPONENT_SEGMENT_PATTERN.fullmatch(part)]
+    if invalid_parts:
+        return fail(
+            f"component segments must be lowercase alphanumeric/underscore "
+            f"(invalid: {', '.join(invalid_parts)})"
+        )
     if not summary.strip():
         return fail("summary must not be empty")
 

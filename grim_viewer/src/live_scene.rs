@@ -30,12 +30,16 @@ pub struct LiveSceneConfig {
     pub movement_log: Option<PathBuf>,
     pub hotspot_log: Option<PathBuf>,
     pub active_asset: Option<String>,
-    pub movies_root: Option<PathBuf>,
+    pub movie_roots: Vec<PathBuf>,
 }
 
 impl LiveSceneConfig {
     pub fn from_args(args: &crate::Args) -> Result<Option<Self>> {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        println!(
+            "[grim_viewer] resolving assets relative to {}",
+            repo_root.display()
+        );
 
         let assets_manifest = match args
             .scene_assets_manifest
@@ -84,10 +88,24 @@ impl LiveSceneConfig {
             )
         });
 
-        let movies_root = locate(
-            &repo_root,
-            &["extracted", "artifacts/extracted", "dev-install/extracted"],
-        );
+        let mut movie_roots = Vec::new();
+        for relative in [
+            "dev-install/MoviesHD",
+            "dev-install/Movies",
+            "dev-install/extracted",
+            "extracted",
+            "artifacts/extracted",
+        ] {
+            let path = repo_root.join(relative);
+            if path.exists() {
+                println!(
+                    "[grim_viewer] movie root candidate present: {}",
+                    path.display()
+                );
+                movie_roots.push(path);
+            }
+        }
+        println!("[grim_viewer] movie roots collected: {}", movie_roots.len());
 
         let active_asset = args
             .scene_active_asset
@@ -101,7 +119,7 @@ impl LiveSceneConfig {
             movement_log,
             hotspot_log,
             active_asset,
-            movies_root,
+            movie_roots,
         }))
     }
 }
@@ -158,7 +176,7 @@ pub struct LiveSceneState {
     overlay_buffer: Vec<u8>,
     runtime: EngineRuntimeState,
     manny_index: Option<usize>,
-    movies_root: Option<PathBuf>,
+    movie_roots: Vec<PathBuf>,
     movie_index: MovieCatalog,
     movie_assets: HashMap<String, Arc<SnmFile>>,
     movie_playback: Option<Playback>,
@@ -169,16 +187,42 @@ pub struct LiveSceneState {
 impl LiveSceneState {
     pub fn load(config: LiveSceneConfig) -> Result<Self> {
         let geometry = match config.geometry_snapshot.as_ref() {
-            Some(path) => Some(load_lua_geometry_snapshot(path)?),
+            Some(path) => match load_lua_geometry_snapshot(path) {
+                Ok(snapshot) => Some(snapshot),
+                Err(err) => {
+                    eprintln!(
+                        "[grim_viewer] warning: failed to load geometry snapshot {}: {err:?}",
+                        path.display()
+                    );
+                    None
+                }
+            },
             None => None,
         };
 
-        let mut scene = load_scene_from_timeline(
+        let mut scene = match load_scene_from_timeline(
             &config.timeline_manifest,
             &config.assets_manifest,
             config.active_asset.as_deref(),
             geometry.as_ref(),
-        )?;
+        ) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!(
+                    "[grim_viewer] warning: failed to load Manny timeline {}: {err:?}; falling back to empty scene",
+                    config.timeline_manifest.display()
+                );
+                ViewerScene {
+                    entities: Vec::new(),
+                    position_bounds: None,
+                    timeline: None,
+                    movement: None,
+                    hotspot_events: Vec::new(),
+                    camera: None,
+                    active_setup: None,
+                }
+            }
+        };
 
         let mut movement_trace: Option<MovementTrace> = None;
         if let Some(path) = config.movement_log.as_ref() {
@@ -231,23 +275,34 @@ impl LiveSceneState {
             .map(|plate| plate.pixels.clone())
             .unwrap_or_else(|| COLOR_BACKGROUND_FALLBACK.to_vec());
 
-        let movies_root = config.movies_root.clone();
-        let movie_index = match movies_root.as_ref() {
-            Some(root) => match MovieCatalog::from_root(root) {
+        let movie_roots = config.movie_roots.clone();
+        let movie_root_label = if movie_roots.is_empty() {
+            "<unspecified>".to_string()
+        } else {
+            movie_roots
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !movie_roots.is_empty() {
+            println!("[grim_viewer] scanning movie roots: {}", movie_root_label);
+        }
+        let movie_index = if movie_roots.is_empty() {
+            MovieCatalog::default()
+        } else {
+            match MovieCatalog::from_roots(&movie_roots) {
                 Ok(catalog) => {
                     let stats = catalog.stats();
                     if stats.total == 0 {
                         eprintln!(
                             "[grim_viewer] warning: no fullscreen movies found under {}",
-                            root.display()
+                            movie_root_label
                         );
                     } else {
                         println!(
                             "[grim_viewer] indexed {} movie(s) from {} (SNM: {}, OGV fallback: {})",
-                            stats.total,
-                            root.display(),
-                            stats.snm,
-                            stats.ogv
+                            stats.total, movie_root_label, stats.snm, stats.ogv
                         );
                     }
                     catalog
@@ -255,12 +310,11 @@ impl LiveSceneState {
                 Err(err) => {
                     eprintln!(
                         "[grim_viewer] warning: failed to index movies under {}: {err:?}",
-                        root.display()
+                        movie_root_label
                     );
                     MovieCatalog::default()
                 }
-            },
-            None => MovieCatalog::default(),
+            }
         };
 
         Ok(Self {
@@ -270,7 +324,7 @@ impl LiveSceneState {
             overlay_buffer,
             runtime,
             manny_index,
-            movies_root,
+            movie_roots,
             movie_index,
             movie_assets: HashMap::new(),
             movie_playback: None,
@@ -342,6 +396,10 @@ impl LiveSceneState {
     }
 
     fn start_fullscreen_movie(&mut self, movie: &str, host_time_ns: u64) {
+        println!(
+            "[grim_viewer] start_fullscreen_movie requested: {} at host_time_ns {}",
+            movie, host_time_ns
+        );
         self.runtime.active_movie = Some(movie.to_string());
         self.runtime.movie_started_at = Some(Instant::now());
         self.movie_playback = self.prepare_movie_playback(movie, host_time_ns);
@@ -384,11 +442,15 @@ impl LiveSceneState {
             }
             Ok(None) => {
                 if self.missing_movies.insert(key.clone()) {
-                    let root = self
-                        .movies_root
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "<unspecified>".to_string());
+                    let root = if self.movie_roots.is_empty() {
+                        "<unspecified>".to_string()
+                    } else {
+                        self.movie_roots
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
                     eprintln!(
                         "[grim_viewer] warning: cutscene movie '{}' not found under {}",
                         movie, root

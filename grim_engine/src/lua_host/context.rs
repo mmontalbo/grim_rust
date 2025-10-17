@@ -690,8 +690,9 @@ impl EngineContext {
         self.cutscene_runtime().clear_overrides();
     }
 
-    fn start_fullscreen_movie(&mut self, movie: String) -> bool {
-        self.cutscene_runtime().start_fullscreen_movie(movie, None)
+    fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
+        self.cutscene_runtime()
+            .start_fullscreen_movie(movie, yields)
     }
 
     fn poll_fullscreen_movie(&mut self) -> bool {

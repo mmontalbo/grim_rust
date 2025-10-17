@@ -12,13 +12,19 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence, Tuple
+
+try:
+    import termios  # type: ignore
+except ImportError:  # pragma: no cover - unavailable on non-Unix platforms
+    termios = None  # type: ignore[assignment]
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 VIEWER_PADDING = 24  # keep in sync with grim_viewer/src/layout.rs
 VIEWER_LABEL_HEIGHT = 32  # keep in sync with grim_viewer/src/layout.rs::LABEL_HEIGHT
 VIEWER_LABEL_GAP = 8  # keep in sync with grim_viewer/src/layout.rs::LABEL_GAP
+DEFAULT_RETAIL_TIMEOUT_SECONDS = 20.0
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -106,8 +112,11 @@ def main() -> None:
     ready_path: Optional[Path] = None
     viewer_process: Optional[ManagedProcess] = None
     engine_process: Optional[ManagedProcess] = None
+    capture_process: Optional[ManagedProcess] = None
+    retail_process: Optional[ManagedProcess] = None
     exit_code: int = 0
     layout_ready = False
+    tty_state = capture_tty_state()
     try:
         if not args.no_engine and not args.no_capture:
             ready_path = Path(tempfile.gettempdir()) / f"grim_live_ready_{os.getpid()}_{int(time.time() * 1000)}"
@@ -178,7 +187,13 @@ def main() -> None:
         if viewer_process is None:
             raise RuntimeError("grim_viewer failed to launch")
 
-        exit_code = viewer_process.process.wait()
+        session_timeout = resolve_session_timeout_seconds(args)
+        watchers: List[Tuple[str, Optional[ManagedProcess]]] = [
+            ("grim_engine", engine_process),
+            ("retail_capture", capture_process),
+            ("retail_game", retail_process),
+        ]
+        exit_code = wait_for_session_completion(viewer_process, watchers, session_timeout)
     except KeyboardInterrupt:
         print("[run_live_preview] interrupted; shutting down children")
         exit_code = 130
@@ -195,6 +210,7 @@ def main() -> None:
                     f"[run_live_preview] warning: failed to remove stream ready marker {ready_path}: {err}",
                     file=sys.stderr,
                 )
+        restore_tty_state(tty_state)
 
     sys.exit(exit_code)
 
@@ -550,6 +566,94 @@ def normalize_window_id(raw_id: str) -> tuple[str, int]:
     except ValueError as err:
         raise RuntimeError(f"invalid window id '{raw_id}' (expected hex like 0x3a00007 or decimal)") from err
     return f"0x{value:x}", value
+
+
+def resolve_session_timeout_seconds(args: argparse.Namespace) -> Optional[float]:
+    if not args.launch_retail or args.retail_no_timeout:
+        return None
+    if args.retail_timeout:
+        try:
+            return parse_timeout_to_seconds(args.retail_timeout)
+        except ValueError as err:
+            raise RuntimeError(f"invalid --retail-timeout value '{args.retail_timeout}': {err}") from err
+    return DEFAULT_RETAIL_TIMEOUT_SECONDS
+
+
+def parse_timeout_to_seconds(value: str) -> float:
+    stripped = value.strip().lower()
+    if not stripped:
+        raise ValueError("timeout string is empty")
+    unit_factor = 1.0
+    if stripped[-1].isalpha():
+        suffix = stripped[-1]
+        number_text = stripped[:-1]
+        unit_map = {"s": 1.0, "m": 60.0, "h": 3600.0}
+        if suffix not in unit_map:
+            raise ValueError(f"unsupported unit '{suffix}' (expected s, m, or h)")
+        unit_factor = unit_map[suffix]
+    else:
+        number_text = stripped
+    try:
+        magnitude = float(number_text)
+    except ValueError as err:
+        raise ValueError("failed to parse numeric portion") from err
+    if magnitude < 0:
+        raise ValueError("timeout must be non-negative")
+    return magnitude * unit_factor
+
+
+def wait_for_session_completion(
+    viewer: ManagedProcess,
+    watchers: Sequence[Tuple[str, Optional[ManagedProcess]]],
+    timeout_seconds: Optional[float],
+) -> int:
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    poll_interval = 0.25
+    while True:
+        viewer_code = viewer.process.poll()
+        if viewer_code is not None:
+            return viewer_code
+        for label, managed in watchers:
+            if managed is None:
+                continue
+            code = managed.process.poll()
+            if code is not None:
+                print(
+                    f"[run_live_preview] {label} exited with status {code}; terminating viewer session"
+                )
+                return code
+        if deadline is not None and time.monotonic() >= deadline:
+            print(
+                f"[run_live_preview] session timed out after {timeout_seconds:.1f}s; terminating viewer session"
+            )
+            return 124
+        time.sleep(poll_interval)
+
+
+def capture_tty_state() -> Optional[Any]:
+    if termios is None:
+        return None
+    if not sys.stdin.isatty():
+        return None
+    try:
+        return termios.tcgetattr(sys.stdin.fileno())
+    except termios.error:
+        return None
+
+
+def restore_tty_state(state: Optional[Any]) -> None:
+    if not sys.stdin.isatty():
+        return
+    if termios is None:
+        subprocess.run(["stty", "sane"], check=False)
+        return
+    if state is None:
+        subprocess.run(["stty", "sane"], check=False)
+        return
+    try:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, state)
+    except termios.error:
+        subprocess.run(["stty", "sane"], check=False)
 
 
 def spawn(name: str, command: Sequence[str], foreground: bool = False, inherit_env: bool = False) -> ManagedProcess:

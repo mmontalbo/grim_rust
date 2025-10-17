@@ -49,12 +49,28 @@ ALLOWED_COMPONENTS = _load_workspace_members().union({"tools", "docs"})
 
 
 def validate_component(value: str) -> str:
-    if value not in ALLOWED_COMPONENTS:
-        allowed = ", ".join(sorted(ALLOWED_COMPONENTS))
+    parts = value.split("+")
+    if any(not part for part in parts):
         raise argparse.ArgumentTypeError(
-            f"component must be one of: {allowed} (got {value!r})"
+            f"component string must not contain empty segments (got {value!r})"
         )
-    return value
+
+    invalid = [part for part in parts if part not in ALLOWED_COMPONENTS]
+    if invalid:
+        allowed = ", ".join(sorted(ALLOWED_COMPONENTS))
+        missing = ", ".join(sorted(invalid))
+        raise argparse.ArgumentTypeError(
+            f"component must use only known segments from: {allowed} (invalid: {missing})"
+        )
+
+    # Ensure deterministic ordering when duplicates are provided, but preserve user order otherwise.
+    seen = set()
+    normalized_parts = []
+    for part in parts:
+        if part not in seen:
+            normalized_parts.append(part)
+            seen.add(part)
+    return "+".join(normalized_parts)
 
 
 def parse_args() -> argparse.Namespace:

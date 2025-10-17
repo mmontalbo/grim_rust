@@ -54,6 +54,15 @@ impl PlaneDimensions {
         self.pixel_format
     }
 
+    pub fn pixel_format_label(&self) -> &'static str {
+        match self.pixel_format {
+            pf if pf == th_pixel_fmt_TH_PF_420 => "4:2:0",
+            pf if pf == th_pixel_fmt_TH_PF_422 => "4:2:2",
+            pf if pf == th_pixel_fmt_TH_PF_444 => "4:4:4",
+            _ => "unknown",
+        }
+    }
+
     pub fn width(&self) -> usize {
         self.width
     }

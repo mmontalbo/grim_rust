@@ -1,8 +1,4 @@
-use std::mem::MaybeUninit;
-use std::os::raw::c_char;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{env, fs, mem::MaybeUninit, os::raw::c_char, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use grim_formats::{SnmFile, blocky16::Blocky16Decoder};
@@ -207,6 +203,10 @@ pub struct OgvPlayback {
     rgba_buffer: Vec<u8>,
     frame_cursor: Option<u64>,
     end_of_stream: bool,
+    first_frame_logged: bool,
+    duplicate_notice_logged: bool,
+    rgba_dump_written: bool,
+    frame_dump_dir: Option<PathBuf>,
 }
 
 impl OgvPlayback {
@@ -298,6 +298,49 @@ impl OgvPlayback {
         let yuv_buffer = vec![0u8; yuv_len];
         let rgba_buffer = vec![0u8; rgba_len];
 
+        let frame_dump_dir = match env::var("GRIM_VIEWER_DUMP_OGV_DIR") {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if trimmed.eq_ignore_ascii_case("off") || trimmed == "0" {
+                    None
+                } else {
+                    Some(PathBuf::from(trimmed))
+                }
+            }
+            Err(_) => Some(PathBuf::from("artifacts/movie_frames")),
+        };
+
+        let pixel_format_label = plane_dims.pixel_format_label();
+        match &frame_dump_dir {
+            Some(dir) => println!(
+                "[grim_viewer::movie] {}: Theora {}x{} fmt {} (Y {}x{}, UV {}x{}) buffers=YUV {} bytes RGBA {} bytes; will dump first RGBA frame to {}",
+                name,
+                width_u32,
+                height_u32,
+                pixel_format_label,
+                plane_dims.width(),
+                plane_dims.height(),
+                plane_dims.chroma_width(),
+                plane_dims.chroma_height(),
+                yuv_len,
+                rgba_len,
+                dir.display(),
+            ),
+            None => println!(
+                "[grim_viewer::movie] {}: Theora {}x{} fmt {} (Y {}x{}, UV {}x{}) buffers=YUV {} bytes RGBA {} bytes; RGBA frame dump disabled",
+                name,
+                width_u32,
+                height_u32,
+                pixel_format_label,
+                plane_dims.width(),
+                plane_dims.height(),
+                plane_dims.chroma_width(),
+                plane_dims.chroma_height(),
+                yuv_len,
+                rgba_len,
+            ),
+        }
+
         Ok(Self {
             name,
             file,
@@ -310,6 +353,10 @@ impl OgvPlayback {
             rgba_buffer,
             frame_cursor: None,
             end_of_stream: false,
+            first_frame_logged: false,
+            duplicate_notice_logged: false,
+            rgba_dump_written: false,
+            frame_dump_dir,
         })
     }
 
@@ -371,18 +418,70 @@ impl OgvPlayback {
 
         match rc {
             1 => {
+                let granule = self.current_granule_position();
                 self.convert_yuv_to_rgba();
                 self.increment_frame_index();
+                let frame_index = self.frame_cursor.unwrap_or(0);
+                let total_bytes = self.rgba_buffer.len();
+                let non_zero_bytes = self.rgba_buffer.iter().filter(|&&byte| byte != 0).count();
+                let (min_byte, max_byte) = if total_bytes > 0 {
+                    self.rgba_buffer
+                        .iter()
+                        .fold((u8::MAX, u8::MIN), |(min, max), &value| {
+                            (min.min(value), max.max(value))
+                        })
+                } else {
+                    (0, 0)
+                };
+
+                if !self.first_frame_logged {
+                    println!(
+                        "[grim_viewer::movie] {}: decoded frame {} (tf_readvideo=1, granule={}) RGBA non-zero {}/{} (min={}, max={}) first_pixel={}",
+                        self.name,
+                        frame_index,
+                        granule
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "n/a".into()),
+                        non_zero_bytes,
+                        total_bytes,
+                        min_byte,
+                        max_byte,
+                        self.describe_first_pixel(),
+                    );
+                    self.first_frame_logged = true;
+                }
+
+                if total_bytes > 0 && non_zero_bytes == 0 {
+                    eprintln!(
+                        "[grim_viewer::movie] {}: warning: decoded RGBA frame {} is all zeros",
+                        self.name, frame_index
+                    );
+                }
+
+                self.maybe_dump_rgba_frame();
+
                 Ok(FrameStatus::Advanced)
             }
             0 => {
                 if unsafe { tf_eos(&mut self.file) } != 0 {
+                    let granule = self.current_granule_position();
+                    let was_eos = self.end_of_stream;
                     self.end_of_stream = true;
                     if self.frame_cursor.is_none() {
                         return Err(anyhow!(
                             "Theora movie '{}' reached end-of-stream without yielding a frame",
                             self.name
                         ));
+                    }
+                    if !was_eos {
+                        println!(
+                            "[grim_viewer::movie] {}: reached end-of-stream at frame {:?} (granule={})",
+                            self.name,
+                            self.frame_cursor,
+                            granule
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "n/a".into()),
+                        );
                     }
                     Ok(FrameStatus::EndOfStream)
                 } else {
@@ -392,15 +491,33 @@ impl OgvPlayback {
                             self.name
                         ));
                     }
+                    if !self.duplicate_notice_logged {
+                        let granule = self.current_granule_position();
+                        println!(
+                            "[grim_viewer::movie] {}: tf_readvideo reported duplicate frame (granule={}) -> advancing cursor",
+                            self.name,
+                            granule
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "n/a".into()),
+                        );
+                        self.duplicate_notice_logged = true;
+                    }
                     self.increment_frame_index();
                     Ok(FrameStatus::Duplicate)
                 }
             }
-            other => Err(anyhow!(
-                "Theora decoder for '{}' returned unexpected status {}",
-                self.name,
-                other
-            )),
+            other => {
+                let granule = self
+                    .current_granule_position()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into());
+                Err(anyhow!(
+                    "Theora decoder for '{}' returned unexpected status {} (granule={})",
+                    self.name,
+                    other,
+                    granule
+                ))
+            }
         }
     }
 
@@ -421,6 +538,115 @@ impl OgvPlayback {
             v_plane,
             &mut self.rgba_buffer,
         );
+    }
+
+    fn current_granule_position(&self) -> Option<i64> {
+        if self.file.tstream.is_null() {
+            return None;
+        }
+        let track = self.file.ttrack;
+        if track < 0 {
+            return None;
+        }
+        unsafe {
+            let stream = self.file.tstream.add(track as usize);
+            if stream.is_null() {
+                None
+            } else {
+                Some((*stream).granulepos)
+            }
+        }
+    }
+
+    fn maybe_dump_rgba_frame(&mut self) {
+        if self.rgba_dump_written {
+            return;
+        }
+        let Some(dir) = self.frame_dump_dir.clone() else {
+            return;
+        };
+        if self.frame_cursor.is_none() || self.rgba_buffer.is_empty() {
+            return;
+        }
+        if let Err(err) = fs::create_dir_all(&dir) {
+            eprintln!(
+                "[grim_viewer::movie] {}: failed to create frame dump directory {}: {err:?}",
+                self.name,
+                dir.display()
+            );
+            self.frame_dump_dir = None;
+            return;
+        }
+
+        let frame_index = self.frame_cursor.unwrap_or(0);
+        let stem = Self::sanitize_dump_stem(&self.name);
+        let path = dir.join(format!("{stem}_frame{frame_index:04}.png"));
+
+        match image::save_buffer_with_format(
+            &path,
+            &self.rgba_buffer,
+            self.width,
+            self.height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        ) {
+            Ok(_) => {
+                println!(
+                    "[grim_viewer::movie] {}: wrote RGBA frame {} to {}",
+                    self.name,
+                    frame_index,
+                    path.display()
+                );
+                self.rgba_dump_written = true;
+                self.frame_dump_dir = Some(dir);
+            }
+            Err(err) => {
+                eprintln!(
+                    "[grim_viewer::movie] {}: failed to dump RGBA frame {} to {}: {err:?}",
+                    self.name,
+                    frame_index,
+                    path.display()
+                );
+                self.frame_dump_dir = None;
+            }
+        }
+    }
+
+    fn describe_first_pixel(&self) -> String {
+        if self.rgba_buffer.len() >= 4 {
+            let r = self.rgba_buffer[0];
+            let g = self.rgba_buffer[1];
+            let b = self.rgba_buffer[2];
+            let a = self.rgba_buffer[3];
+            format!("{r},{g},{b},{a}")
+        } else {
+            "n/a".to_string()
+        }
+    }
+
+    fn sanitize_dump_stem(name: &str) -> String {
+        let mut stem = String::new();
+        let mut last_was_sep = false;
+
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                stem.push(ch);
+                last_was_sep = false;
+            } else if matches!(ch, '-' | '_') {
+                stem.push(ch);
+                last_was_sep = true;
+            } else if !last_was_sep {
+                stem.push('_');
+                last_was_sep = true;
+            }
+        }
+
+        let trimmed = stem.trim_matches('_');
+        if trimmed.is_empty() {
+            "ogv_movie".to_string()
+        } else {
+            trimmed.to_string()
+        }
     }
 
     fn status(&self) -> PlaybackStatus {
