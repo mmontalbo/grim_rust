@@ -9,9 +9,11 @@ background renderer, along with the LAB archive structure that stores them.
 ## Asset Containers
 
 Most assets ship inside LucasArts LAB archives (`DATA001.LAB`, `DATA002.LAB`,
-and so on). A manifest produced by `grim_engine --asset-manifest` lists, for each
-asset, the archive path and the byte range that holds it. A decoder reads that
-slice directly; LAB records are not compressed.
+and so on). Earlier iterations exposed `grim_engine --asset-manifest` to list
+each asset’s archive path and byte range; the minimal engine no longer provides
+that CLI. Use `grim_analysis` utilities or a direct LAB dump when you need the
+same offsets. LAB records are not compressed, so reading the slice directly is
+enough for decoders.
 
 ---
 

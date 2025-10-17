@@ -406,7 +406,7 @@ def build_engine_command(args) -> List[str]:
     command = ["cargo", "run"]
     if args.release:
         command.append("--release")
-    command.extend(["-p", "grim_engine", "--", "--run-lua", "--stream-bind", args.engine_addr])
+    command.extend(["-p", "grim_engine", "--", "--stream-bind", args.engine_addr])
     stream_ready = getattr(args, "stream_ready_file", None)
     if stream_ready:
         command.extend(["--stream-ready-file", str(stream_ready)])

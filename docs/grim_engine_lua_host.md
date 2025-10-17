@@ -1,36 +1,34 @@
 # Grim Engine Lua Host Overview
 
-The `grim_engine::lua_host` package now exposes a layered structure so runtime playback,
-viewer tooling, and regression harnesses can share the same bootstrap path without
-reaching into ad-hoc maps.
+The Lua host still carries the full boot pipeline for Manny's intro, but the
+exposed surface was tightened to support the minimal viewer stream only. Use
+this note as a quick map of what remains relevant.
 
 ## Control Flow
-- `run_boot_sequence` (in `lua_host/mod.rs`) stages the resource graph, optional LAB
-  assets, and a fresh `mlua::Lua` runtime. It wires in the scripted scaffolding and
-  returns an `EngineRunSummary` plus access to the context handle.
-- `EngineContextHandle` wraps the internal `EngineContext` state and offers targeted
-  commands (`resolve_actor_handle`, `walk_actor_vector`, `run_scripts`, etc.). Callers no
-  longer borrow the raw `Rc<RefCell<_>>`, which keeps invariants localized to the host.
-- Movement and hotspot demos (`movement.rs`, `hotspot.rs`) now consume the handle and
-  only rely on the public methods. They simulate scripted steps, log events, and surface
-  samples without touching private maps.
+- `run_boot_sequence` (`lua_host/mod.rs`) loads assets, initialises Lua, and
+  drives the boot scripts until we reach the intro playback loop. It returns
+  an `EngineRuntime` only when a GrimStream server was requested.
+- `EngineRuntime::run` advances the Lua scheduler at ~30 Hz, pipes deltas
+  through `StateUpdateBuilder`, and publishes them over the bound stream.
+- `EngineContextHandle` now only exposes the tiny set of helpers needed by
+  `StateUpdateBuilder` (actor lookup, hotspot state, coverage counters).
 
 ## Module Layout
-- `context/audio.rs` collects audio routing state (`MusicState`, `SfxState`,
-  `AudioCallback`) and helper formatting so the main context focuses on gameplay data.
-- `context/geometry.rs` parses and stores sector polygons, set snapshots, and helpers
-  for hit detection.
-- `context/geometry_export.rs` converts a cloned, plain-data snapshot of the engine
-  state into the serialisable `LuaGeometrySnapshot` for viewer tooling.
-- `context/mod.rs` (formerly the monolithic file) retains the runtime bindings,
-  gameplay bookkeeping, and the new `EngineContextHandle`.
+- `context/` holds the gameplay state and binding glue. Many modules remain
+  (actors, sets, script runtime, etc.), but they are currently exercised solely
+  by the intro boot path.
+- `state_update.rs` owns the translation from context state into the
+  serialisable `StateUpdate` payloads used by the viewer.
+- `types.rs` groups lightweight data structures (`Vec3`, seed transforms, etc.)
+  shared between the host and the streaming layer.
 
-## Snapshot Export
-`EngineContext::geometry_snapshot` now clones a lightweight `SnapshotState` and hands it
-to `geometry_export::build_snapshot`. This decouples JSON export from the live context,
-making it easier to reuse the geometry state in future viewers or captured baselines.
+## Out of Scope
+- JSON exporters (`timeline`, `movement`, `geometry`, …) are no longer wired
+  up. Leave the stale helpers in place only if they keep the intro boot alive;
+  rip the rest out when warnings point at them.
+- Hotspot and movement demos are gone from the CLI. If you need them back, pull
+  from history and reintroduce them as focused modules rather than reviving
+  broad entry points.
 
-## Next Steps
-Remaining refactor work includes carving out actor- and menu-specific logic into their
-own modules, expanding unit coverage around the new handle surface, and continuing to
-pay down direct map access inside Lua binding helpers.
+Keep the Lua host changes laser-focused on the intro playback handshake so we
+avoid growing a new surface area before the first playable milestone lands.
