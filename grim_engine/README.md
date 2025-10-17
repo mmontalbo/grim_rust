@@ -34,24 +34,11 @@ state we need to validate the first playable milestone.
   engine changes.
 
 ## Regression Harnesses
-- `cargo test -p grim_engine -- movement_regression` boots the Lua host,
-  records a fresh movement log, and verifies it matches
-  `tests/fixtures/movement_demo_log.json`. Refresh the fixture with
-  `cargo run -p grim_engine -- --run-lua --movement-demo --movement-log-json \
-  grim_engine/tests/fixtures/movement_demo_log.json` whenever the intended walk
-  path changes (document the reasoning in the commit that updates it).
 - `cargo test -p grim_engine -- runtime_regression` boots the Lua host, records
   the Manny movement demo, runs the computer hotspot interaction, and captures
-  depth/timeline artefacts. The test compares the freshly captured outputs
-  against the committed baselines in `tools/tests/`. Refresh them via
-  `cargo run -p grim_engine -- --timeline-json tools/tests/manny_office_timeline.json`
-  followed by
-  `cargo run -p grim_engine -- --run-lua --movement-demo \
-  --movement-log-json tools/tests/movement_log.json \
-  --hotspot-demo computer --audio-log-json tools/tests/hotspot_audio.json \
-  --depth-stats-json tools/tests/manny_office_depth_stats.json` whenever the
-  intended walk path, audio sequence, or depth metrics change (call out the
-  rationale when updating the snapshots).
+  fresh artefacts. It now acts as a smoke test: we assert that the run produces
+  the expected hotspot markers and non-empty movement/audio/depth/timeline
+  outputs without diffing against historical fixtures.
 - `cargo test -p grim_engine -- hotspot_demo_logs_hotspot_markers` exercises
   the computer hotspot demo and asserts the Lua host emits the expected
   approach/start/end markers. Run
