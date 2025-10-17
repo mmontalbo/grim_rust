@@ -45,3 +45,8 @@ flow and prototype modern tooling around it.
   pre-populates the blank line and bullet blocks so you only fill in the text.
 - Component-specific workflows and deep dives live in each crate's README; start
   there when modifying a particular subsystem.
+
+## License
+- Distributed under the terms of the GNU General Public License, version 2.0 or
+  (at your option) any later version. See `COPYING` for the full text and
+  retain upstream notices when importing reference implementations.
