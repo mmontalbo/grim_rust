@@ -7,9 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use crossbeam_channel::{self, Receiver as ControlReceiver, Sender as ControlSender};
 use grim_stream::{
-    decode_payload, encode_message, Control, Hello, MessageHeader, MessageKind, StateUpdate,
-    HEADER_LEN,
+    decode_payload, encode_message, Control, Hello, MessageHeader, MessageKind, MovieControl,
+    MovieStart, StateUpdate, HEADER_LEN,
 };
 use thiserror::Error;
 
@@ -26,12 +27,43 @@ enum Command {
     Shutdown,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+/// Control-plane movie response tagged with the connection generation.
+pub struct MovieControlEvent {
+    pub generation: u64,
+    pub control: MovieControl,
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+/// Convenience wrapper for awaiting movie control responses from the viewer.
+pub struct MovieControlEvents {
+    receiver: ControlReceiver<MovieControlEvent>,
+}
+
+#[allow(dead_code)]
+impl MovieControlEvents {
+    pub fn try_recv(&self) -> Result<MovieControlEvent, crossbeam_channel::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    pub fn recv(&self) -> Result<MovieControlEvent, crossbeam_channel::RecvError> {
+        self.receiver.recv()
+    }
+
+    pub fn receiver(&self) -> ControlReceiver<MovieControlEvent> {
+        self.receiver.clone()
+    }
+}
+
 /// Broadcasts GrimStream messages to a single connected subscriber.
 pub struct StreamServer {
     sender: Sender<Command>,
     start: Instant,
     seq: AtomicU64,
     state: Arc<ConnectionState>,
+    movie_controls: ControlReceiver<MovieControlEvent>,
 }
 
 impl StreamServer {
@@ -43,11 +75,12 @@ impl StreamServer {
         let (tx, rx) = mpsc::channel();
         let build_info = build.unwrap_or_else(|| "dev".to_string());
         let state = Arc::new(ConnectionState::new());
+        let (movie_tx, movie_rx) = crossbeam_channel::unbounded();
         thread::Builder::new()
             .name("grim_stream".to_string())
             .spawn({
                 let state = state.clone();
-                move || worker_loop(listener, rx, build_info, state)
+                move || worker_loop(listener, rx, build_info, state, movie_tx)
             })
             .context("spawning stream worker thread")?;
         Ok(Self {
@@ -55,6 +88,7 @@ impl StreamServer {
             start: Instant::now(),
             seq: AtomicU64::new(0),
             state,
+            movie_controls: movie_rx,
         })
     }
 
@@ -72,9 +106,29 @@ impl StreamServer {
             .map_err(|_| StreamError::Disconnected)
     }
 
+    #[allow(dead_code)]
+    /// Publish a `MovieStart` announcement when the viewer is ready.
+    pub fn send_movie_start(&self, start: MovieStart) -> Result<(), StreamError> {
+        if !self.state.is_ready() {
+            return Ok(());
+        }
+        let bytes = encode_message(MessageKind::MovieStart, &start)?;
+        self.sender
+            .send(Command::Send(bytes))
+            .map_err(|_| StreamError::Disconnected)
+    }
+
     pub fn viewer_gate(&self) -> StreamViewerGate {
         StreamViewerGate {
             state: self.state.clone(),
+        }
+    }
+
+    #[allow(dead_code)]
+    /// Obtain a handle for consuming `MovieControl` responses from the viewer.
+    pub fn movie_controls(&self) -> MovieControlEvents {
+        MovieControlEvents {
+            receiver: self.movie_controls.clone(),
         }
     }
 }
@@ -90,6 +144,7 @@ fn worker_loop(
     rx: Receiver<Command>,
     build_info: String,
     state: Arc<ConnectionState>,
+    movie_tx: ControlSender<MovieControlEvent>,
 ) {
     let mut stream: Option<TcpStream> = None;
     let mut control_worker: Option<thread::JoinHandle<()>> = None;
@@ -133,9 +188,10 @@ fn worker_loop(
                             match conn.try_clone() {
                                 Ok(clone) => {
                                     let state_clone = state.clone();
+                                    let control_tx = movie_tx.clone();
                                     match thread::Builder::new()
                                         .name("grim_stream_ctrl".to_string())
-                                        .spawn(move || control_loop(clone, state_clone))
+                                        .spawn(move || control_loop(clone, state_clone, control_tx))
                                     {
                                         Ok(handle) => {
                                             control_worker = Some(handle);
@@ -201,8 +257,13 @@ fn write_all(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn control_loop(mut stream: TcpStream, state: Arc<ConnectionState>) {
+fn control_loop(
+    mut stream: TcpStream,
+    state: Arc<ConnectionState>,
+    movie_tx: ControlSender<MovieControlEvent>,
+) {
     let mut header_bytes = [0u8; HEADER_LEN];
+    let generation = state.generation();
     loop {
         if let Err(err) = stream.read_exact(&mut header_bytes) {
             if err.kind() != io::ErrorKind::UnexpectedEof {
@@ -242,6 +303,24 @@ fn control_loop(mut stream: TcpStream, state: Arc<ConnectionState>) {
                 }
             },
             MessageKind::Heartbeat => {}
+            MessageKind::MovieControl => match decode_payload::<MovieControl>(&payload) {
+                Ok(control) => {
+                    let event = MovieControlEvent {
+                        generation,
+                        control,
+                    };
+                    if let Err(err) = movie_tx.send(event) {
+                        eprintln!(
+                            "[grim_engine::stream] dropping movie control event: send failed: {err:?}"
+                        );
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[grim_engine::stream] movie control decode failed: {err:?}; skipping"
+                    );
+                }
+            },
             other => {
                 eprintln!(
                     "[grim_engine::stream] ignoring inbound message kind {other:?} on control plane"
@@ -302,6 +381,10 @@ impl ConnectionState {
 
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
+    }
+
+    fn generation(&self) -> u64 {
+        self.inner.lock().unwrap().generation
     }
 }
 

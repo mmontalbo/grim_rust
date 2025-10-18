@@ -17,7 +17,7 @@ use anyhow::Result;
 use clap::Parser;
 use display::ViewerState;
 use env_logger;
-use grim_stream::{Frame, Hello, StateUpdate, StreamConfig};
+use grim_stream::{Frame, Hello, MovieAction, StateUpdate, StreamConfig};
 use live_scene::LiveSceneState;
 use live_stream::{EngineEvent, RetailEvent, spawn_engine_client, spawn_retail_client};
 use wgpu::SurfaceError;
@@ -358,6 +358,28 @@ fn drain_engine_events(
                         {
                             eprintln!("[grim_viewer] engine frame upload failed: {err:?}");
                         }
+                    }
+                }
+                EngineEvent::MovieStart(start) => {
+                    println!(
+                        "[grim_viewer] engine movie start: {} ({}x{} @ {:.2}fps, source={:?})",
+                        start.name, start.width, start.height, start.fps, start.source
+                    );
+                    stream.active_movie = Some(ActiveMovieStatus {
+                        name: start.name.clone(),
+                        started: Instant::now(),
+                    });
+                }
+                EngineEvent::MovieControl(control) => {
+                    println!(
+                        "[grim_viewer] engine movie control: {} -> {:?}",
+                        control.name, control.action
+                    );
+                    if matches!(
+                        control.action,
+                        MovieAction::Finished | MovieAction::Skipped | MovieAction::Error
+                    ) {
+                        stream.active_movie = None;
                     }
                 }
                 EngineEvent::Timeline(mark) => {

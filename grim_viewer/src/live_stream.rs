@@ -5,8 +5,9 @@ use std::thread;
 use std::time::Duration;
 
 use grim_stream::{
-    Control, Frame, HEADER_LEN, Hello, MessageHeader, MessageKind, PROTOCOL_VERSION, ProtocolError,
-    StateUpdate, StreamConfig, Telemetry, TimelineMark, decode_payload, encode_message,
+    Control, Frame, HEADER_LEN, Hello, MessageHeader, MessageKind, MovieControl, MovieStart,
+    PROTOCOL_VERSION, ProtocolError, StateUpdate, StreamConfig, Telemetry, TimelineMark,
+    decode_payload, encode_message,
 };
 use thiserror::Error;
 
@@ -29,6 +30,8 @@ pub enum EngineEvent {
     Connected(Hello),
     ViewerReady,
     State(StateUpdate),
+    MovieStart(MovieStart),
+    MovieControl(MovieControl),
     Timeline(TimelineMark),
     ProtocolError(String),
     Disconnected { reason: String },
@@ -200,6 +203,30 @@ fn engine_session(stream: &mut TcpStream, tx: &Sender<EngineEvent>) -> Result<()
                     break;
                 }
             }
+            MessageKind::MovieStart => match decode_payload::<MovieStart>(&payload) {
+                Ok(start) => {
+                    if tx.send(EngineEvent::MovieStart(start)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::ProtocolError(format!(
+                        "movie start decode error: {err}"
+                    )));
+                }
+            },
+            MessageKind::MovieControl => match decode_payload::<MovieControl>(&payload) {
+                Ok(control) => {
+                    if tx.send(EngineEvent::MovieControl(control)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::ProtocolError(format!(
+                        "movie control decode error: {err}"
+                    )));
+                }
+            },
             MessageKind::TimelineMark => match decode_payload::<TimelineMark>(&payload) {
                 Ok(mark) => {
                     if tx.send(EngineEvent::Timeline(mark)).is_err() {
