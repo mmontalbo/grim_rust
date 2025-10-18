@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::thread;
 
 use anyhow::{Context, Result, anyhow};
@@ -214,6 +215,16 @@ fn dispatch_frame(sample: gst::Sample, event_tx: &Sender<MoviePlaybackEvent>) ->
         .ok_or_else(|| anyhow!("sample missing caps"))?;
     let info =
         VideoInfo::from_caps(caps).map_err(|err| anyhow!("invalid caps for sample: {err:?}"))?;
+    static LOG_VIDEO_INFO: Once = Once::new();
+    LOG_VIDEO_INFO.call_once(|| {
+        println!(
+            "[grim_viewer] movie sample caps format={:?} size={}x{} stride={:?}",
+            info.format(),
+            info.width(),
+            info.height(),
+            info.stride()
+        );
+    });
 
     let buffer = sample
         .buffer()

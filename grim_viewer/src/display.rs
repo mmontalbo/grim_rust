@@ -1,5 +1,9 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use bytemuck::{Pod, Zeroable, cast_slice};
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{OnceLock, mpsc};
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -43,7 +47,18 @@ pub struct ViewerState {
     retail_label_overlay: TextOverlay,
     engine_label_overlay: TextOverlay,
     debug_lines: Vec<String>,
+    frame_dump_done: bool,
 }
+
+struct PendingFrameDump {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+    path: PathBuf,
+}
+
+static FRAME_DUMP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 impl ViewerState {
     pub async fn new(window: std::sync::Arc<Window>, width: u32, height: u32) -> Result<Self> {
@@ -177,8 +192,109 @@ impl ViewerState {
             }
         }
 
+        let pending_dump = self.maybe_prepare_frame_dump(&frame, &mut encoder);
         self.queue.submit(std::iter::once(encoder.finish()));
+        if let Some(dump) = pending_dump {
+            if let Err(err) = self.finish_frame_dump(dump) {
+                eprintln!("[grim_viewer] failed to dump frame: {err:?}");
+            }
+        }
         frame.present();
+        Ok(())
+    }
+
+    fn maybe_prepare_frame_dump(
+        &mut self,
+        frame: &wgpu::SurfaceTexture,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<PendingFrameDump> {
+        if self.frame_dump_done {
+            return None;
+        }
+        let Some(path) = frame_dump_path() else {
+            return None;
+        };
+        let width = self.config.width;
+        let height = self.config.height;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let bytes_per_pixel = 4u32;
+        let unpadded_row_bytes = width.saturating_mul(bytes_per_pixel);
+        let padded_row_bytes = align_to(unpadded_row_bytes, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer_size = padded_row_bytes as u64 * height as u64;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grim-viewer-frame-dump"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &frame.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row_bytes),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.frame_dump_done = true;
+        Some(PendingFrameDump {
+            buffer,
+            width,
+            height,
+            padded_bytes_per_row: padded_row_bytes,
+            path,
+        })
+    }
+
+    fn finish_frame_dump(&self, dump: PendingFrameDump) -> Result<()> {
+        let slice = dump.buffer.slice(..);
+        let (sender, receiver) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        let map_result = receiver
+            .recv()
+            .context("frame dump buffer map channel closed")?;
+        map_result.context("frame dump buffer map failed")?;
+
+        let data = slice.get_mapped_range();
+        let mut file = File::create(&dump.path)
+            .with_context(|| anyhow!("failed to create frame dump at {}", dump.path.display()))?;
+        let header = format!("P6\n{} {}\n255\n", dump.width, dump.height);
+        file.write_all(header.as_bytes())
+            .context("failed to write frame dump header")?;
+
+        let row_bytes = dump.width as usize * 4;
+        let padded_row = dump.padded_bytes_per_row as usize;
+        for row in 0..dump.height as usize {
+            let offset = row * padded_row;
+            let row_slice = &data[offset..offset + row_bytes];
+            for pixel in row_slice.chunks_exact(4) {
+                file.write_all(&pixel[..3])
+                    .context("failed to write frame dump pixels")?;
+            }
+        }
+        drop(data);
+        dump.buffer.unmap();
+        println!(
+            "[grim_viewer] frame dump written to {}",
+            dump.path.display()
+        );
         Ok(())
     }
 
@@ -407,7 +523,7 @@ impl ViewerState {
         texture_height: u32,
     ) -> Result<Self> {
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width: window_size.width.max(1),
             height: window_size.height.max(1),
@@ -641,6 +757,7 @@ impl ViewerState {
             retail_label_overlay,
             engine_label_overlay,
             debug_lines: Vec::new(),
+            frame_dump_done: false,
         })
     }
 
@@ -792,6 +909,19 @@ fn repack_rows(row_bytes: usize, stride: usize, rows: usize, data: &[u8]) -> Vec
         output[dst_offset..dst_offset + row_bytes].copy_from_slice(&data[src_offset..end]);
     }
     output
+}
+
+fn frame_dump_path() -> Option<PathBuf> {
+    FRAME_DUMP_PATH
+        .get_or_init(|| std::env::var_os("GRIM_DUMP_FRAME").map(PathBuf::from))
+        .clone()
+}
+
+fn align_to(value: u32, alignment: u32) -> u32 {
+    if alignment == 0 {
+        return value;
+    }
+    ((value + alignment - 1) / alignment) * alignment
 }
 
 struct MovieRenderer {
