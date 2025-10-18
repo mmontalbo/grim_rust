@@ -33,6 +33,8 @@ pub enum MessageKind {
     TimelineMark = 0x0006,
     Control = 0x0007,
     Heartbeat = 0x0008,
+    MovieStart = 0x0009,
+    MovieControl = 0x000A,
 }
 
 /// Control-plane messages exchanged alongside the primary stream.
@@ -105,6 +107,8 @@ impl TryFrom<u16> for MessageKind {
             0x0006 => Ok(Self::TimelineMark),
             0x0007 => Ok(Self::Control),
             0x0008 => Ok(Self::Heartbeat),
+            0x0009 => Ok(Self::MovieStart),
+            0x000A => Ok(Self::MovieControl),
             _ => Err(()),
         }
     }
@@ -182,6 +186,54 @@ pub struct TimelineMark {
 pub struct CoverageCounter {
     pub key: String,
     pub value: u64,
+}
+
+/// Location where a movie asset is sourced from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MovieSource {
+    Remastered,
+    Classic,
+    Fallback,
+}
+
+/// Announces that the engine is about to start a fullscreen movie.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MovieStart {
+    /// Logical movie identifier (e.g. "logos", "intro").
+    pub name: String,
+    /// Pixel width of the decoded content.
+    pub width: u32,
+    /// Pixel height of the decoded content.
+    pub height: u32,
+    /// Nominal playback rate in frames per second.
+    pub fps: f32,
+    /// Location the viewer should load frames from.
+    pub source: MovieSource,
+    /// Path relative to the install root (used for remastered assets).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
+}
+
+/// Possible control responses for a fullscreen movie.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MovieAction {
+    Finished,
+    Skipped,
+    Error,
+    Ack,
+}
+
+/// Viewer -> engine notification describing movie lifecycle updates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MovieControl {
+    /// Logical movie identifier (matches the [`MovieStart::name`]).
+    pub name: String,
+    pub action: MovieAction,
+    /// Optional human-readable details (e.g. error description).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 fn vec_is_empty<T>(vec: &Vec<T>) -> bool {
@@ -292,5 +344,36 @@ mod tests {
                 assert_eq!(features, vec!["test".to_string()]);
             }
         }
+    }
+
+    #[test]
+    fn movie_start_round_trips() {
+        let start = MovieStart {
+            name: "logos".to_string(),
+            width: 1920,
+            height: 1080,
+            fps: 24.0,
+            source: MovieSource::Remastered,
+            relative_path: Some("MoviesHD/logos.ogv".to_string()),
+        };
+        let bytes = encode_message(MessageKind::MovieStart, &start).unwrap();
+        let (header, payload) = decode_envelope(&bytes).unwrap();
+        assert_eq!(header.kind, MessageKind::MovieStart);
+        let decoded: MovieStart = decode_payload(payload).unwrap();
+        assert_eq!(decoded, start);
+    }
+
+    #[test]
+    fn movie_control_round_trips() {
+        let control = MovieControl {
+            name: "logos".to_string(),
+            action: MovieAction::Finished,
+            message: None,
+        };
+        let bytes = encode_message(MessageKind::MovieControl, &control).unwrap();
+        let (header, payload) = decode_envelope(&bytes).unwrap();
+        assert_eq!(header.kind, MessageKind::MovieControl);
+        let decoded: MovieControl = decode_payload(payload).unwrap();
+        assert_eq!(decoded, control);
     }
 }
