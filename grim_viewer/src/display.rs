@@ -23,9 +23,10 @@ pub struct ViewerState {
     retail_sampler: wgpu::Sampler,
     retail_texture_size: (u32, u32),
     engine_bind_group: wgpu::BindGroup,
-    engine_texture: wgpu::Texture,
-    engine_texture_view: wgpu::TextureView,
-    engine_texture_size: (u32, u32),
+    _engine_texture: wgpu::Texture,
+    _engine_texture_view: wgpu::TextureView,
+    _engine_texture_size: (u32, u32),
+    movie_renderer: MovieRenderer,
     frame_aspect: f32,
     layout: ViewerLayout,
     retail_rect: Rect,
@@ -150,7 +151,11 @@ impl ViewerState {
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
 
             render_pass.set_vertex_buffer(0, self.engine_vertex_buffer.slice(..));
-            render_pass.set_bind_group(0, &self.engine_bind_group, &[]);
+            if self.movie_renderer.is_visible() {
+                render_pass.set_bind_group(0, self.movie_renderer.bind_group(), &[]);
+            } else {
+                render_pass.set_bind_group(0, &self.engine_bind_group, &[]);
+            }
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
 
             if self.debug_panel_overlay.is_visible() {
@@ -244,6 +249,7 @@ impl ViewerState {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn upload_engine_frame(&mut self, width: u32, height: u32, data: &[u8]) -> Result<()> {
         if width == 0 || height == 0 {
             return Ok(());
@@ -265,13 +271,13 @@ impl ViewerState {
             ));
         }
 
-        if (width, height) != self.engine_texture_size {
+        if (width, height) != self._engine_texture_size {
             self.recreate_engine_texture(width, height)?;
         }
 
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &self.engine_texture,
+                texture: &self._engine_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -289,6 +295,29 @@ impl ViewerState {
             },
         );
         Ok(())
+    }
+
+    pub fn upload_movie_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        stride_bytes: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        self.movie_renderer.upload_frame(
+            &self.device,
+            &self.queue,
+            &self.bind_group_layout,
+            &self.retail_sampler,
+            width,
+            height,
+            stride_bytes,
+            data,
+        )
+    }
+
+    pub fn hide_movie(&mut self) {
+        self.movie_renderer.hide();
     }
 
     pub fn set_frame_dimensions(&mut self, width: u32, height: u32) {
@@ -573,6 +602,7 @@ impl ViewerState {
             create_vertex_buffer_for_rect(&device, window_size, retail_label_rect, "retail-label");
         let engine_label_vertex_buffer =
             create_vertex_buffer_for_rect(&device, window_size, engine_label_rect, "engine-label");
+        let movie_renderer = MovieRenderer::new(&device, &bind_group_layout, &retail_sampler)?;
 
         Ok(Self {
             window,
@@ -591,9 +621,10 @@ impl ViewerState {
             retail_sampler,
             retail_texture_size: (texture_width, texture_height),
             engine_bind_group,
-            engine_texture,
-            engine_texture_view,
-            engine_texture_size: (1, 1),
+            _engine_texture: engine_texture,
+            _engine_texture_view: engine_texture_view,
+            _engine_texture_size: (1, 1),
+            movie_renderer,
             frame_aspect,
             layout,
             retail_rect: layout.retail_view,
@@ -636,11 +667,12 @@ impl ViewerState {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn recreate_engine_texture(&mut self, width: u32, height: u32) -> Result<()> {
         let (texture, texture_view) = create_texture(&self.device, width, height)?;
-        self.engine_texture = texture;
-        self.engine_texture_view = texture_view;
-        self.engine_texture_size = (width, height);
+        self._engine_texture = texture;
+        self._engine_texture_view = texture_view;
+        self._engine_texture_size = (width, height);
 
         self.engine_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("grim-viewer-engine-bind-group"),
@@ -648,7 +680,7 @@ impl ViewerState {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.engine_texture_view),
+                    resource: wgpu::BindingResource::TextureView(&self._engine_texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -760,6 +792,157 @@ fn repack_rows(row_bytes: usize, stride: usize, rows: usize, data: &[u8]) -> Vec
         output[dst_offset..dst_offset + row_bytes].copy_from_slice(&data[src_offset..end]);
     }
     output
+}
+
+struct MovieRenderer {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    size: (u32, u32),
+    visible: bool,
+}
+
+impl MovieRenderer {
+    fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+    ) -> Result<Self> {
+        let (texture, view) = create_texture(device, 1, 1)?;
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grim-viewer-movie-bind-group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        Ok(Self {
+            texture,
+            view,
+            bind_group,
+            size: (1, 1),
+            visible: false,
+        })
+    }
+
+    fn upload_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        width: u32,
+        height: u32,
+        stride_bytes: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        if width == 0 || height == 0 {
+            self.visible = false;
+            return Ok(());
+        }
+
+        if (width, height) != self.size {
+            self.recreate_texture(device, layout, sampler, width, height)?;
+        }
+
+        let row_bytes = width
+            .checked_mul(4)
+            .ok_or_else(|| anyhow!("movie frame width overflow: {}", width))?
+            as usize;
+        let stride = if stride_bytes == 0 {
+            row_bytes
+        } else {
+            stride_bytes as usize
+        };
+        if stride < row_bytes {
+            return Err(anyhow!(
+                "movie stride {stride} smaller than row bytes {row_bytes}"
+            ));
+        }
+        if data.len() < stride * height as usize {
+            return Err(anyhow!(
+                "movie frame data {} smaller than expected {}",
+                data.len(),
+                stride * height as usize
+            ));
+        }
+
+        let upload = if stride == row_bytes {
+            FrameUpload::Borrowed(&data[..row_bytes * height as usize])
+        } else {
+            FrameUpload::Owned(repack_rows(row_bytes, stride, height as usize, data))
+        };
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            upload.bytes(),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes as u32),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.visible = true;
+        Ok(())
+    }
+
+    fn recreate_texture(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let (texture, view) = create_texture(device, width, height)?;
+        self.texture = texture;
+        self.view = view;
+        self.size = (width, height);
+        self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grim-viewer-movie-bind-group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        Ok(())
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn hide(&mut self) {
+        self.visible = false;
+    }
+
+    fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
 }
 
 enum FrameUpload<'a> {

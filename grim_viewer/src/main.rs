@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         mpsc::{Receiver, TryRecvError},
@@ -9,19 +10,21 @@ use std::{
 
 mod display;
 mod layout;
-mod live_scene;
 mod live_stream;
+mod movie;
 mod overlay;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::Parser;
+use crossbeam_channel::TryRecvError as CrossbeamTryRecvError;
 use display::ViewerState;
 use env_logger;
-use grim_stream::{Frame, Hello, MovieAction, StateUpdate, StreamConfig};
-use live_scene::LiveSceneState;
+use grim_stream::{Frame, Hello, MovieAction, MovieControl, MovieStart, StateUpdate, StreamConfig};
 use live_stream::{
-    EngineCommandSender, EngineEvent, RetailEvent, spawn_engine_client, spawn_retail_client,
+    EngineCommand, EngineCommandSender, EngineEvent, RetailEvent, spawn_engine_client,
+    spawn_retail_client,
 };
+use movie::{MoviePlayback, MoviePlaybackEvent};
 use wgpu::SurfaceError;
 use winit::{
     dpi::PhysicalSize,
@@ -35,12 +38,16 @@ use winit::{
 #[command(about = "Live GrimStream viewer", version)]
 struct Args {
     /// GrimStream endpoint that publishes retail frames (host:port)
-    #[arg(long, default_value = "127.0.0.1:17400")]
+    #[arg(long, default_value = "127.0.0.1:17400", conflicts_with = "no_retail")]
     retail_stream: String,
 
     /// Optional GrimStream endpoint that publishes engine state updates
     #[arg(long)]
     engine_stream: Option<String>,
+
+    /// Disable the retail capture stream and focus on the engine viewport only
+    #[arg(long)]
+    no_retail: bool,
 
     /// Initial window width in pixels
     #[arg(long, default_value_t = 1280)]
@@ -52,21 +59,46 @@ struct Args {
 }
 
 struct RetailStreamState {
-    rx: Receiver<RetailEvent>,
+    rx: Option<Receiver<RetailEvent>>,
+    enabled: bool,
     config: Option<StreamConfig>,
     hello: Option<Hello>,
     pending_frames: VecDeque<QueuedFrame>,
     last_frame: Option<FrameStats>,
 }
 
+impl RetailStreamState {
+    fn with_receiver(rx: Receiver<RetailEvent>) -> Self {
+        Self {
+            rx: Some(rx),
+            enabled: true,
+            config: None,
+            hello: None,
+            pending_frames: VecDeque::new(),
+            last_frame: None,
+        }
+    }
+
+    fn disabled() -> Self {
+        Self {
+            rx: None,
+            enabled: false,
+            config: None,
+            hello: None,
+            pending_frames: VecDeque::new(),
+            last_frame: None,
+        }
+    }
+}
+
 struct EngineStreamState {
     rx: Receiver<EngineEvent>,
-    #[allow(dead_code)]
     command_tx: EngineCommandSender,
     hello: Option<Hello>,
     last_update: Option<StateUpdate>,
     last_update_received: Option<Instant>,
     active_movie: Option<ActiveMovieStatus>,
+    install_root: PathBuf,
 }
 
 struct QueuedFrame {
@@ -84,6 +116,23 @@ struct FrameStats {
 struct ActiveMovieStatus {
     name: String,
     started: Instant,
+    playback: MoviePlayback,
+    status: MovieDisplayStatus,
+    frames_rendered: u64,
+}
+
+enum MovieDisplayStatus {
+    Playing,
+    Skipping,
+}
+
+impl MovieDisplayStatus {
+    fn as_label(&self) -> &'static str {
+        match self {
+            MovieDisplayStatus::Playing => "playing",
+            MovieDisplayStatus::Skipping => "skipping",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -111,25 +160,19 @@ fn main() -> Result<()> {
         args.window_height,
     ))?;
 
-    let mut live_scene = LiveSceneState::new();
-    if let Some(frame) = live_scene.compose_frame() {
-        if let Err(err) = viewer.upload_engine_frame(frame.width, frame.height, frame.pixels) {
-            eprintln!("[grim_viewer] warning: failed to upload initial engine overlay: {err:?}");
-        }
-    }
-
-    let mut retail_stream = RetailStreamState {
-        rx: spawn_retail_client(args.retail_stream.clone()),
-        config: None,
-        hello: None,
-        pending_frames: VecDeque::new(),
-        last_frame: None,
+    let mut retail_stream = if args.no_retail {
+        println!(
+            "[grim_viewer] retail stream disabled (window {}x{})",
+            args.window_width, args.window_height
+        );
+        RetailStreamState::disabled()
+    } else {
+        println!(
+            "[grim_viewer] retail stream -> {} (window {}x{})",
+            args.retail_stream, args.window_width, args.window_height
+        );
+        RetailStreamState::with_receiver(spawn_retail_client(args.retail_stream.clone()))
     };
-
-    println!(
-        "[grim_viewer] retail stream -> {} (window {}x{})",
-        args.retail_stream, args.window_width, args.window_height
-    );
 
     let mut engine_stream = args.engine_stream.as_ref().map(|addr| {
         println!("[grim_viewer] engine stream -> {addr}");
@@ -141,6 +184,7 @@ fn main() -> Result<()> {
             last_update: None,
             last_update_received: None,
             active_movie: None,
+            install_root: movie_install_root(),
         }
     });
 
@@ -172,7 +216,9 @@ fn main() -> Result<()> {
                         ..
                     } => {
                         if !handle_sync_key(&key_event, &mut controls) {
-                            // no-op for now
+                            if !handle_movie_key(&key_event, engine_stream.as_mut()) {
+                                // no-op for now
+                            }
                         }
                     }
                     WindowEvent::RedrawRequested => match viewer.render() {
@@ -186,7 +232,8 @@ fn main() -> Result<()> {
             }
             Event::AboutToWait => {
                 drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
-                drain_engine_events(engine_stream.as_mut(), &mut live_scene, &mut viewer);
+                drain_engine_events(engine_stream.as_mut(), &mut viewer);
+                pump_movie_playback(engine_stream.as_mut(), &mut viewer);
                 update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
                 update_debug_panel(
                     &mut viewer,
@@ -208,8 +255,18 @@ fn drain_retail_events(
     viewer: &mut ViewerState,
     controls: &mut SyncControls,
 ) {
+    if !stream.enabled {
+        controls.diff_enabled = false;
+        controls.pending_steps = 0;
+        return;
+    }
+
+    let Some(rx) = stream.rx.as_ref() else {
+        return;
+    };
+
     loop {
-        match stream.rx.try_recv() {
+        match rx.try_recv() {
             Ok(event) => match event {
                 RetailEvent::Connecting { addr, attempt } => {
                     if attempt > 1 {
@@ -319,11 +376,7 @@ fn present_frame(stream: &mut RetailStreamState, viewer: &mut ViewerState, queue
     });
 }
 
-fn drain_engine_events(
-    stream: Option<&mut EngineStreamState>,
-    live_scene: &mut LiveSceneState,
-    viewer: &mut ViewerState,
-) {
+fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut ViewerState) {
     let Some(stream) = stream else {
         return;
     };
@@ -357,25 +410,32 @@ fn drain_engine_events(
                     );
                     stream.last_update_received = Some(Instant::now());
                     stream.last_update = Some(update.clone());
-                    apply_engine_events(stream, &update.events);
-                    if let Some(frame) = live_scene.ingest_state_update(&update) {
-                        if let Err(err) =
-                            viewer.upload_engine_frame(frame.width, frame.height, frame.pixels)
-                        {
-                            eprintln!("[grim_viewer] engine frame upload failed: {err:?}");
-                        }
-                    }
                 }
                 EngineEvent::MovieStart(start) => {
-                    println!(
-                        "[grim_viewer] engine movie start: {} (path={})",
-                        start.name,
-                        start.relative_path.as_deref().unwrap_or("<none>")
-                    );
-                    stream.active_movie = Some(ActiveMovieStatus {
-                        name: start.name.clone(),
-                        started: Instant::now(),
-                    });
+                    let path_result = begin_movie_playback(stream, viewer, &start);
+                    match path_result {
+                        Ok(path) => {
+                            println!(
+                                "[grim_viewer] engine movie start: {} (path={})",
+                                start.name,
+                                path.display()
+                            );
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[grim_viewer] movie playback setup failed for {}: {err:?}",
+                                start.name
+                            );
+                            notify_movie_control(
+                                &stream.command_tx,
+                                &start.name,
+                                MovieAction::Error,
+                                Some(err.to_string()),
+                            );
+                            viewer.hide_movie();
+                            stream.active_movie = None;
+                        }
+                    }
                 }
                 EngineEvent::MovieControl(control) => {
                     println!(
@@ -386,6 +446,7 @@ fn drain_engine_events(
                         control.action,
                         MovieAction::Finished | MovieAction::Skipped | MovieAction::Error
                     ) {
+                        viewer.hide_movie();
                         stream.active_movie = None;
                     }
                 }
@@ -401,6 +462,7 @@ fn drain_engine_events(
                 EngineEvent::Disconnected { reason } => {
                     eprintln!("[grim_viewer] engine disconnected: {reason}");
                     stream.hello = None;
+                    viewer.hide_movie();
                     stream.active_movie = None;
                 }
             },
@@ -413,18 +475,213 @@ fn drain_engine_events(
     }
 }
 
-fn apply_engine_events(stream: &mut EngineStreamState, events: &[String]) {
-    for event in events {
-        println!("[grim_viewer] engine event: {event}");
-        if let Some(movie) = event.strip_prefix("cut_scene.fullscreen.start ") {
-            stream.active_movie = Some(ActiveMovieStatus {
-                name: movie.to_string(),
-                started: Instant::now(),
-            });
-        } else if event.starts_with("cut_scene.fullscreen.end ") {
-            stream.active_movie = None;
-        }
+fn begin_movie_playback(
+    stream: &mut EngineStreamState,
+    viewer: &mut ViewerState,
+    start: &MovieStart,
+) -> Result<PathBuf> {
+    viewer.hide_movie();
+    if stream.active_movie.is_some() {
+        stream.active_movie = None;
     }
+
+    let path = resolve_movie_path(&stream.install_root, start)?;
+    let playback = MoviePlayback::new(&path)?;
+
+    println!(
+        "[grim_viewer] starting movie playback {} -> {}",
+        start.name,
+        path.display()
+    );
+
+    stream.active_movie = Some(ActiveMovieStatus {
+        name: start.name.clone(),
+        started: Instant::now(),
+        playback,
+        status: MovieDisplayStatus::Playing,
+        frames_rendered: 0,
+    });
+
+    Ok(path)
+}
+
+fn resolve_movie_path(install_root: &Path, start: &MovieStart) -> Result<PathBuf> {
+    if let Some(relative) = start.relative_path.as_ref() {
+        let candidate = install_root.join(relative);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(anyhow!("movie file not found at {}", candidate.display()));
+    }
+
+    let fallback_name = start.name.to_lowercase();
+    let fallback = install_root
+        .join("MoviesHD")
+        .join(format!("{fallback_name}.ogv"));
+    if fallback.is_file() {
+        return Ok(fallback);
+    }
+
+    Err(anyhow!(
+        "movie {} missing relative path and fallback {} not found",
+        start.name,
+        fallback.display()
+    ))
+}
+
+fn notify_movie_control(
+    tx: &EngineCommandSender,
+    name: &str,
+    action: MovieAction,
+    message: Option<String>,
+) {
+    let control = MovieControl {
+        name: name.to_string(),
+        action: action.clone(),
+        message,
+    };
+    if let Err(err) = tx.send(EngineCommand::MovieControl(control)) {
+        eprintln!(
+            "[grim_viewer] failed to send movie control {:?} for {}: {err:?}",
+            action, name
+        );
+    }
+}
+
+fn pump_movie_playback(stream: Option<&mut EngineStreamState>, viewer: &mut ViewerState) {
+    let Some(stream) = stream else {
+        return;
+    };
+    let mut completion: Option<(String, MovieAction, Option<String>, u64)> = None;
+    if let Some(active) = stream.active_movie.as_mut() {
+        loop {
+            match active.playback.try_recv() {
+                Ok(MoviePlaybackEvent::Frame(frame)) => {
+                    if let Err(err) = viewer.upload_movie_frame(
+                        frame.width,
+                        frame.height,
+                        frame.stride,
+                        &frame.pixels,
+                    ) {
+                        eprintln!(
+                            "[grim_viewer] failed to upload movie frame for {}: {err:?}",
+                            active.name
+                        );
+                        completion = Some((
+                            active.name.clone(),
+                            MovieAction::Error,
+                            Some(format!("viewer upload failed: {err}")),
+                            active.frames_rendered,
+                        ));
+                        break;
+                    }
+                    if active.frames_rendered == 0 {
+                        println!(
+                            "[grim_viewer] first movie frame received for {}",
+                            active.name
+                        );
+                    }
+                    active.frames_rendered = active.frames_rendered.saturating_add(1);
+                    if !matches!(active.status, MovieDisplayStatus::Skipping) {
+                        active.status = MovieDisplayStatus::Playing;
+                    }
+                }
+                Ok(MoviePlaybackEvent::Finished) => {
+                    completion = Some((
+                        active.name.clone(),
+                        MovieAction::Finished,
+                        None,
+                        active.frames_rendered,
+                    ));
+                    break;
+                }
+                Ok(MoviePlaybackEvent::Skipped) => {
+                    completion = Some((
+                        active.name.clone(),
+                        MovieAction::Skipped,
+                        None,
+                        active.frames_rendered,
+                    ));
+                    break;
+                }
+                Ok(MoviePlaybackEvent::Error(message)) => {
+                    completion = Some((
+                        active.name.clone(),
+                        MovieAction::Error,
+                        Some(message),
+                        active.frames_rendered,
+                    ));
+                    break;
+                }
+                Err(CrossbeamTryRecvError::Empty) => break,
+                Err(CrossbeamTryRecvError::Disconnected) => {
+                    completion = Some((
+                        active.name.clone(),
+                        MovieAction::Error,
+                        Some("movie pipeline disconnected".to_string()),
+                        active.frames_rendered,
+                    ));
+                    break;
+                }
+            }
+        }
+    } else {
+        return;
+    }
+
+    if let Some((name, action, message, frames)) = completion {
+        println!(
+            "[grim_viewer] movie {} completed with {:?}{} (frames={})",
+            name,
+            action,
+            message
+                .as_ref()
+                .map(|msg| format!(" ({msg})"))
+                .unwrap_or_default(),
+            frames
+        );
+        if frames == 0 {
+            println!(
+                "[grim_viewer] warning: movie {} ended without delivering any frames",
+                name
+            );
+        }
+        viewer.hide_movie();
+        notify_movie_control(&stream.command_tx, &name, action, message);
+        stream.active_movie = None;
+    }
+}
+
+fn request_movie_skip(stream: &mut EngineStreamState) -> bool {
+    let Some(active) = stream.active_movie.as_mut() else {
+        return false;
+    };
+    println!("[grim_viewer] skip requested for movie {}", active.name);
+    active.status = MovieDisplayStatus::Skipping;
+    active.playback.skip();
+    true
+}
+
+fn handle_movie_key(event: &KeyEvent, engine_stream: Option<&mut EngineStreamState>) -> bool {
+    let Some(stream) = engine_stream else {
+        return false;
+    };
+    match event.logical_key.as_ref() {
+        Key::Character(symbol) if matches!(symbol.as_ref(), "s" | "S") => {
+            request_movie_skip(stream)
+        }
+        _ => false,
+    }
+}
+
+fn movie_install_root() -> PathBuf {
+    if let Some(path) = std::env::var_os("GRIM_INSTALL_PATH") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("DEV_INSTALL_PATH") {
+        return PathBuf::from(path);
+    }
+    PathBuf::from("dev-install")
 }
 
 fn update_window_title(window: &winit::window::Window, controls: &SyncControls) {
@@ -448,7 +705,9 @@ fn update_view_labels(
     retail: &RetailStreamState,
     engine: Option<&EngineStreamState>,
 ) {
-    let retail_label = if retail.hello.is_some() {
+    let retail_label = if !retail.enabled {
+        "Retail Capture (disabled)".to_string()
+    } else if retail.hello.is_some() {
         if let Some(frame) = retail.last_frame.as_ref() {
             format!("Retail Capture (frame {})", frame.frame_id)
         } else {
@@ -467,7 +726,7 @@ fn update_view_labels(
                 "Rust Engine (connected)".to_string()
             };
             if let Some(movie) = stream.active_movie.as_ref() {
-                label.push_str(&format!(" ⋅ {}", movie.name));
+                label.push_str(&format!(" ⋅ {} [{}]", movie.name, movie.status.as_label()));
             }
             label
         }
@@ -495,32 +754,40 @@ fn update_debug_panel(
     };
     lines.push("Session Status".to_string());
     lines.push(format!("Mode: {mode_label}"));
-    lines.push(format!(
-        "Diff overlay: {}",
-        if controls.diff_enabled { "on" } else { "off" }
-    ));
+    let diff_label = if !retail.enabled {
+        "off (retail disabled)".to_string()
+    } else if controls.diff_enabled {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    };
+    lines.push(format!("Diff overlay: {diff_label}"));
 
     lines.push(String::new());
     lines.push("Retail Stream".to_string());
-    if let Some(frame) = retail.last_frame.as_ref() {
-        let age_ms = Instant::now()
-            .saturating_duration_since(frame.received_at)
-            .as_millis();
-        lines.push(format!("Frame: {} (age {} ms)", frame.frame_id, age_ms));
-    } else if retail.hello.is_some() {
-        lines.push("Frame: pending".to_string());
+    if !retail.enabled {
+        lines.push("Status: disabled".to_string());
     } else {
-        lines.push("Status: offline".to_string());
-    }
-    if let Some(config) = retail.config.as_ref() {
-        let fps_label = config
-            .nominal_fps
-            .map(|fps| format!(" @ {:.1} fps", fps))
-            .unwrap_or_default();
-        lines.push(format!(
-            "Config: {}x{}{}",
-            config.width, config.height, fps_label
-        ));
+        if let Some(frame) = retail.last_frame.as_ref() {
+            let age_ms = Instant::now()
+                .saturating_duration_since(frame.received_at)
+                .as_millis();
+            lines.push(format!("Frame: {} (age {} ms)", frame.frame_id, age_ms));
+        } else if retail.hello.is_some() {
+            lines.push("Frame: pending".to_string());
+        } else {
+            lines.push("Status: offline".to_string());
+        }
+        if let Some(config) = retail.config.as_ref() {
+            let fps_label = config
+                .nominal_fps
+                .map(|fps| format!(" @ {:.1} fps", fps))
+                .unwrap_or_default();
+            lines.push(format!(
+                "Config: {}x{}{}",
+                config.width, config.height, fps_label
+            ));
+        }
     }
 
     lines.push(String::new());
@@ -533,7 +800,7 @@ fn update_debug_panel(
                     .map(|ts| Instant::now().saturating_duration_since(ts).as_millis())
                     .unwrap_or(0);
                 lines.push(format!("Seq: {} (age {} ms)", update.seq, age_ms));
-                if controls.diff_enabled {
+                if controls.diff_enabled && retail.enabled {
                     if let Some(frame) = retail.last_frame.as_ref() {
                         let delta_ms = (update.host_time_ns as i128 - frame.host_time_ns as i128)
                             as f64
@@ -543,7 +810,12 @@ fn update_debug_panel(
                 }
                 if let Some(movie) = stream.active_movie.as_ref() {
                     let movie_age = movie.started.elapsed().as_millis();
-                    lines.push(format!("Cutscene: {} ({} ms)", movie.name, movie_age));
+                    lines.push(format!(
+                        "Cutscene: {} [{}; {} ms]",
+                        movie.name,
+                        movie.status.as_label(),
+                        movie_age
+                    ));
                 }
             } else {
                 lines.push("Seq: awaiting updates".to_string());

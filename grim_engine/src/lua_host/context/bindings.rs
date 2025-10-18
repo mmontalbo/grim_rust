@@ -4476,6 +4476,7 @@ pub(crate) fn drive_active_scripts(
 pub(crate) fn ensure_intro_cutscene(
     lua: &Lua,
     context: Rc<RefCell<EngineContext>>,
+    defer_playback: bool,
 ) -> Result<bool> {
     let setup_matches = {
         let state = context.borrow();
@@ -4523,7 +4524,9 @@ pub(crate) fn ensure_intro_cutscene(
     };
 
     let _: u32 = start_script.call((intro,))?;
-    drive_active_scripts(lua, context.clone(), 32, 64)?;
+    if !defer_playback {
+        drive_active_scripts(lua, context.clone(), 32, 64)?;
+    }
     Ok(true)
 }
 

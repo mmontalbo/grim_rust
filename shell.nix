@@ -67,8 +67,17 @@ let
     '';
   };
 
+  gstPackages = [
+    pkgs.gst_all_1.gstreamer
+    pkgs.gst_all_1.gst-plugins-base
+    pkgs.gst_all_1.gst-plugins-good
+    pkgs.gst_all_1.gst-plugins-bad
+    pkgs.gst_all_1.gst-libav
+  ];
+
 in pkgs.mkShell {
-  packages = with pkgs; [
+  packages = with pkgs; (
+    [
     scummvmTools      # extraction tooling for reference data
     lua32             # legacy runtime matching the retail game's Lua 3.x lineage
     lua5_1            # many scripts target classic Lua semantics
@@ -108,7 +117,9 @@ in pkgs.mkShell {
     xorg.libXxf86vm
     xorg.libXtst
     xorg.xwininfo
-  ];
+    ]
+    ++ gstPackages
+  );
 
   shellHook = ''
     export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
@@ -126,7 +137,16 @@ in pkgs.mkShell {
       pkgs.xorg.libXinerama
       pkgs.xorg.libXxf86vm
       pkgs.xorg.libXtst
+      (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
+      (pkgs.lib.getLib pkgs.gst_all_1.gst-plugins-base)
+      (pkgs.lib.getLib pkgs.gst_all_1.gst-plugins-good)
+      (pkgs.lib.getLib pkgs.gst_all_1.gst-plugins-bad)
+      (pkgs.lib.getLib pkgs.gst_all_1.gst-libav)
     ]}:$LD_LIBRARY_PATH"
+
+    export GST_PLUGIN_SYSTEM_PATH_1_0="${pkgs.lib.concatStringsSep ":" (map (pkg: "${pkgs.lib.getLib pkg}/lib/gstreamer-1.0") gstPackages)}"
+    export GST_PLUGIN_PATH="$GST_PLUGIN_SYSTEM_PATH_1_0"
+    export GST_PLUGIN_SCANNER="${pkgs.gst_all_1.gstreamer}/libexec/gstreamer-1.0/gst-plugin-scanner"
 
     if command -v git >/dev/null 2>&1; then
       REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"

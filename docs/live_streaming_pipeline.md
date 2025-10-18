@@ -5,9 +5,12 @@ coverage tracking, and retail telemetry alongside the viewer. That experiment
 has been shelved while we focus on the minimal intro playback loop.
 
 ## What Still Exists
-- `tools/run_live_preview.py` launches the viewer, the trimmed `grim_engine`
-  binary, and (optionally) the retail capture helper. It is the only supported
-  way to drive the live intro preview today.
+- `tools/run_movie_debug.py` starts the minimal `grim_engine` + `grim_viewer`
+  pair, skips the retail capture path, and waits for the live-stream handshake.
+  It is the quickest way to focus on movie playback while iterating.
+- `tools/run_live_preview.py` still launches the viewer, the trimmed
+  `grim_engine` binary, and (optionally) the retail capture helper when you
+  need the full capture loop.
 - `grim_engine` exposes a GrimStream socket when invoked with `--stream-bind`.
   The stream only carries the intro playback state needed for the viewer UI.
 - The viewer still understands the GrimStream handshake and renders a minimal
@@ -24,15 +27,33 @@ has been shelved while we focus on the minimal intro playback loop.
 ## Recommended Flow
 
 ```
+python tools/run_movie_debug.py [--engine-verbose] [--release]
+```
+
+The helper binds the engine to `127.0.0.1:17500`, launches the viewer with
+`--no-retail`, and tails `/tmp/live_preview.log` until the engine reports
+`viewer_ready.open`. Viewer logs now call out when the movie pipeline boots,
+when the first frame arrives, and how many frames were uploaded before a
+Finished/Skipped/Error control is sent back to the engine.
+
+Use the classic, full pipeline when you also need retail capture or window
+automation:
+
+```
 python tools/run_live_preview.py [--no-capture] [--release]
 ```
 
-The script wraps all coordination (stream ready files, window sizing, optional
-retail boot). If you need a raw engine run, invoke
+`run_live_preview.py` still wraps all coordination (stream ready files, window
+sizing, optional retail boot). If you need a raw engine run, invoke
 
 ```
 cargo run -p grim_engine -- --stream-bind 127.0.0.1:17500
 ```
+
+The startup delay in `run_live_preview.py` comes from two checkpoints: it polls
+`xdotool`/`xwininfo` until the retail window is available (skip with
+`--no-capture`) and it tails `/tmp/live_preview.log` for the `viewer_ready.open`
+log line so the engine only advances once the viewer acknowledges the stream.
 
 but be aware that nothing writes artefacts to disk anymore.
 

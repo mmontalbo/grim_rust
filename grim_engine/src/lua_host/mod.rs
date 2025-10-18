@@ -80,7 +80,10 @@ pub fn run_boot_sequence(
     context::override_boot_stubs(&lua, context.clone())?;
     context::call_boot(&lua, context.clone())?;
     context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
-    if context::ensure_intro_cutscene(&lua, context.clone())? {
+    let defer_intro_playback = !headless && stream.is_some();
+    if !defer_intro_playback
+        && context::ensure_intro_cutscene(&lua, context.clone(), defer_intro_playback)?
+    {
         context::drive_active_scripts(&lua, context.clone(), 16, 64)?;
     }
 
@@ -115,6 +118,7 @@ pub fn run_boot_sequence(
             initial_event_cursor,
             initial_coverage.clone(),
             start_gate,
+            defer_intro_playback,
         ))
     } else {
         None
@@ -136,6 +140,7 @@ pub struct EngineRuntime {
     viewer_gate: Option<StreamViewerGate>,
     movie_controls: Option<MovieControlEvents>,
     log_file: Option<File>,
+    defer_intro_cutscene: bool,
 }
 
 impl EngineRuntime {
@@ -148,6 +153,7 @@ impl EngineRuntime {
         initial_event_cursor: usize,
         initial_coverage: BTreeMap<String, u64>,
         start_gate: Option<StreamReadyGate>,
+        defer_intro_cutscene: bool,
     ) -> Self {
         let stream = stream.map(Rc::new);
         {
@@ -175,6 +181,7 @@ impl EngineRuntime {
             viewer_gate,
             movie_controls,
             log_file: open_live_preview_log(),
+            defer_intro_cutscene,
         }
     }
 
@@ -182,6 +189,13 @@ impl EngineRuntime {
         const FRAME_DURATION: Duration = Duration::from_millis(33);
 
         self.await_live_preview_handshake()?;
+
+        if self.defer_intro_cutscene {
+            if context::ensure_intro_cutscene(&self.lua, self.context.clone(), false)? {
+                context::drive_active_scripts(&self.lua, self.context.clone(), 16, 64)?;
+            }
+            self.defer_intro_cutscene = false;
+        }
 
         loop {
             let tick_start = Instant::now();
