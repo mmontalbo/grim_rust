@@ -19,7 +19,9 @@ use display::ViewerState;
 use env_logger;
 use grim_stream::{Frame, Hello, MovieAction, StateUpdate, StreamConfig};
 use live_scene::LiveSceneState;
-use live_stream::{EngineEvent, RetailEvent, spawn_engine_client, spawn_retail_client};
+use live_stream::{
+    EngineCommandSender, EngineEvent, RetailEvent, spawn_engine_client, spawn_retail_client,
+};
 use wgpu::SurfaceError;
 use winit::{
     dpi::PhysicalSize,
@@ -59,6 +61,8 @@ struct RetailStreamState {
 
 struct EngineStreamState {
     rx: Receiver<EngineEvent>,
+    #[allow(dead_code)]
+    command_tx: EngineCommandSender,
     hello: Option<Hello>,
     last_update: Option<StateUpdate>,
     last_update_received: Option<Instant>,
@@ -129,8 +133,10 @@ fn main() -> Result<()> {
 
     let mut engine_stream = args.engine_stream.as_ref().map(|addr| {
         println!("[grim_viewer] engine stream -> {addr}");
+        let client = spawn_engine_client(addr.clone());
         EngineStreamState {
-            rx: spawn_engine_client(addr.clone()),
+            rx: client.events,
+            command_tx: client.commands,
             hello: None,
             last_update: None,
             last_update_received: None,

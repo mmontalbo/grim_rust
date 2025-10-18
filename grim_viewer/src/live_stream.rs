@@ -1,9 +1,12 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+use crossbeam_channel::{self, RecvTimeoutError};
 use grim_stream::{
     Control, Frame, HEADER_LEN, Hello, MessageHeader, MessageKind, MovieControl, MovieStart,
     PROTOCOL_VERSION, ProtocolError, StateUpdate, StreamConfig, Telemetry, TimelineMark,
@@ -37,6 +40,20 @@ pub enum EngineEvent {
     Disconnected { reason: String },
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum EngineCommand {
+    MovieControl(MovieControl),
+}
+
+pub type EngineCommandSender = crossbeam_channel::Sender<EngineCommand>;
+type EngineCommandReceiver = crossbeam_channel::Receiver<EngineCommand>;
+
+pub struct EngineClient {
+    pub events: Receiver<EngineEvent>,
+    pub commands: EngineCommandSender,
+}
+
 pub fn spawn_retail_client(addr: String) -> Receiver<RetailEvent> {
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
@@ -46,13 +63,17 @@ pub fn spawn_retail_client(addr: String) -> Receiver<RetailEvent> {
     rx
 }
 
-pub fn spawn_engine_client(addr: String) -> Receiver<EngineEvent> {
+pub fn spawn_engine_client(addr: String) -> EngineClient {
     let (tx, rx) = mpsc::channel();
+    let (command_tx, command_rx) = crossbeam_channel::unbounded();
     thread::Builder::new()
         .name("grim_stream_engine".to_string())
-        .spawn(move || engine_loop(addr, tx))
+        .spawn(move || engine_loop(addr, tx, command_rx))
         .expect("spawn engine stream thread");
-    rx
+    EngineClient {
+        events: rx,
+        commands: command_tx,
+    }
 }
 
 fn retail_loop(addr: String, tx: Sender<RetailEvent>) {
@@ -92,7 +113,7 @@ fn retail_loop(addr: String, tx: Sender<RetailEvent>) {
     }
 }
 
-fn engine_loop(addr: String, tx: Sender<EngineEvent>) {
+fn engine_loop(addr: String, tx: Sender<EngineEvent>, commands: EngineCommandReceiver) {
     let mut attempt: u32 = 0;
     loop {
         attempt = attempt.wrapping_add(1);
@@ -113,10 +134,41 @@ fn engine_loop(addr: String, tx: Sender<EngineEvent>) {
                         "failed to enable TCP_NODELAY: {err}"
                     )));
                 }
+                let connected = Arc::new(AtomicBool::new(true));
+                let writer_handle = match stream.try_clone() {
+                    Ok(writer_stream) => {
+                        let command_rx = commands.clone();
+                        let tx_clone = tx.clone();
+                        let alive_flag = connected.clone();
+                        Some(
+                            thread::Builder::new()
+                                .name("grim_stream_engine_tx".to_string())
+                                .spawn(move || {
+                                    engine_command_loop(
+                                        writer_stream,
+                                        command_rx,
+                                        tx_clone,
+                                        alive_flag,
+                                    )
+                                })
+                                .expect("spawn engine stream tx thread"),
+                        )
+                    }
+                    Err(err) => {
+                        let _ = tx.send(EngineEvent::ProtocolError(format!(
+                            "failed to clone engine stream for writer: {err}"
+                        )));
+                        None
+                    }
+                };
                 if let Err(err) = engine_session(&mut stream, &tx) {
                     let _ = tx.send(EngineEvent::Disconnected {
                         reason: err.to_string(),
                     });
+                }
+                connected.store(false, Ordering::SeqCst);
+                if let Some(handle) = writer_handle {
+                    let _ = handle.join();
                 }
             }
             Err(err) => {
@@ -256,6 +308,38 @@ fn read_message(stream: &mut TcpStream) -> Result<(MessageHeader, Vec<u8>), Stre
     let mut payload = vec![0u8; header.length as usize];
     stream.read_exact(&mut payload)?;
     Ok((header, payload))
+}
+
+fn engine_command_loop(
+    mut stream: TcpStream,
+    commands: EngineCommandReceiver,
+    tx: Sender<EngineEvent>,
+    alive: Arc<AtomicBool>,
+) {
+    while alive.load(Ordering::SeqCst) {
+        match commands.recv_timeout(Duration::from_millis(50)) {
+            Ok(EngineCommand::MovieControl(control)) => {
+                match encode_message(MessageKind::MovieControl, &control) {
+                    Ok(bytes) => {
+                        if let Err(err) = stream.write_all(&bytes) {
+                            let _ = tx.send(EngineEvent::ProtocolError(format!(
+                                "failed to send movie control: {err}"
+                            )));
+                            alive.store(false, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(EngineEvent::ProtocolError(format!(
+                            "movie control encode error: {err}"
+                        )));
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
 }
 
 #[derive(Debug, Error)]

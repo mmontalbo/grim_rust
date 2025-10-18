@@ -880,6 +880,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "clap",
+ "crossbeam-channel",
  "env_logger",
  "fontdue",
  "grim_stream",
