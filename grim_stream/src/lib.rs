@@ -188,29 +188,12 @@ pub struct CoverageCounter {
     pub value: u64,
 }
 
-/// Location where a movie asset is sourced from.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MovieSource {
-    Remastered,
-    Classic,
-    Fallback,
-}
-
 /// Announces that the engine is about to start a fullscreen movie.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MovieStart {
     /// Logical movie identifier (e.g. "logos", "intro").
     pub name: String,
-    /// Pixel width of the decoded content.
-    pub width: u32,
-    /// Pixel height of the decoded content.
-    pub height: u32,
-    /// Nominal playback rate in frames per second.
-    pub fps: f32,
-    /// Location the viewer should load frames from.
-    pub source: MovieSource,
-    /// Path relative to the install root (used for remastered assets).
+    /// Path relative to the install root for remastered playback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relative_path: Option<String>,
 }
@@ -350,10 +333,6 @@ mod tests {
     fn movie_start_round_trips() {
         let start = MovieStart {
             name: "logos".to_string(),
-            width: 1920,
-            height: 1080,
-            fps: 24.0,
-            source: MovieSource::Remastered,
             relative_path: Some("MoviesHD/logos.ogv".to_string()),
         };
         let bytes = encode_message(MessageKind::MovieStart, &start).unwrap();

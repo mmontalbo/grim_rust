@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 mod achievements;
@@ -24,6 +24,7 @@ pub use audio::AudioCallback;
 use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView, MusicState, SfxState};
 use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
+    FullscreenMoviePlayback,
 };
 use geometry::SectorHit;
 use inventory::{InventoryRuntimeAdapter, InventoryRuntimeView, InventoryState};
@@ -43,7 +44,9 @@ pub(super) use bindings::{
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
+use crate::stream::StreamServer;
 use grim_analysis::resources::{ResourceGraph, SetMetadata};
+use grim_stream::{MovieAction, MovieControl, MovieStart};
 use mlua::RegistryKey;
 
 #[derive(Clone)]
@@ -463,6 +466,8 @@ impl CoverageTracker {
 
 pub(super) struct EngineContext {
     verbose: bool,
+    install_root: PathBuf,
+    stream: Option<Rc<StreamServer>>,
     scripts: ScriptRuntime,
     events: Vec<String>,
     coverage: CoverageTracker,
@@ -484,11 +489,14 @@ impl EngineContext {
         verbose: bool,
         lab_collection: Option<Rc<LabCollection>>,
         audio_callback: Option<Rc<dyn AudioCallback>>,
+        install_root: PathBuf,
     ) -> Self {
         let coverage = CoverageTracker::from_resources(&resources);
         let sets = SetRuntime::new(resources.clone(), verbose, lab_collection);
         EngineContext {
             verbose,
+            install_root,
+            stream: None,
             scripts: ScriptRuntime::new(),
             events: Vec::new(),
             coverage,
@@ -644,13 +652,97 @@ impl EngineContext {
         self.cutscene_runtime().clear_overrides();
     }
 
+    pub(super) fn set_stream(&mut self, stream: Option<Rc<StreamServer>>) {
+        if stream.is_none()
+            && self
+                .cutscene_view()
+                .fullscreen_movie_viewer_generation()
+                .is_some()
+        {
+            let mut runtime = self.cutscene_runtime();
+            if runtime.force_movie_completion(MovieAction::Error) {
+                self.log_event("cut_scene.fullscreen.force_complete error".to_string());
+            }
+        }
+        self.stream = stream;
+    }
+
+    fn prepare_fullscreen_playback(&mut self, movie: &str) -> Option<FullscreenMoviePlayback> {
+        let stream = self.stream.as_ref()?;
+        if !stream.viewer_gate().is_ready() {
+            return None;
+        }
+        let relative_path = self.resolve_remastered_movie(movie)?;
+        let generation = stream.current_generation();
+        let start = MovieStart {
+            name: movie.to_string(),
+            relative_path: Some(relative_path.clone()),
+        };
+        if let Err(err) = stream.send_movie_start(start) {
+            eprintln!(
+                "[grim_engine] failed to send MovieStart for {movie}: {err:?}; using countdown fallback"
+            );
+            return None;
+        }
+        Some(FullscreenMoviePlayback::Viewer { generation })
+    }
+
+    fn resolve_remastered_movie(&self, movie: &str) -> Option<String> {
+        let stem = Path::new(movie).file_stem()?;
+        let lowered = stem.to_string_lossy().to_lowercase();
+        if lowered.is_empty() {
+            return None;
+        }
+        let relative = Path::new("MoviesHD").join(format!("{lowered}.ogv"));
+        let full = self.install_root.join(&relative);
+        if full.is_file() {
+            Some(relative.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    }
+
     fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
+        let playback = self
+            .prepare_fullscreen_playback(&movie)
+            .unwrap_or(FullscreenMoviePlayback::Countdown);
         self.cutscene_runtime()
-            .start_fullscreen_movie(movie, yields)
+            .start_fullscreen_movie(movie, yields, playback)
     }
 
     fn poll_fullscreen_movie(&mut self) -> bool {
+        if let Some(expected_generation) = self.cutscene_view().fullscreen_movie_viewer_generation()
+        {
+            let viewer_ready = self
+                .stream
+                .as_ref()
+                .map(|stream| {
+                    stream.current_generation() == expected_generation
+                        && stream.viewer_gate().is_ready()
+                })
+                .unwrap_or(false);
+            if !viewer_ready {
+                let mut runtime = self.cutscene_runtime();
+                if runtime.force_movie_completion(MovieAction::Error) {
+                    self.log_event("cut_scene.fullscreen.force_complete error".to_string());
+                }
+            }
+        }
         self.cutscene_runtime().poll_fullscreen_movie()
+    }
+
+    pub(super) fn handle_movie_control(&mut self, control: MovieControl, generation: u64) {
+        let expected_generation = self.cutscene_view().fullscreen_movie_viewer_generation();
+        if expected_generation != Some(generation) {
+            return;
+        }
+        let mut runtime = self.cutscene_runtime();
+        if runtime.apply_movie_control(&control) {
+            self.log_event(format!(
+                "cut_scene.fullscreen.control {} {:?}",
+                control.name, control.action
+            ));
+        }
     }
 
     fn begin_dialog_line(&mut self, id: &str, label: &str, line: &str) {
@@ -1491,7 +1583,13 @@ mod tests {
         };
         let mut graph = ResourceGraph::default();
         graph.sets.push(set_metadata);
-        EngineContext::new(Rc::new(graph), false, None, callback)
+        EngineContext::new(
+            Rc::new(graph),
+            false,
+            None,
+            callback,
+            PathBuf::from("dev-install"),
+        )
     }
 
     fn install_menu_common_for_tests(lua: &Lua, context: Rc<RefCell<EngineContext>>) {

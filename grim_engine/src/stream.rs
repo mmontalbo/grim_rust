@@ -131,6 +131,12 @@ impl StreamServer {
             receiver: self.movie_controls.clone(),
         }
     }
+
+    #[allow(dead_code)]
+    /// Current connection generation (increments each time the viewer reconnects).
+    pub fn current_generation(&self) -> u64 {
+        self.state.generation()
+    }
 }
 
 impl Drop for StreamServer {

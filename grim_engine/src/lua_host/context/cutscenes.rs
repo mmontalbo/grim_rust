@@ -38,10 +38,29 @@ pub(super) struct OverrideRecord {
     pub(super) description: String,
 }
 
+use grim_stream::{MovieAction, MovieControl};
+
 #[derive(Debug, Clone)]
 pub(super) struct FullscreenMovieState {
     pub(super) name: String,
-    pub(super) play_yields_remaining: u32,
+    pub(super) mode: FullscreenPlaybackMode,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum FullscreenPlaybackMode {
+    Countdown {
+        yields_remaining: u32,
+    },
+    Viewer {
+        generation: u64,
+        action: Option<MovieAction>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum FullscreenMoviePlayback {
+    Countdown,
+    Viewer { generation: u64 },
 }
 
 const DEFAULT_FULLSCREEN_YIELDS: u32 = 6;
@@ -259,11 +278,27 @@ impl CutsceneRuntime {
         self.speaking_actor.as_deref()
     }
 
-    pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> String {
-        let play_yields = yields.unwrap_or(DEFAULT_FULLSCREEN_YIELDS).max(1);
+    pub(super) fn start_fullscreen_movie(
+        &mut self,
+        movie: String,
+        yields: Option<u32>,
+        playback: FullscreenMoviePlayback,
+    ) -> String {
+        let mode = match playback {
+            FullscreenMoviePlayback::Countdown => {
+                let play_yields = yields.unwrap_or(DEFAULT_FULLSCREEN_YIELDS).max(1);
+                FullscreenPlaybackMode::Countdown {
+                    yields_remaining: play_yields,
+                }
+            }
+            FullscreenMoviePlayback::Viewer { generation } => FullscreenPlaybackMode::Viewer {
+                generation,
+                action: None,
+            },
+        };
         self.fullscreen_movie = Some(FullscreenMovieState {
             name: movie.clone(),
-            play_yields_remaining: play_yields,
+            mode,
         });
         format!("cut_scene.fullscreen.start {movie}")
     }
@@ -273,14 +308,56 @@ impl CutsceneRuntime {
             return (false, None);
         };
 
-        if state.play_yields_remaining > 1 {
-            state.play_yields_remaining -= 1;
-            return (true, None);
+        match &mut state.mode {
+            FullscreenPlaybackMode::Countdown { yields_remaining } => {
+                if *yields_remaining > 1 {
+                    *yields_remaining -= 1;
+                    (true, None)
+                } else {
+                    let movie = state.name.clone();
+                    self.fullscreen_movie = None;
+                    (false, Some(format!("cut_scene.fullscreen.end {movie}")))
+                }
+            }
+            FullscreenPlaybackMode::Viewer { action, .. } => {
+                if action.is_none() {
+                    (true, None)
+                } else {
+                    let movie = state.name.clone();
+                    self.fullscreen_movie = None;
+                    (false, Some(format!("cut_scene.fullscreen.end {movie}")))
+                }
+            }
         }
+    }
 
-        let movie = state.name.clone();
-        self.fullscreen_movie = None;
-        (false, Some(format!("cut_scene.fullscreen.end {movie}")))
+    pub(super) fn apply_movie_control(&mut self, control: &MovieControl) -> bool {
+        let Some(state) = self.fullscreen_movie.as_mut() else {
+            return false;
+        };
+        if state.name != control.name {
+            return false;
+        }
+        match &mut state.mode {
+            FullscreenPlaybackMode::Viewer { action, .. } => {
+                *action = Some(control.action.clone());
+                true
+            }
+            FullscreenPlaybackMode::Countdown { .. } => false,
+        }
+    }
+
+    pub(super) fn force_movie_completion(&mut self, reason: MovieAction) -> bool {
+        let Some(state) = self.fullscreen_movie.as_mut() else {
+            return false;
+        };
+        match &mut state.mode {
+            FullscreenPlaybackMode::Viewer { action, .. } => {
+                *action = Some(reason);
+                true
+            }
+            FullscreenPlaybackMode::Countdown { .. } => false,
+        }
     }
 }
 
@@ -369,8 +446,13 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
         }
     }
 
-    pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
-        let message = self.runtime.start_fullscreen_movie(movie, yields);
+    pub(super) fn start_fullscreen_movie(
+        &mut self,
+        movie: String,
+        yields: Option<u32>,
+        playback: FullscreenMoviePlayback,
+    ) -> bool {
+        let message = self.runtime.start_fullscreen_movie(movie, yields, playback);
         self.events.push(message);
         true
     }
@@ -381,6 +463,14 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
             self.events.push(message);
         }
         active
+    }
+
+    pub(super) fn apply_movie_control(&mut self, control: &MovieControl) -> bool {
+        self.runtime.apply_movie_control(control)
+    }
+
+    pub(super) fn force_movie_completion(&mut self, reason: MovieAction) -> bool {
+        self.runtime.force_movie_completion(reason)
     }
 }
 
@@ -414,5 +504,13 @@ impl<'a> CutsceneRuntimeView<'a> {
             .fullscreen_movie
             .as_ref()
             .map(|state| state.name.as_str())
+    }
+
+    pub(super) fn fullscreen_movie_viewer_generation(&self) -> Option<u64> {
+        let state = self.runtime.fullscreen_movie.as_ref()?;
+        match &state.mode {
+            FullscreenPlaybackMode::Viewer { generation, .. } => Some(*generation),
+            FullscreenPlaybackMode::Countdown { .. } => None,
+        }
     }
 }

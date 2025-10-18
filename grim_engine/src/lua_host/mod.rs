@@ -18,8 +18,9 @@ use grim_analysis::resources::ResourceGraph;
 use mlua::{Lua, LuaOptions, StdLib};
 
 use crate::lab_collection::LabCollection;
-use crate::stream::{StreamServer, StreamViewerGate};
+use crate::stream::{MovieControlEvents, StreamServer, StreamViewerGate};
 use context::EngineContextHandle;
+use crossbeam_channel::TryRecvError;
 use state_update::StateUpdateBuilder;
 
 pub fn run_boot_sequence(
@@ -69,6 +70,7 @@ pub fn run_boot_sequence(
         verbose,
         lab_collection,
         audio_callback,
+        lab_root_path.clone(),
     )));
     let context_handle = context::EngineContextHandle::new(context.clone());
 
@@ -125,13 +127,14 @@ pub fn run_boot_sequence(
 pub struct EngineRuntime {
     lua: Lua,
     context: Rc<RefCell<context::EngineContext>>,
-    stream: Option<StreamServer>,
+    stream: Option<Rc<StreamServer>>,
     headless: bool,
     frame: u32,
     /// Keeps track of deltas so state updates stay compact.
     state_builder: StateUpdateBuilder,
     start_gate: Option<StreamReadyGate>,
     viewer_gate: Option<StreamViewerGate>,
+    movie_controls: Option<MovieControlEvents>,
     log_file: Option<File>,
 }
 
@@ -146,11 +149,17 @@ impl EngineRuntime {
         initial_coverage: BTreeMap<String, u64>,
         start_gate: Option<StreamReadyGate>,
     ) -> Self {
+        let stream = stream.map(Rc::new);
+        {
+            let mut ctx = context.borrow_mut();
+            ctx.set_stream(stream.clone());
+        }
         let viewer_gate = if headless {
             None
         } else {
             stream.as_ref().map(|s| s.viewer_gate())
         };
+        let movie_controls = stream.as_ref().map(|s| s.movie_controls());
         Self {
             lua,
             context,
@@ -164,6 +173,7 @@ impl EngineRuntime {
             ),
             start_gate,
             viewer_gate,
+            movie_controls,
             log_file: open_live_preview_log(),
         }
     }
@@ -177,6 +187,7 @@ impl EngineRuntime {
             let tick_start = Instant::now();
             context::drive_active_scripts(&self.lua, self.context.clone(), 8, 32)?;
             self.frame = self.frame.wrapping_add(1);
+            self.poll_movie_controls();
 
             if let Some(update) = self
                 .state_builder
@@ -200,6 +211,28 @@ impl EngineRuntime {
             let elapsed = tick_start.elapsed();
             if elapsed < FRAME_DURATION {
                 thread::sleep(FRAME_DURATION - elapsed);
+            }
+        }
+    }
+
+    fn poll_movie_controls(&mut self) {
+        let (Some(stream), Some(events)) = (self.stream.as_ref(), self.movie_controls.as_ref())
+        else {
+            return;
+        };
+        let current_generation = stream.current_generation();
+        loop {
+            match events.try_recv() {
+                Ok(event) => {
+                    if event.generation != current_generation {
+                        continue;
+                    }
+                    self.context
+                        .borrow_mut()
+                        .handle_movie_control(event.control.clone(), event.generation);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
             }
         }
     }

@@ -368,8 +368,9 @@ fn drain_engine_events(
                 }
                 EngineEvent::MovieStart(start) => {
                     println!(
-                        "[grim_viewer] engine movie start: {} ({}x{} @ {:.2}fps, source={:?})",
-                        start.name, start.width, start.height, start.fps, start.source
+                        "[grim_viewer] engine movie start: {} (path={})",
+                        start.name,
+                        start.relative_path.as_deref().unwrap_or("<none>")
                     );
                     stream.active_movie = Some(ActiveMovieStatus {
                         name: start.name.clone(),
