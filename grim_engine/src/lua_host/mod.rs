@@ -26,6 +26,7 @@ pub fn run_boot_sequence(
     data_root: &Path,
     lab_root: Option<&Path>,
     verbose: bool,
+    headless: bool,
     geometry_json: Option<&Path>,
     audio_callback: Option<Rc<dyn AudioCallback>>,
     stream: Option<StreamServer>,
@@ -81,9 +82,6 @@ pub fn run_boot_sequence(
         context::drive_active_scripts(&lua, context.clone(), 16, 64)?;
     }
 
-    let mut stream = stream;
-    let mut stream_ready = stream_ready;
-
     let snapshot = context.borrow();
     context::dump_runtime_summary(&snapshot);
     let initial_event_cursor = snapshot.events().len();
@@ -98,18 +96,27 @@ pub fn run_boot_sequence(
     }
     drop(snapshot);
 
-    let runtime = stream.take().map(|stream| {
+    let runtime_needed = headless || stream.is_some();
+    let start_gate = if headless {
+        None
+    } else {
+        stream_ready.map(StreamReadyGate::new)
+    };
+    let runtime = if runtime_needed {
         // The EngineRuntime owns the Lua VM when we are actively streaming state.
-        EngineRuntime::new(
+        Some(EngineRuntime::new(
             lua,
             context,
             context_handle,
             stream,
+            headless,
             initial_event_cursor,
             initial_coverage.clone(),
-            stream_ready.take().map(StreamReadyGate::new),
-        )
-    });
+            start_gate,
+        ))
+    } else {
+        None
+    };
 
     Ok(runtime)
 }
@@ -118,7 +125,8 @@ pub fn run_boot_sequence(
 pub struct EngineRuntime {
     lua: Lua,
     context: Rc<RefCell<context::EngineContext>>,
-    stream: StreamServer,
+    stream: Option<StreamServer>,
+    headless: bool,
     frame: u32,
     /// Keeps track of deltas so state updates stay compact.
     state_builder: StateUpdateBuilder,
@@ -132,16 +140,22 @@ impl EngineRuntime {
         lua: Lua,
         context: Rc<RefCell<context::EngineContext>>,
         context_handle: EngineContextHandle,
-        stream: StreamServer,
+        stream: Option<StreamServer>,
+        headless: bool,
         initial_event_cursor: usize,
         initial_coverage: BTreeMap<String, u64>,
         start_gate: Option<StreamReadyGate>,
     ) -> Self {
-        let viewer_gate = stream.viewer_gate();
+        let viewer_gate = if headless {
+            None
+        } else {
+            stream.as_ref().map(|s| s.viewer_gate())
+        };
         Self {
             lua,
             context,
             stream,
+            headless,
             frame: 0,
             state_builder: StateUpdateBuilder::new(
                 context_handle,
@@ -149,7 +163,7 @@ impl EngineRuntime {
                 initial_coverage,
             ),
             start_gate,
-            viewer_gate: Some(viewer_gate),
+            viewer_gate,
             log_file: open_live_preview_log(),
         }
     }
@@ -169,8 +183,17 @@ impl EngineRuntime {
                 .build(self.frame, &self.context)
                 .context("building state update")?
             {
-                if let Err(err) = self.stream.send_state_update(update) {
-                    eprintln!("[grim_engine] failed to publish state update: {err:?}; continuing");
+                if self.headless && !update.events.is_empty() {
+                    for event in &update.events {
+                        println!("[grim_engine][headless] {event}");
+                    }
+                }
+                if let Some(stream) = self.stream.as_ref() {
+                    if let Err(err) = stream.send_state_update(update) {
+                        eprintln!(
+                            "[grim_engine] failed to publish state update: {err:?}; continuing"
+                        );
+                    }
                 }
             }
 
@@ -183,6 +206,10 @@ impl EngineRuntime {
 
     /// Wait for the viewer and optional capture processes before entering the main loop.
     fn await_live_preview_handshake(&mut self) -> Result<()> {
+        if self.headless {
+            return Ok(());
+        }
+
         if let Some(gate) = self.viewer_gate.clone() {
             if !gate.is_ready() {
                 self.log_gate_event("viewer_ready.wait");

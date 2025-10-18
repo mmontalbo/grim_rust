@@ -6,10 +6,12 @@ this note as a quick map of what remains relevant.
 
 ## Control Flow
 - `run_boot_sequence` (`lua_host/mod.rs`) loads assets, initialises Lua, and
-  drives the boot scripts until we reach the intro playback loop. It returns
-  an `EngineRuntime` only when a GrimStream server was requested.
+-  drives the boot scripts until we reach the intro playback loop. It now
+  yields an `EngineRuntime` when either streaming is enabled or headless mode
+  is requested.
 - `EngineRuntime::run` advances the Lua scheduler at ~30 Hz, pipes deltas
-  through `StateUpdateBuilder`, and publishes them over the bound stream.
+  through `StateUpdateBuilder`, and either publishes them over the bound stream
+  or prints fresh events when running headless.
 - `EngineContextHandle` now only exposes the tiny set of helpers needed by
   `StateUpdateBuilder` (actor lookup, hotspot state, coverage counters).
 

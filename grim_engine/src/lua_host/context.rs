@@ -56,6 +56,11 @@ impl EngineContextHandle {
         Self { inner }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn log_event(&self, event: impl Into<String>) {
+        self.inner.borrow_mut().log_event(event);
+    }
+
     pub fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
         self.inner
             .borrow()

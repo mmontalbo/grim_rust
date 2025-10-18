@@ -9,6 +9,10 @@ struct Args {
     #[arg(long, default_value = "extracted/DATA000")]
     data_root: PathBuf,
 
+    /// Run without a viewer and print emitted engine events to stdout
+    #[arg(long)]
+    headless: bool,
+
     /// Print additional logging from the Lua host
     #[arg(long)]
     verbose: bool,
@@ -29,6 +33,7 @@ struct Args {
 #[derive(Debug, Clone)]
 pub struct RunLuaArgs {
     pub data_root: PathBuf,
+    pub headless: bool,
     pub verbose: bool,
     pub lab_root: Option<PathBuf>,
     pub stream_bind: Option<String>,
@@ -39,6 +44,7 @@ pub fn parse() -> RunLuaArgs {
     let args = Args::parse();
     RunLuaArgs {
         data_root: args.data_root,
+        headless: args.headless,
         verbose: args.verbose,
         lab_root: args.lab_root,
         stream_bind: args.stream_bind,

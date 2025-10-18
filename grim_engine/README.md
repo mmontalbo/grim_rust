@@ -21,6 +21,7 @@ milestone.
 ```
 cargo run -p grim_engine -- \
     [--data-root <path>] \
+    [--headless] \
     [--verbose] \
     [--lab-root <path>] \
     [--stream-bind <addr>] \
@@ -33,6 +34,8 @@ cargo run -p grim_engine -- \
   networking.
 - `--stream-ready-file` writes a marker once streaming starts. This is used by
   `tools/run_live_preview.py` to coordinate viewer bring-up.
+- `--headless` skips the GrimStream handshake and prints emitted engine events
+  to stdout instead of waiting for a viewer connection.
 
 No other flags are recognised. Scripts that still reference `--run-lua`,
 `--timeline-json`, `--movement-demo`, etc. must be updated or removed.
@@ -49,6 +52,12 @@ No other flags are recognised. Scripts that still reference `--run-lua`,
   ```
   The helper script launches the viewer and the engine, passing
   `--stream-bind 127.0.0.1:17500` and a temporary ready marker automatically.
+- Quick headless smoke test (no viewer handshake):
+  ```
+  cargo run -p grim_engine -- --headless --verbose
+  ```
+  The command advances the intro loop and prints freshly emitted events to the
+  terminal.
 
 ## Restoring Legacy Behaviour
 
