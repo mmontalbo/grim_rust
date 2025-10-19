@@ -2354,7 +2354,7 @@ fn install_actor_methods(
         lua.create_function(move |_, args: Variadic<Value>| {
             let (self_table, values) = split_self(args);
             if let Some(table) = self_table {
-                let (id, _label) = actor_identity(&table)?;
+                let (id, label) = actor_identity(&table)?;
                 let (has_costume, base_costume) = {
                     let ctx = complete_chore_context.borrow();
                     (
@@ -2373,9 +2373,16 @@ fn install_actor_methods(
                 let costume_label = costume_override
                     .or(base_costume)
                     .unwrap_or_else(|| "<nil>".to_string());
-                complete_chore_context
-                    .borrow_mut()
-                    .log_event(format!("actor.{id}.complete_chore {chore} {costume_label}"));
+                {
+                    let mut ctx = complete_chore_context.borrow_mut();
+                    ctx.log_event(format!("actor.{id}.complete_chore {chore} {costume_label}"));
+                    if id.eq_ignore_ascii_case("mo.tube.interest_actor")
+                        || label.eq_ignore_ascii_case("mo.tube.interest_actor")
+                        || label.eq_ignore_ascii_case("/motx083/tube")
+                    {
+                        ctx.update_tube_pose(Some(chore.clone()));
+                    }
+                }
             }
             Ok(())
         })?,

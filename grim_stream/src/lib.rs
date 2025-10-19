@@ -188,6 +188,25 @@ pub struct CoverageCounter {
     pub value: u64,
 }
 
+/// Current state of the in-scene commentary prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommentaryState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppressed_reason: Option<String>,
+}
+
+/// Lightweight snapshot of Manny's pneumatic tube props.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TubeState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pose: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
 /// Announces that the engine is about to start a fullscreen movie.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MovieStart {
@@ -238,6 +257,10 @@ pub struct StateUpdate {
     pub active_setup: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_hotspot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commentary: Option<CommentaryState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tube: Option<TubeState>,
     #[serde(skip_serializing_if = "vec_is_empty", default)]
     pub coverage: Vec<CoverageCounter>,
     #[serde(skip_serializing_if = "vec_is_empty", default)]

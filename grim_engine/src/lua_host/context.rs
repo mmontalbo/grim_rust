@@ -162,6 +162,25 @@ pub(super) fn describe_set_hook(method_name: &str) -> Option<SetHookDescriptor> 
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct CommentarySnapshot {
+    pub label: Option<String>,
+    pub active: bool,
+    pub suppressed_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct TubeStateSnapshot {
+    pub pose: Option<String>,
+    pub contains: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MannyOfficeState {
+    tube_pose: Option<String>,
+    tube_contains: Option<String>,
+}
+
 #[cfg(test)]
 mod hook_tests {
     use super::{describe_set_hook, HookCategory};
@@ -481,6 +500,7 @@ pub(super) struct EngineContext {
     cutscenes: CutsceneRuntime,
     pause: PauseState,
     audio: AudioRuntime,
+    manny_office: MannyOfficeState,
 }
 
 impl EngineContext {
@@ -510,6 +530,7 @@ impl EngineContext {
             cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
             audio: AudioRuntime::new(audio_callback),
+            manny_office: MannyOfficeState::default(),
         }
     }
 
@@ -710,7 +731,7 @@ impl EngineContext {
             .start_fullscreen_movie(movie, yields, playback)
     }
 
-    fn poll_fullscreen_movie(&mut self) -> bool {
+    pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
         if let Some(expected_generation) = self.cutscene_view().fullscreen_movie_viewer_generation()
         {
             let viewer_ready = self
@@ -729,6 +750,10 @@ impl EngineContext {
             }
         }
         self.cutscene_runtime().poll_fullscreen_movie()
+    }
+
+    pub(super) fn force_movie_completion(&mut self, reason: MovieAction) -> bool {
+        self.cutscene_runtime().force_movie_completion(reason)
     }
 
     pub(super) fn handle_movie_control(&mut self, control: MovieControl, generation: u64) {
@@ -1283,6 +1308,39 @@ impl EngineContext {
         self.movement_runtime().refresh_commentary_visibility();
     }
 
+    pub(super) fn commentary_snapshot(&self) -> Option<CommentarySnapshot> {
+        let view = self.cutscene_view();
+        let record = view.commentary()?;
+        Some(CommentarySnapshot {
+            label: record.label.clone(),
+            active: record.active,
+            suppressed_reason: record.suppressed_reason.clone(),
+        })
+    }
+
+    pub(super) fn tube_state_snapshot(&self) -> TubeStateSnapshot {
+        TubeStateSnapshot {
+            pose: self.manny_office.tube_pose.clone(),
+            contains: self.manny_office.tube_contains.clone(),
+        }
+    }
+
+    pub(super) fn update_tube_pose(&mut self, pose: Option<String>) {
+        if self.manny_office.tube_pose != pose {
+            if let Some(label) = pose.as_ref() {
+                self.log_event(format!(
+                    "actor.mo.tube.interest_actor.complete_chore {}",
+                    label
+                ));
+            }
+            self.manny_office.tube_pose = pose;
+        }
+    }
+
+    pub(super) fn update_tube_contains(&mut self, contains: Option<String>) {
+        self.manny_office.tube_contains = contains;
+    }
+
     fn set_commentary_active(&mut self, enabled: bool, label: Option<String>) {
         if !enabled {
             self.cutscene_runtime().disable_commentary();
@@ -1320,6 +1378,12 @@ impl EngineContext {
     }
     pub(super) fn actor_rotation_by_handle(&self, handle: u32) -> Option<Vec3> {
         self.actors.actor_rotation_by_handle(handle)
+    }
+
+    pub(super) fn actor_current_chore(&self, id: &str) -> Option<String> {
+        self.actors
+            .actor_current_chore(id)
+            .map(str::to_string)
     }
 
     pub(super) fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
@@ -1469,6 +1533,7 @@ pub(crate) fn distance_between(a: Vec3, b: Vec3) -> f32 {
 mod tests {
     use super::super::types::Vec3;
     use super::bindings::{candidate_paths, value_slice_to_vec3};
+    use super::cutscenes;
     use super::geometry::ParsedSetGeometry;
     use super::menus::install_menu_common;
     use super::objects::ObjectSnapshot;
@@ -2120,6 +2185,61 @@ mod tests {
             commentary.active,
             "commentary should resume once the sector is reactivated"
         );
+    }
+
+    #[test]
+    fn tube_state_snapshot_reflects_updates() {
+        let mut ctx = make_context();
+        let initial = ctx.tube_state_snapshot();
+        assert!(initial.pose.is_none());
+        assert!(initial.contains.is_none());
+
+        ctx.update_tube_pose(Some("mo_tube_set_closed_w_can".to_string()));
+        ctx.update_tube_contains(Some("memo".to_string()));
+        let snapshot = ctx.tube_state_snapshot();
+        assert_eq!(snapshot.pose.as_deref(), Some("mo_tube_set_closed_w_can"));
+        assert_eq!(snapshot.contains.as_deref(), Some("memo"));
+
+        ctx.update_tube_pose(None);
+        ctx.update_tube_contains(None);
+        let cleared = ctx.tube_state_snapshot();
+        assert!(cleared.pose.is_none());
+        assert!(cleared.contains.is_none());
+    }
+
+    #[test]
+    fn commentary_snapshot_reflects_runtime_state() {
+        let mut ctx = make_context();
+        {
+            let mut runtime = ctx.cutscene_runtime();
+            runtime.set_commentary(cutscenes::CommentaryRecord {
+                label: Some("Year1MannysOfficeDesign".to_string()),
+                object_handle: Some(3300),
+                active: true,
+                suppressed_reason: None,
+            });
+        }
+        let snapshot = ctx
+            .commentary_snapshot()
+            .expect("expected commentary snapshot");
+        assert_eq!(snapshot.label.as_deref(), Some("Year1MannysOfficeDesign"));
+        assert!(snapshot.active);
+        assert!(snapshot.suppressed_reason.is_none());
+
+        {
+            let mut runtime = ctx.cutscene_runtime();
+            runtime.set_commentary(cutscenes::CommentaryRecord {
+                label: Some("Year1MannysOfficeDesign".to_string()),
+                object_handle: Some(3300),
+                active: false,
+                suppressed_reason: Some("not_visible".to_string()),
+            });
+        }
+        let snapshot = ctx
+            .commentary_snapshot()
+            .expect("expected commentary snapshot");
+        assert!(!snapshot.active);
+        assert_eq!(snapshot.suppressed_reason.as_deref(), Some("not_visible"));
     }
 
     #[test]

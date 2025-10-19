@@ -13,9 +13,10 @@ use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::ResourceGraph;
-use mlua::{Lua, LuaOptions, StdLib};
+use grim_stream::{MovieAction, MovieControl};
+use mlua::{Function, Lua, LuaOptions, StdLib, Value};
 
 use crate::lab_collection::LabCollection;
 use crate::stream::{MovieControlEvents, StreamServer, StreamViewerGate};
@@ -141,6 +142,8 @@ pub struct EngineRuntime {
     movie_controls: Option<MovieControlEvents>,
     log_file: Option<File>,
     defer_intro_cutscene: bool,
+    intro_movie_active: bool,
+    manny_office_booted: bool,
 }
 
 impl EngineRuntime {
@@ -160,6 +163,13 @@ impl EngineRuntime {
             let mut ctx = context.borrow_mut();
             ctx.set_stream(stream.clone());
         }
+        let intro_movie_active = {
+            let ctx = context.borrow();
+            ctx.active_fullscreen_movie()
+                .as_deref()
+                .map(|name| name.eq_ignore_ascii_case("intro"))
+                .unwrap_or(false)
+        };
         let viewer_gate = if headless {
             None
         } else {
@@ -182,6 +192,8 @@ impl EngineRuntime {
             movie_controls,
             log_file: open_live_preview_log(),
             defer_intro_cutscene,
+            intro_movie_active,
+            manny_office_booted: false,
         }
     }
 
@@ -197,11 +209,23 @@ impl EngineRuntime {
             self.defer_intro_cutscene = false;
         }
 
+        self.observe_intro_movie_completion()?;
+        self.refresh_manny_office_state()?;
+
+        if self.headless {
+            self.force_active_movie_completion(MovieAction::Finished)?;
+        }
+
         loop {
             let tick_start = Instant::now();
             context::drive_active_scripts(&self.lua, self.context.clone(), 8, 32)?;
             self.frame = self.frame.wrapping_add(1);
             self.poll_movie_controls();
+            self.observe_intro_movie_completion()?;
+            self.refresh_manny_office_state()?;
+            if self.headless {
+                self.force_active_movie_completion(MovieAction::Finished)?;
+            }
 
             if let Some(update) = self
                 .state_builder
@@ -230,20 +254,29 @@ impl EngineRuntime {
     }
 
     fn poll_movie_controls(&mut self) {
-        let (Some(stream), Some(events)) = (self.stream.as_ref(), self.movie_controls.as_ref())
-        else {
-            return;
+        let current_generation = match self.stream.as_ref() {
+            Some(stream) => stream.current_generation(),
+            None => return,
         };
-        let current_generation = stream.current_generation();
+        let receiver = match self.movie_controls.as_ref() {
+            Some(events) => events.receiver(),
+            None => return,
+        };
         loop {
-            match events.try_recv() {
+            match receiver.try_recv() {
                 Ok(event) => {
                     if event.generation != current_generation {
                         continue;
                     }
+                    let control = event.control.clone();
                     self.context
                         .borrow_mut()
-                        .handle_movie_control(event.control.clone(), event.generation);
+                        .handle_movie_control(control.clone(), event.generation);
+                    if let Err(err) = self.process_movie_control(&control) {
+                        eprintln!(
+                            "[grim_engine] failed to apply movie control side effects: {err:?}"
+                        );
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
@@ -285,6 +318,187 @@ impl EngineRuntime {
                 let _ = writeln!(file, "[0.000000000] {message}");
             }
             let _ = file.flush();
+        }
+    }
+
+    fn process_movie_control(&mut self, control: &MovieControl) -> Result<()> {
+        if control.name.eq_ignore_ascii_case("intro") {
+            match control.action {
+                MovieAction::Finished | MovieAction::Skipped | MovieAction::Error => {
+                    self.ensure_manny_office_booted()?;
+                    self.intro_movie_active = false;
+                }
+                MovieAction::Ack => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_intro_movie_completion(&mut self) -> Result<()> {
+        let active = {
+            let ctx = self.context.borrow();
+            ctx.active_fullscreen_movie()
+                .as_deref()
+                .map(|name| name.eq_ignore_ascii_case("intro"))
+                .unwrap_or(false)
+        };
+        if self.intro_movie_active && !active {
+            self.ensure_manny_office_booted()?;
+        }
+        self.intro_movie_active = active;
+        Ok(())
+    }
+
+    fn force_active_movie_completion(&mut self, reason: MovieAction) -> Result<()> {
+        let active_movie = {
+            let ctx = self.context.borrow();
+            ctx.active_fullscreen_movie()
+        };
+        if let Some(name) = active_movie {
+            let mut ctx = self.context.borrow_mut();
+            let mut completion_logged = false;
+
+            if ctx.force_movie_completion(reason.clone()) {
+                ctx.log_event(format!(
+                    "cut_scene.fullscreen.force_complete {} {:?}",
+                    name, reason
+                ));
+                completion_logged = true;
+            }
+
+            let mut still_playing = true;
+            while still_playing {
+                still_playing = ctx.poll_fullscreen_movie();
+                if !still_playing && !completion_logged {
+                    ctx.log_event(format!(
+                        "cut_scene.fullscreen.force_complete {} {:?}",
+                        name, reason
+                    ));
+                    completion_logged = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_manny_office_booted(&mut self) -> Result<()> {
+        if self.manny_office_booted {
+            return Ok(());
+        }
+
+        {
+            let mut ctx = self.context.borrow_mut();
+            ctx.log_event("manny_office.resume");
+        }
+
+        let handle: u32 = {
+            let globals = self.lua.globals();
+            let start_script: Function = globals
+                .get("start_script")
+                .context("start_script missing while resuming Manny's office")?;
+            let mo_value: Value = globals
+                .get("mo")
+                .context("mo table missing while resuming Manny's office")?;
+            let mo_table = match mo_value {
+                Value::Table(table) => table,
+                _ => {
+                    return Err(anyhow!(
+                        "mo global is not a table while resuming Manny's office"
+                    ));
+                }
+            };
+            let enter: Function = mo_table
+                .get("enter")
+                .context("mo.enter missing while resuming Manny's office")?;
+
+            start_script
+                .call((enter, mo_table))
+                .context("scheduling mo.enter after intro movie")?
+        };
+        {
+            let mut ctx = self.context.borrow_mut();
+            ctx.log_event(format!("manny_office.resume.script #{handle}"));
+        }
+
+        self.manny_office_booted = true;
+        self.refresh_manny_office_state()?;
+        Ok(())
+    }
+
+    fn refresh_manny_office_state(&mut self) -> Result<()> {
+        if !self.manny_office_booted {
+            return Ok(());
+        }
+        let contains = self.read_tube_contains_label()?;
+        let pose = self.read_tube_pose_label()?;
+        {
+            let mut ctx = self.context.borrow_mut();
+            ctx.update_tube_contains(contains);
+            ctx.update_tube_pose(pose);
+        }
+        Ok(())
+    }
+
+    fn read_tube_contains_label(&self) -> Result<Option<String>> {
+        let globals = self.lua.globals();
+        let Some(mo_value) = globals.get::<_, Option<Value>>("mo")? else {
+            return Ok(None);
+        };
+        let Value::Table(mo_table) = mo_value else {
+            return Ok(None);
+        };
+        let Some(tube_value) = mo_table.get::<_, Option<Value>>("tube")? else {
+            return Ok(None);
+        };
+        let Value::Table(tube_table) = tube_value else {
+            return Ok(None);
+        };
+        match tube_table.get::<_, Option<Value>>("contains")? {
+            Some(Value::Table(table)) => {
+                let label = table
+                    .get::<_, Option<String>>("string_name")?
+                    .or(table.get::<_, Option<String>>("name")?);
+                Ok(label)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn read_tube_pose_label(&self) -> Result<Option<String>> {
+        if let Some(chore) = {
+            let ctx = self.context.borrow();
+            ctx.actor_current_chore("mo.tube.interest_actor")
+        } {
+            if chore.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(chore));
+        }
+
+        let globals = self.lua.globals();
+        let Some(mo_value) = globals.get::<_, Option<Value>>("mo")? else {
+            return Ok(None);
+        };
+        let Value::Table(mo_table) = mo_value else {
+            return Ok(None);
+        };
+        let Some(tube_value) = mo_table.get::<_, Option<Value>>("tube")? else {
+            return Ok(None);
+        };
+        let Value::Table(tube_table) = tube_value else {
+            return Ok(None);
+        };
+        let Some(actor_value) = tube_table.get::<_, Option<Value>>("interest_actor")? else {
+            return Ok(None);
+        };
+        let Value::Table(actor_table) = actor_value else {
+            return Ok(None);
+        };
+        match actor_table.get::<_, Option<Value>>("current_chore")? {
+            Some(Value::String(text)) => Ok(Some(text.to_str()?.to_string())),
+            Some(Value::Integer(value)) => Ok(Some(value.to_string())),
+            Some(Value::Number(value)) => Ok(Some(value.to_string())),
+            _ => Ok(None),
         }
     }
 }

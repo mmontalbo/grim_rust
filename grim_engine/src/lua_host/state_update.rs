@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use anyhow::Result;
-use grim_stream::{CoverageCounter, StateUpdate};
+use grim_stream::{CommentaryState, CoverageCounter, StateUpdate, TubeState};
 
-use super::context::{EngineContext, EngineContextHandle};
+use super::context::{EngineContext, EngineContextHandle, TubeStateSnapshot};
 
 /// Tracks incremental state so we can emit compact `StateUpdate` payloads.
 pub struct StateUpdateBuilder {
@@ -16,6 +16,8 @@ pub struct StateUpdateBuilder {
     last_yaw: Option<f32>,
     last_setup: Option<String>,
     last_hotspot: Option<String>,
+    last_commentary: Option<CommentaryState>,
+    last_tube_state: Option<TubeState>,
     last_movie: Option<String>,
     manny_handle: Option<u32>,
     manny_actor_id: Option<String>,
@@ -36,6 +38,8 @@ impl StateUpdateBuilder {
             last_yaw: None,
             last_setup: None,
             last_hotspot: None,
+            last_commentary: None,
+            last_tube_state: None,
             last_movie: None,
             manny_handle: None,
             manny_actor_id: None,
@@ -55,6 +59,8 @@ impl StateUpdateBuilder {
             yaw_opt,
             active_setup_opt,
             active_hotspot_opt,
+            commentary_state,
+            tube_state,
             events_len,
             mut new_events,
             coverage_samples,
@@ -94,12 +100,25 @@ impl StateUpdateBuilder {
                 .collect();
 
             let active_movie_opt = ctx.active_fullscreen_movie();
+            let commentary_state = ctx.commentary_snapshot().map(|snapshot| CommentaryState {
+                label: snapshot.label,
+                active: snapshot.active,
+                suppressed_reason: snapshot.suppressed_reason,
+            });
+            let TubeStateSnapshot { pose, contains } = ctx.tube_state_snapshot();
+            let tube_state = if pose.is_some() || contains.is_some() {
+                Some(TubeState { pose, contains })
+            } else {
+                None
+            };
 
             (
                 position_opt,
                 yaw_opt,
                 active_setup_opt,
                 active_hotspot_opt,
+                commentary_state,
+                tube_state,
                 events_len,
                 new_events,
                 coverage_samples,
@@ -119,32 +138,34 @@ impl StateUpdateBuilder {
 
         let mut changed = !self.sent_initial;
 
-        if let Some(pos) = position_opt {
-            if self.last_position != Some(pos) {
-                self.last_position = Some(pos);
-                changed = true;
-            }
+        if commentary_state != self.last_commentary {
+            self.last_commentary = commentary_state.clone();
+            changed = true;
         }
 
-        if let Some(yaw) = yaw_opt {
-            if self.last_yaw != Some(yaw) {
-                self.last_yaw = Some(yaw);
-                changed = true;
-            }
+        if tube_state != self.last_tube_state {
+            self.last_tube_state = tube_state.clone();
+            changed = true;
         }
 
-        if let Some(setup) = active_setup_opt.as_ref() {
-            if self.last_setup.as_deref() != Some(setup.as_str()) {
-                self.last_setup = Some(setup.clone());
-                changed = true;
-            }
+        if self.last_position != position_opt {
+            self.last_position = position_opt;
+            changed = true;
         }
 
-        if let Some(hotspot) = active_hotspot_opt.as_ref() {
-            if self.last_hotspot.as_deref() != Some(hotspot.as_str()) {
-                self.last_hotspot = Some(hotspot.clone());
-                changed = true;
-            }
+        if self.last_yaw != yaw_opt {
+            self.last_yaw = yaw_opt;
+            changed = true;
+        }
+
+        if self.last_setup.as_deref() != active_setup_opt.as_deref() {
+            self.last_setup = active_setup_opt.clone();
+            changed = true;
+        }
+
+        if self.last_hotspot.as_deref() != active_hotspot_opt.as_deref() {
+            self.last_hotspot = active_hotspot_opt.clone();
+            changed = true;
         }
 
         if !coverage_updates.is_empty() {
@@ -194,6 +215,8 @@ impl StateUpdateBuilder {
             yaw: self.last_yaw,
             active_setup: self.last_setup.clone(),
             active_hotspot: self.last_hotspot.clone(),
+            commentary: self.last_commentary.clone(),
+            tube: self.last_tube_state.clone(),
             coverage: coverage_updates,
             events: new_events,
             active_movie: self.last_movie.clone(),

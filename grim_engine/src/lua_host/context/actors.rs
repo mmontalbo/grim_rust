@@ -198,6 +198,18 @@ impl ActorStore {
             .and_then(|actor| actor.rotation)
     }
 
+    pub(super) fn actor_current_chore(&self, id: &str) -> Option<&str> {
+        self.actors
+            .get(id)
+            .and_then(|actor| actor.current_chore.as_deref())
+            .or_else(|| {
+                let lowered = id.to_ascii_lowercase();
+                self.actors
+                    .get(&lowered)
+                    .and_then(|actor| actor.current_chore.as_deref())
+            })
+    }
+
     pub(super) fn actor_snapshot(&self, actor_id: &str) -> Option<&ActorSnapshot> {
         self.actors
             .get(actor_id)
