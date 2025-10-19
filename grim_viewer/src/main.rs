@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         mpsc::{Receiver, TryRecvError},
     },
     time::{Duration, Instant},
@@ -110,32 +110,195 @@ struct FrameStats {
     host_time_ns: u64,
 }
 
+struct MovieTimeline {
+    pts_origin: Option<Duration>,
+    presentation_origin: Option<Instant>,
+    last_normalized_pts: Option<Duration>,
+    last_raw_pts: Option<Duration>,
+    origin_reset_pending: bool,
+}
+
+struct PendingMovieFrame {
+    frame: MovieFrame,
+    pts: Option<Duration>,
+    deadline: Instant,
+    since: Instant,
+}
+
+enum TimelineRecord {
+    Absent,
+    Timestamp { origin_reset: bool },
+}
+
 struct ActiveMovieStatus {
     name: String,
     playback: MoviePlayback,
     status: MovieDisplayStatus,
     frames_rendered: u64,
     frames_received: u64,
-    last_pts: Option<Duration>,
     upload_time_ms_total: f64,
     last_log_report: Instant,
-    presentation_origin: Option<Instant>,
+    timeline: MovieTimeline,
     last_present_wall: Option<Instant>,
-    pending_frame: Option<MovieFrame>,
-    pending_deadline: Option<Instant>,
-    pending_since: Option<Instant>,
+    pending: Option<PendingMovieFrame>,
     last_pending_log: Option<Instant>,
 }
 
 const MOVIE_PROGRESS_FRAME_INTERVAL: u64 = 60;
 const MOVIE_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_FRAME_LAG: Duration = Duration::from_millis(200);
-const MAX_FRAME_LEAD: Duration = Duration::from_millis(250);
+const MAX_FRAME_LEAD: Duration = Duration::from_secs(8);
+const PTS_RESET_THRESHOLD: Duration = Duration::from_millis(500);
 const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+#[derive(Clone, Copy)]
+enum MovieLogLevel {
+    Info,
+    Verbose,
+}
+
+fn movie_pacing_verbose_enabled() -> bool {
+    static VERBOSE: OnceLock<bool> = OnceLock::new();
+    *VERBOSE.get_or_init(|| {
+        std::env::var("GRIM_MOVIE_PACING_VERBOSE")
+            .map(|value| {
+                let lower = value.trim().to_ascii_lowercase();
+                matches!(lower.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn movie_pacing_should_emit(level: MovieLogLevel) -> bool {
+    matches!(level, MovieLogLevel::Info) || movie_pacing_verbose_enabled()
+}
+
+fn movie_pacing_log(
+    level: MovieLogLevel,
+    movie: &str,
+    event: &str,
+    fields: impl IntoIterator<Item = (&'static str, String)>,
+) {
+    if !movie_pacing_should_emit(level) {
+        return;
+    }
+    let mut message = format!("[grim_viewer] movie {} {}", movie, event);
+    for (key, value) in fields {
+        message.push(' ');
+        message.push_str(key);
+        message.push('=');
+        message.push_str(&value);
+    }
+    println!("{message}");
+}
 
 enum MovieDisplayStatus {
     Playing,
     Skipping,
+}
+
+impl MovieTimeline {
+    fn new() -> Self {
+        Self {
+            pts_origin: None,
+            presentation_origin: None,
+            last_normalized_pts: None,
+            last_raw_pts: None,
+            origin_reset_pending: false,
+        }
+    }
+
+    fn record(&mut self, movie: &str, raw_pts: Option<Duration>) -> TimelineRecord {
+        match raw_pts {
+            Some(raw) => {
+                let (normalized, origin_reset) = self.normalise_pts(movie, raw);
+                self.last_normalized_pts = Some(normalized);
+                self.last_raw_pts = Some(raw);
+                if origin_reset {
+                    self.presentation_origin = None;
+                    self.origin_reset_pending = true;
+                }
+                TimelineRecord::Timestamp { origin_reset }
+            }
+            None => {
+                self.last_normalized_pts = None;
+                self.last_raw_pts = None;
+                TimelineRecord::Absent
+            }
+        }
+    }
+
+    fn normalise_pts(&mut self, movie: &str, raw_pts: Duration) -> (Duration, bool) {
+        match self.pts_origin {
+            Some(origin) => {
+                if let Some(delta) = raw_pts.checked_sub(origin) {
+                    (delta, false)
+                } else if origin
+                    .checked_sub(raw_pts)
+                    .map(|delta| delta > PTS_RESET_THRESHOLD)
+                    .unwrap_or(false)
+                {
+                    movie_pacing_log(
+                        MovieLogLevel::Info,
+                        movie,
+                        "pts_origin_reset",
+                        [
+                            (
+                                "raw_pts_ms",
+                                format!("{:.2}", raw_pts.as_secs_f64() * 1000.0),
+                            ),
+                            (
+                                "previous_origin_ms",
+                                format!("{:.2}", origin.as_secs_f64() * 1000.0),
+                            ),
+                        ],
+                    );
+                    self.pts_origin = Some(raw_pts);
+                    (Duration::ZERO, true)
+                } else {
+                    (Duration::ZERO, false)
+                }
+            }
+            None => {
+                movie_pacing_log(
+                    MovieLogLevel::Info,
+                    movie,
+                    "pts_origin_establish",
+                    [(
+                        "raw_pts_ms",
+                        format!("{:.2}", raw_pts.as_secs_f64() * 1000.0),
+                    )],
+                );
+                self.pts_origin = Some(raw_pts);
+                (Duration::ZERO, true)
+            }
+        }
+    }
+
+    fn take_origin_reset(&mut self) -> bool {
+        let reset = self.origin_reset_pending;
+        self.origin_reset_pending = false;
+        reset
+    }
+
+    fn last_normalized(&self) -> Option<Duration> {
+        self.last_normalized_pts
+    }
+
+    fn last_raw(&self) -> Option<Duration> {
+        self.last_raw_pts
+    }
+
+    fn ensure_presentation_origin(&mut self, pts: Duration, now: Instant) -> Option<Instant> {
+        let origin = self
+            .presentation_origin
+            .get_or_insert_with(|| now.checked_sub(pts).unwrap_or(now));
+        origin.checked_add(pts)
+    }
+
+    fn realign_presentation_origin(&mut self, origin: Instant) {
+        self.presentation_origin = Some(origin);
+    }
 }
 
 impl MovieDisplayStatus {
@@ -155,21 +318,23 @@ impl ActiveMovieStatus {
             status: MovieDisplayStatus::Playing,
             frames_rendered: 0,
             frames_received: 0,
-            last_pts: None,
             upload_time_ms_total: 0.0,
             last_log_report: Instant::now(),
-            presentation_origin: None,
+            timeline: MovieTimeline::new(),
             last_present_wall: None,
-            pending_frame: None,
-            pending_deadline: None,
-            pending_since: None,
+            pending: None,
             last_pending_log: None,
         }
     }
 
     fn log_frame_receipt(&mut self, frame: &MovieFrame) {
         self.frames_received = self.frames_received.saturating_add(1);
-        self.last_pts = frame.timestamp;
+        match self.timeline.record(&self.name, frame.timestamp) {
+            TimelineRecord::Timestamp { origin_reset, .. } if origin_reset => {
+                self.clear_pending();
+            }
+            _ => {}
+        }
     }
 
     fn record_upload(&mut self, viewer: &mut ViewerState, upload_ms: f64, now: Instant) {
@@ -197,12 +362,20 @@ impl ActiveMovieStatus {
         if self.should_log_progress(now) {
             let avg_upload = self.upload_time_ms_total / self.frames_rendered.max(1) as f64;
             let pts_ms = self
-                .last_pts
+                .timeline
+                .last_normalized()
                 .map(|pts| format!("{:.2}", pts.as_secs_f64() * 1000.0))
                 .unwrap_or_else(|| "unknown".to_string());
-            println!(
-                "[grim_viewer] movie {} progress: received={} presented={} avg_upload_ms={:.3} last_pts_ms={}",
-                self.name, self.frames_received, self.frames_rendered, avg_upload, pts_ms
+            movie_pacing_log(
+                MovieLogLevel::Verbose,
+                &self.name,
+                "progress",
+                [
+                    ("frames_received", self.frames_received.to_string()),
+                    ("frames_presented", self.frames_rendered.to_string()),
+                    ("avg_upload_ms", format!("{:.3}", avg_upload)),
+                    ("last_pts_ms", pts_ms),
+                ],
             );
             self.last_log_report = now;
         }
@@ -215,29 +388,28 @@ impl ActiveMovieStatus {
     }
 
     fn clear_pending(&mut self) {
-        self.pending_frame = None;
-        self.pending_deadline = None;
-        self.pending_since = None;
+        self.pending = None;
     }
 
     fn poll_pending_ready(&mut self, now: Instant) -> Option<MovieFrame> {
-        match (self.pending_deadline, self.pending_frame.as_ref()) {
-            (Some(deadline), Some(_)) if now >= deadline => {
-                self.pending_deadline = None;
-                if let Some(frame) = self.pending_frame.take() {
-                    self.log_pending_release(deadline, now, frame.timestamp);
-                    self.pending_since = None;
-                    Some(frame)
-                } else {
-                    None
-                }
+        if let Some(pending) = self.pending.as_ref() {
+            if now >= pending.deadline {
+                let pending = self.pending.take().unwrap();
+                let PendingMovieFrame {
+                    frame,
+                    pts,
+                    deadline,
+                    since,
+                } = pending;
+                self.log_pending_release(now, deadline, since, pts);
+                return Some(frame);
             }
-            _ => None,
         }
+        None
     }
 
     fn pending_deadline(&self) -> Option<Instant> {
-        self.pending_deadline
+        self.pending.as_ref().map(|pending| pending.deadline)
     }
 
     fn schedule_frame(&mut self, frame: MovieFrame, now: Instant) -> FrameSchedule {
@@ -246,11 +418,12 @@ impl ActiveMovieStatus {
             return FrameSchedule::Present(frame);
         }
 
-        if let Some(pts) = frame.timestamp {
-            let origin = self
-                .presentation_origin
-                .get_or_insert_with(|| now.checked_sub(pts).unwrap_or(now));
-            if let Some(target) = origin.checked_add(pts) {
+        if self.timeline.take_origin_reset() {
+            self.clear_pending();
+        }
+
+        if let Some(pts) = self.timeline.last_normalized() {
+            if let Some(target) = self.timeline.ensure_presentation_origin(pts, now) {
                 if target > now {
                     if target
                         .checked_duration_since(now)
@@ -258,23 +431,41 @@ impl ActiveMovieStatus {
                         .unwrap_or(false)
                     {
                         let realigned = now.checked_sub(pts).unwrap_or(now);
-                        println!(
-                            "[grim_viewer] movie {} clamping presentation lead (lead_ms={:.2} pts_ms={:.2})",
-                            self.name,
-                            target.duration_since(now).as_secs_f64() * 1000.0,
-                            pts.as_secs_f64() * 1000.0
-                        );
-                        self.presentation_origin = Some(realigned);
+                        let mut fields = vec![
+                            (
+                                "lead_ms",
+                                format!("{:.2}", target.duration_since(now).as_secs_f64() * 1000.0),
+                            ),
+                            ("pts_ms", format!("{:.2}", pts.as_secs_f64() * 1000.0)),
+                        ];
+                        if let Some(raw) = self.timeline.last_raw() {
+                            fields
+                                .push(("raw_pts_ms", format!("{:.2}", raw.as_secs_f64() * 1000.0)));
+                        }
+                        movie_pacing_log(MovieLogLevel::Info, &self.name, "clamp_lead", fields);
+                        self.timeline.realign_presentation_origin(realigned);
                         self.clear_pending();
                         return FrameSchedule::Present(frame);
                     }
-                    let replaced = self.pending_frame.is_some();
-                    self.pending_deadline = Some(target);
-                    if self.pending_since.is_none() {
-                        self.pending_since = Some(now);
+                    let replaced = self.pending.is_some();
+                    let since = self
+                        .pending
+                        .as_ref()
+                        .map(|pending| pending.since)
+                        .unwrap_or(now);
+                    self.pending = Some(PendingMovieFrame {
+                        frame,
+                        pts: Some(pts),
+                        deadline: target,
+                        since,
+                    });
+                    if self.pending.is_some() {
+                        let (deadline, since, pts) = {
+                            let pending = self.pending.as_ref().unwrap();
+                            (pending.deadline, pending.since, pending.pts)
+                        };
+                        self.log_pending_deferral(now, deadline, since, pts, replaced);
                     }
-                    self.pending_frame = Some(frame);
-                    self.log_pending_deferral(target, now, Some(pts), replaced);
                     return FrameSchedule::Deferred(target);
                 }
                 if now
@@ -282,13 +473,18 @@ impl ActiveMovieStatus {
                     .map_or(false, |lag| lag > MAX_FRAME_LAG)
                 {
                     let realigned = now.checked_sub(pts).unwrap_or(now);
-                    println!(
-                        "[grim_viewer] movie {} realigning presentation origin (lag_ms={:.2} pts_ms={:.2})",
-                        self.name,
-                        now.duration_since(target).as_secs_f64() * 1000.0,
-                        pts.as_secs_f64() * 1000.0
-                    );
-                    self.presentation_origin = Some(realigned);
+                    let mut fields = vec![
+                        (
+                            "lag_ms",
+                            format!("{:.2}", now.duration_since(target).as_secs_f64() * 1000.0),
+                        ),
+                        ("pts_ms", format!("{:.2}", pts.as_secs_f64() * 1000.0)),
+                    ];
+                    if let Some(raw) = self.timeline.last_raw() {
+                        fields.push(("raw_pts_ms", format!("{:.2}", raw.as_secs_f64() * 1000.0)));
+                    }
+                    movie_pacing_log(MovieLogLevel::Info, &self.name, "realign_origin", fields);
+                    self.timeline.realign_presentation_origin(realigned);
                 }
                 self.clear_pending();
                 return FrameSchedule::Present(frame);
@@ -296,13 +492,25 @@ impl ActiveMovieStatus {
         } else if let Some(last_wall) = self.last_present_wall {
             let target = last_wall + DEFAULT_FRAME_INTERVAL;
             if target > now {
-                let replaced = self.pending_frame.is_some();
-                self.pending_deadline = Some(target);
-                if self.pending_since.is_none() {
-                    self.pending_since = Some(now);
+                let replaced = self.pending.is_some();
+                let since = self
+                    .pending
+                    .as_ref()
+                    .map(|pending| pending.since)
+                    .unwrap_or(now);
+                self.pending = Some(PendingMovieFrame {
+                    frame,
+                    pts: None,
+                    deadline: target,
+                    since,
+                });
+                if self.pending.is_some() {
+                    let (deadline, since, pts) = {
+                        let pending = self.pending.as_ref().unwrap();
+                        (pending.deadline, pending.since, pending.pts)
+                    };
+                    self.log_pending_deferral(now, deadline, since, pts, replaced);
                 }
-                self.pending_frame = Some(frame);
-                self.log_pending_deferral(target, now, None, replaced);
                 return FrameSchedule::Deferred(target);
             }
         }
@@ -313,8 +521,9 @@ impl ActiveMovieStatus {
 
     fn log_pending_deferral(
         &mut self,
-        deadline: Instant,
         now: Instant,
+        deadline: Instant,
+        since: Instant,
         pts: Option<Duration>,
         replaced: bool,
     ) {
@@ -325,32 +534,39 @@ impl ActiveMovieStatus {
             .checked_duration_since(now)
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        let pending_ms = self
-            .pending_since
-            .and_then(|since| now.checked_duration_since(since))
+        let pending_ms = now
+            .checked_duration_since(since)
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
         let pts_ms = pts
             .map(|d| format!("{:.2}", d.as_secs_f64() * 1000.0))
             .unwrap_or_else(|| "unknown".to_string());
-        println!(
-            "[grim_viewer] movie {} pending frame deferral wait_ms={:.2} pending_ms={:.2} pts_ms={} frames_received={} frames_presented={} status={}{}",
-            self.name,
-            wait_ms,
-            pending_ms,
-            pts_ms,
-            self.frames_received,
-            self.frames_rendered,
-            self.status.as_label(),
-            if replaced {
-                " (replacing existing pending frame)"
-            } else {
-                ""
-            },
+        let mut fields = vec![
+            ("wait_ms", format!("{:.2}", wait_ms)),
+            ("pending_ms", format!("{:.2}", pending_ms)),
+            ("pts_ms", pts_ms),
+            ("frames_received", self.frames_received.to_string()),
+            ("frames_presented", self.frames_rendered.to_string()),
+            ("status", self.status.as_label().to_string()),
+        ];
+        if replaced {
+            fields.push(("replaced", "true".to_string()));
+        }
+        movie_pacing_log(
+            MovieLogLevel::Verbose,
+            &self.name,
+            "pending_deferral",
+            fields,
         );
     }
 
-    fn log_pending_release(&mut self, deadline: Instant, now: Instant, pts: Option<Duration>) {
+    fn log_pending_release(
+        &mut self,
+        now: Instant,
+        deadline: Instant,
+        since: Instant,
+        pts: Option<Duration>,
+    ) {
         if !self.should_log_pending(now) {
             return;
         }
@@ -358,17 +574,24 @@ impl ActiveMovieStatus {
             .checked_duration_since(deadline)
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        let pending_ms = self
-            .pending_since
-            .and_then(|since| now.checked_duration_since(since))
+        let pending_ms = now
+            .checked_duration_since(since)
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
         let pts_ms = pts
             .map(|d| format!("{:.2}", d.as_secs_f64() * 1000.0))
             .unwrap_or_else(|| "unknown".to_string());
-        println!(
-            "[grim_viewer] movie {} releasing pending frame overshoot_ms={:.2} pending_ms={:.2} pts_ms={} frames_received={} frames_presented={}",
-            self.name, overshoot_ms, pending_ms, pts_ms, self.frames_received, self.frames_rendered,
+        movie_pacing_log(
+            MovieLogLevel::Verbose,
+            &self.name,
+            "pending_release",
+            [
+                ("overshoot_ms", format!("{:.2}", overshoot_ms)),
+                ("pending_ms", format!("{:.2}", pending_ms)),
+                ("pts_ms", pts_ms),
+                ("frames_received", self.frames_received.to_string()),
+                ("frames_presented", self.frames_rendered.to_string()),
+            ],
         );
     }
 
@@ -1137,6 +1360,73 @@ fn update_debug_panel(
 fn update_deadline(slot: &mut Option<Instant>, candidate: Instant) {
     if slot.map_or(true, |current| candidate < current) {
         *slot = Some(candidate);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MOVIE: &str = "test_movie";
+
+    #[test]
+    fn timeline_establishes_origin_and_normalises() {
+        let mut timeline = MovieTimeline::new();
+        match timeline.record(MOVIE, Some(Duration::from_millis(1_000))) {
+            TimelineRecord::Timestamp { origin_reset } => assert!(origin_reset),
+            _ => panic!("expected timestamp record"),
+        }
+        assert_eq!(timeline.last_normalized(), Some(Duration::ZERO));
+        assert!(timeline.take_origin_reset());
+    }
+
+    #[test]
+    fn timeline_preserves_forward_progress() {
+        let mut timeline = MovieTimeline::new();
+        let _ = timeline.record(MOVIE, Some(Duration::from_millis(1_000)));
+        timeline.take_origin_reset();
+
+        match timeline.record(MOVIE, Some(Duration::from_millis(1_033))) {
+            TimelineRecord::Timestamp { origin_reset } => assert!(!origin_reset),
+            _ => panic!("expected timestamp record"),
+        }
+        assert_eq!(timeline.last_normalized(), Some(Duration::from_millis(33)));
+        assert!(!timeline.take_origin_reset());
+    }
+
+    #[test]
+    fn timeline_resets_after_large_backward_jump() {
+        let mut timeline = MovieTimeline::new();
+        let _ = timeline.record(MOVIE, Some(Duration::from_millis(1_500)));
+        timeline.take_origin_reset();
+        let _ = timeline.record(MOVIE, Some(Duration::from_millis(3_000)));
+        timeline.take_origin_reset();
+
+        match timeline.record(MOVIE, Some(Duration::from_millis(900))) {
+            TimelineRecord::Timestamp { origin_reset } => assert!(origin_reset),
+            _ => panic!("expected timestamp record"),
+        }
+        assert_eq!(timeline.last_normalized(), Some(Duration::ZERO));
+        assert!(timeline.take_origin_reset());
+    }
+
+    #[test]
+    fn timeline_ignores_small_backward_noise() {
+        let mut timeline = MovieTimeline::new();
+        let _ = timeline.record(MOVIE, Some(Duration::from_millis(1_000)));
+        timeline.take_origin_reset();
+        let _ = timeline.record(MOVIE, Some(Duration::from_millis(2_000)));
+        timeline.take_origin_reset();
+
+        match timeline.record(MOVIE, Some(Duration::from_millis(1_950))) {
+            TimelineRecord::Timestamp { origin_reset } => assert!(!origin_reset),
+            _ => panic!("expected timestamp record"),
+        }
+        assert_eq!(
+            timeline.last_normalized(),
+            Some(Duration::from_millis(950))
+        );
+        assert!(!timeline.take_origin_reset());
     }
 }
 
