@@ -140,7 +140,7 @@ struct ActiveMovieStatus {
     last_log_report: Instant,
     timeline: MovieTimeline,
     last_present_wall: Option<Instant>,
-    pending: Option<PendingMovieFrame>,
+    pending: VecDeque<PendingMovieFrame>,
     last_pending_log: Option<Instant>,
 }
 
@@ -150,6 +150,13 @@ const MAX_FRAME_LAG: Duration = Duration::from_millis(200);
 const MAX_FRAME_LEAD: Duration = Duration::from_secs(8);
 const PTS_RESET_THRESHOLD: Duration = Duration::from_millis(500);
 const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+// Allow a small jitter buffer so bursts from the decoder do not get dropped.
+const MAX_PENDING_FRAMES: usize = 12;
+// Clamp to at most ~250 ms of lead so we never drift far ahead of realtime.
+const MAX_PRESENTATION_LEAD: Duration = Duration::from_millis(250);
+// Try to hover around 1–2 frames of lead; give ourselves 80–140 ms of slack.
+const TARGET_PRESENTATION_LEAD: Duration = Duration::from_millis(140);
+const MIN_PRESENTATION_LEAD: Duration = Duration::from_millis(80);
 
 #[derive(Clone, Copy)]
 enum MovieLogLevel {
@@ -322,7 +329,7 @@ impl ActiveMovieStatus {
             last_log_report: Instant::now(),
             timeline: MovieTimeline::new(),
             last_present_wall: None,
-            pending: None,
+            pending: VecDeque::new(),
             last_pending_log: None,
         }
     }
@@ -388,20 +395,37 @@ impl ActiveMovieStatus {
     }
 
     fn clear_pending(&mut self) {
-        self.pending = None;
+        self.pending.clear();
+    }
+
+    fn reschedule_pending_deadlines(&mut self, now: Instant) {
+        let Some(origin) = self.timeline.presentation_origin else {
+            return;
+        };
+        for pending in &mut self.pending {
+            if let Some(pts) = pending.pts {
+                if let Some(deadline) = origin.checked_add(pts) {
+                    pending.deadline = deadline;
+                } else {
+                    pending.deadline = now;
+                }
+            }
+            if pending.deadline < now {
+                pending.deadline = now;
+            }
+        }
     }
 
     fn poll_pending_ready(&mut self, now: Instant) -> Option<MovieFrame> {
-        if let Some(pending) = self.pending.as_ref() {
-            if now >= pending.deadline {
-                let pending = self.pending.take().unwrap();
+        if let Some(front) = self.pending.front() {
+            if now >= front.deadline {
                 let PendingMovieFrame {
                     frame,
                     pts,
                     deadline,
                     since,
-                } = pending;
-                self.log_pending_release(now, deadline, since, pts);
+                } = self.pending.pop_front().unwrap();
+                self.log_pending_release(now, deadline, since, pts, self.pending.len());
                 return Some(frame);
             }
         }
@@ -409,7 +433,7 @@ impl ActiveMovieStatus {
     }
 
     fn pending_deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|pending| pending.deadline)
+        self.pending.front().map(|pending| pending.deadline)
     }
 
     fn schedule_frame(&mut self, frame: MovieFrame, now: Instant) -> FrameSchedule {
@@ -423,7 +447,7 @@ impl ActiveMovieStatus {
         }
 
         if let Some(pts) = self.timeline.last_normalized() {
-            if let Some(target) = self.timeline.ensure_presentation_origin(pts, now) {
+            if let Some(mut target) = self.timeline.ensure_presentation_origin(pts, now) {
                 if target > now {
                     if target
                         .checked_duration_since(now)
@@ -447,25 +471,80 @@ impl ActiveMovieStatus {
                         self.clear_pending();
                         return FrameSchedule::Present(frame);
                     }
-                    let replaced = self.pending.is_some();
-                    let since = self
-                        .pending
-                        .as_ref()
-                        .map(|pending| pending.since)
-                        .unwrap_or(now);
-                    self.pending = Some(PendingMovieFrame {
+
+                    if let Some(current_lead) = target.checked_duration_since(now) {
+                        if current_lead > MAX_PRESENTATION_LEAD {
+                            let desired_lead = TARGET_PRESENTATION_LEAD
+                                .min(current_lead)
+                                .max(MIN_PRESENTATION_LEAD);
+                            let desired_target = now
+                                .checked_add(desired_lead)
+                                .unwrap_or_else(|| now + TARGET_PRESENTATION_LEAD);
+                            let realigned = desired_target.checked_sub(pts).unwrap_or(now);
+                            movie_pacing_log(
+                                MovieLogLevel::Info,
+                                &self.name,
+                                "limit_lead",
+                                [
+                                    (
+                                        "lead_ms",
+                                        format!("{:.2}", current_lead.as_secs_f64() * 1000.0),
+                                    ),
+                                    ("pts_ms", format!("{:.2}", pts.as_secs_f64() * 1000.0)),
+                                    (
+                                        "desired_lead_ms",
+                                        format!("{:.2}", desired_lead.as_secs_f64() * 1000.0),
+                                    ),
+                                ],
+                            );
+                            self.timeline.realign_presentation_origin(realigned);
+                            self.reschedule_pending_deadlines(now);
+                            if let Some(adjusted) =
+                                self.timeline.ensure_presentation_origin(pts, now)
+                            {
+                                target = adjusted;
+                            } else {
+                                target = desired_target;
+                            }
+                        }
+                    }
+
+                    let entry = PendingMovieFrame {
                         frame,
                         pts: Some(pts),
                         deadline: target,
-                        since,
-                    });
-                    if self.pending.is_some() {
+                        since: now,
+                    };
+
+                    if self.pending.len() >= MAX_PENDING_FRAMES {
+                        let forced = self.pending.pop_front().map(|pending| {
+                            let PendingMovieFrame {
+                                frame,
+                                pts,
+                                deadline,
+                                since,
+                            } = pending;
+                            self.log_pending_release(now, deadline, since, pts, self.pending.len());
+                            frame
+                        });
+                        self.pending.push_back(entry);
                         let (deadline, since, pts) = {
-                            let pending = self.pending.as_ref().unwrap();
+                            let pending = self.pending.back().unwrap();
                             (pending.deadline, pending.since, pending.pts)
                         };
-                        self.log_pending_deferral(now, deadline, since, pts, replaced);
+                        self.log_pending_deferral(now, deadline, since, pts, self.pending.len());
+                        if let Some(frame) = forced {
+                            return FrameSchedule::Present(frame);
+                        }
+                        return FrameSchedule::Deferred(target);
                     }
+
+                    self.pending.push_back(entry);
+                    let (deadline, since, pts) = {
+                        let pending = self.pending.back().unwrap();
+                        (pending.deadline, pending.since, pending.pts)
+                    };
+                    self.log_pending_deferral(now, deadline, since, pts, self.pending.len());
                     return FrameSchedule::Deferred(target);
                 }
                 if now
@@ -492,25 +571,40 @@ impl ActiveMovieStatus {
         } else if let Some(last_wall) = self.last_present_wall {
             let target = last_wall + DEFAULT_FRAME_INTERVAL;
             if target > now {
-                let replaced = self.pending.is_some();
-                let since = self
-                    .pending
-                    .as_ref()
-                    .map(|pending| pending.since)
-                    .unwrap_or(now);
-                self.pending = Some(PendingMovieFrame {
+                let entry = PendingMovieFrame {
                     frame,
                     pts: None,
                     deadline: target,
-                    since,
-                });
-                if self.pending.is_some() {
+                    since: now,
+                };
+                if self.pending.len() >= MAX_PENDING_FRAMES {
+                    let forced = self.pending.pop_front().map(|pending| {
+                        let PendingMovieFrame {
+                            frame,
+                            pts,
+                            deadline,
+                            since,
+                        } = pending;
+                        self.log_pending_release(now, deadline, since, pts, self.pending.len());
+                        frame
+                    });
+                    self.pending.push_back(entry);
                     let (deadline, since, pts) = {
-                        let pending = self.pending.as_ref().unwrap();
+                        let pending = self.pending.back().unwrap();
                         (pending.deadline, pending.since, pending.pts)
                     };
-                    self.log_pending_deferral(now, deadline, since, pts, replaced);
+                    self.log_pending_deferral(now, deadline, since, pts, self.pending.len());
+                    if let Some(frame) = forced {
+                        return FrameSchedule::Present(frame);
+                    }
+                    return FrameSchedule::Deferred(target);
                 }
+                self.pending.push_back(entry);
+                let (deadline, since, pts) = {
+                    let pending = self.pending.back().unwrap();
+                    (pending.deadline, pending.since, pending.pts)
+                };
+                self.log_pending_deferral(now, deadline, since, pts, self.pending.len());
                 return FrameSchedule::Deferred(target);
             }
         }
@@ -525,7 +619,7 @@ impl ActiveMovieStatus {
         deadline: Instant,
         since: Instant,
         pts: Option<Duration>,
-        replaced: bool,
+        queued: usize,
     ) {
         if !self.should_log_pending(now) {
             return;
@@ -549,9 +643,7 @@ impl ActiveMovieStatus {
             ("frames_presented", self.frames_rendered.to_string()),
             ("status", self.status.as_label().to_string()),
         ];
-        if replaced {
-            fields.push(("replaced", "true".to_string()));
-        }
+        fields.push(("queued_frames", queued.to_string()));
         movie_pacing_log(
             MovieLogLevel::Verbose,
             &self.name,
@@ -566,6 +658,7 @@ impl ActiveMovieStatus {
         deadline: Instant,
         since: Instant,
         pts: Option<Duration>,
+        remaining: usize,
     ) {
         if !self.should_log_pending(now) {
             return;
@@ -591,6 +684,7 @@ impl ActiveMovieStatus {
                 ("pts_ms", pts_ms),
                 ("frames_received", self.frames_received.to_string()),
                 ("frames_presented", self.frames_rendered.to_string()),
+                ("queued_frames", remaining.to_string()),
             ],
         );
     }
@@ -886,11 +980,13 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                     println!("[grim_viewer] engine viewer-ready acknowledged");
                 }
                 EngineEvent::State(update) => {
-                    println!(
-                        "[grim_viewer] received engine update events={} seq={}",
-                        update.events.len(),
-                        update.seq
-                    );
+                    if !update.events.is_empty() {
+                        println!(
+                            "[grim_viewer] received engine update events={} seq={}",
+                            update.events.len(),
+                            update.seq
+                        );
+                    }
                     stream.last_update = Some(update.clone());
                 }
                 EngineEvent::MovieStart(start) => {
@@ -1422,10 +1518,7 @@ mod tests {
             TimelineRecord::Timestamp { origin_reset } => assert!(!origin_reset),
             _ => panic!("expected timestamp record"),
         }
-        assert_eq!(
-            timeline.last_normalized(),
-            Some(Duration::from_millis(950))
-        );
+        assert_eq!(timeline.last_normalized(), Some(Duration::from_millis(950)));
         assert!(!timeline.take_origin_reset());
     }
 }

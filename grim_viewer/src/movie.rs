@@ -556,8 +556,8 @@ fn run_pipeline_inner(
         .build();
     let appsink = AppSink::builder()
         .caps(&caps)
-        .drop(true)
-        .max_buffers(1)
+        .drop(false)
+        .max_buffers(8)
         .sync(false)
         .build();
 
