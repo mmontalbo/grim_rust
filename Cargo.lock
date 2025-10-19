@@ -1091,6 +1091,7 @@ dependencies = [
  "crossbeam-channel",
  "env_logger",
  "fontdue",
+ "grim_formats",
  "grim_stream",
  "gstreamer",
  "gstreamer-app",

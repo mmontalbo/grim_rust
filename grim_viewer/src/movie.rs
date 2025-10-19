@@ -666,9 +666,7 @@ fn run_pipeline_inner(
         } else {
             let now = Instant::now();
             let first_miss = no_sample_since.get_or_insert(now);
-            let idle = now
-                .checked_duration_since(*first_miss)
-                .unwrap_or_default();
+            let idle = now.checked_duration_since(*first_miss).unwrap_or_default();
 
             let video_eos = video_eos_flag.load(Ordering::Relaxed);
             let idle_ms = idle.as_secs_f64() * 1000.0;
@@ -682,7 +680,8 @@ fn run_pipeline_inner(
                     } else {
                         println!(
                             "[grim_viewer] movie pipeline idle for {:.2}ms, forcing end {}",
-                            idle_ms, path.display()
+                            idle_ms,
+                            path.display()
                         );
                     }
                     let _ = event_tx.send(MoviePlaybackEvent::Finished);

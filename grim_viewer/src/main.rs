@@ -10,6 +10,7 @@ use std::{
 
 mod display;
 mod layout;
+mod live_scene;
 mod live_stream;
 mod movie;
 mod overlay;
@@ -20,6 +21,7 @@ use crossbeam_channel::TryRecvError as CrossbeamTryRecvError;
 use display::ViewerState;
 use env_logger;
 use grim_stream::{Frame, Hello, MovieAction, MovieControl, MovieStart, StateUpdate, StreamConfig};
+use live_scene::LiveSceneState;
 use live_stream::{
     EngineCommand, EngineCommandSender, EngineEvent, RetailEvent, spawn_engine_client,
     spawn_retail_client,
@@ -98,6 +100,7 @@ struct EngineStreamState {
     last_update: Option<StateUpdate>,
     active_movie: Option<ActiveMovieStatus>,
     install_root: PathBuf,
+    scene: LiveSceneState,
 }
 
 struct QueuedFrame {
@@ -754,13 +757,15 @@ fn main() -> Result<()> {
     let mut engine_stream = args.engine_stream.as_ref().map(|addr| {
         println!("[grim_viewer] engine stream -> {addr}");
         let client = spawn_engine_client(addr.clone());
+        let install_root = movie_install_root();
         EngineStreamState {
             rx: client.events,
             command_tx: client.commands,
             hello: None,
             last_update: None,
             active_movie: None,
-            install_root: movie_install_root(),
+            install_root: install_root.clone(),
+            scene: LiveSceneState::new(install_root),
         }
     });
 
@@ -975,6 +980,18 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                         hello.build.as_deref().unwrap_or("-")
                     );
                     stream.hello = Some(hello);
+                    stream.scene = LiveSceneState::new(stream.install_root.clone());
+                    if let Some(frame) = stream.scene.compose_frame() {
+                        if let Err(err) =
+                            viewer.upload_engine_frame(frame.width, frame.height, frame.pixels)
+                        {
+                            eprintln!(
+                                "[grim_viewer] engine overlay upload failed after connect: {err:?}"
+                            );
+                        } else {
+                            viewer.window().request_redraw();
+                        }
+                    }
                 }
                 EngineEvent::ViewerReady => {
                     println!("[grim_viewer] engine viewer-ready acknowledged");
@@ -987,7 +1004,16 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                             update.seq
                         );
                     }
-                    stream.last_update = Some(update.clone());
+                    if let Some(frame) = stream.scene.ingest_state_update(&update) {
+                        if let Err(err) =
+                            viewer.upload_engine_frame(frame.width, frame.height, frame.pixels)
+                        {
+                            eprintln!("[grim_viewer] engine overlay upload failed: {err:?}");
+                        } else {
+                            viewer.window().request_redraw();
+                        }
+                    }
+                    stream.last_update = Some(update);
                 }
                 EngineEvent::MovieStart(start) => {
                     let path_result = begin_movie_playback(stream, viewer, &start);
@@ -1042,6 +1068,18 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                     stream.hello = None;
                     viewer.hide_movie();
                     stream.active_movie = None;
+                    stream.scene = LiveSceneState::new(stream.install_root.clone());
+                    if let Some(frame) = stream.scene.compose_frame() {
+                        if let Err(err) =
+                            viewer.upload_engine_frame(frame.width, frame.height, frame.pixels)
+                        {
+                            eprintln!(
+                                "[grim_viewer] engine overlay upload failed after disconnect: {err:?}"
+                            );
+                        } else {
+                            viewer.window().request_redraw();
+                        }
+                    }
                 }
             },
             Err(TryRecvError::Empty) => break,
@@ -1430,6 +1468,38 @@ fn update_debug_panel(
                             / 1_000_000.0;
                         lines.push(format!("Frame Δt: {delta_ms:.2} ms"));
                     }
+                }
+                lines.push(String::new());
+                lines.push("Scene State".to_string());
+                let hotspot_label = update
+                    .active_hotspot
+                    .as_deref()
+                    .map(|name| format!("[{}]", name))
+                    .unwrap_or_else(|| "(none)".to_string());
+                lines.push(format!("Hotspot: {hotspot_label}"));
+                if let Some(commentary) = update.commentary.as_ref() {
+                    let label = commentary.label.as_deref().unwrap_or_else(|| {
+                        if commentary.active {
+                            "(active)"
+                        } else {
+                            "(idle)"
+                        }
+                    });
+                    let status = if commentary.active { "ACTIVE" } else { "idle" };
+                    let mut line = format!("Commentary: {status} {label}");
+                    if let Some(reason) = commentary.suppressed_reason.as_ref() {
+                        line.push_str(&format!(" (suppressed: {reason})"));
+                    }
+                    lines.push(line);
+                } else {
+                    lines.push("Commentary: (none)".to_string());
+                }
+                if let Some(tube) = update.tube.as_ref() {
+                    let pose = tube.pose.as_deref().unwrap_or("(unknown pose)");
+                    let contents = tube.contains.as_deref().unwrap_or("(empty)");
+                    lines.push(format!("Tube: pose={pose} contains={contents}"));
+                } else {
+                    lines.push("Tube: (offline)".to_string());
                 }
                 if let Some(movie) = stream.active_movie.as_ref() {
                     lines.push(format!(

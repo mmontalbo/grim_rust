@@ -1381,9 +1381,7 @@ impl EngineContext {
     }
 
     pub(super) fn actor_current_chore(&self, id: &str) -> Option<String> {
-        self.actors
-            .actor_current_chore(id)
-            .map(str::to_string)
+        self.actors.actor_current_chore(id).map(str::to_string)
     }
 
     pub(super) fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
