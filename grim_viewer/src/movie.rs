@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Once, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel;
@@ -22,6 +23,7 @@ pub struct MovieFrame {
     pub height: u32,
     pub stride: u32,
     pub pixels: Vec<u8>,
+    pub timestamp: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -372,7 +374,7 @@ fn run_ffmpeg_pipeline_inner(
     event_tx: Sender<MoviePlaybackEvent>,
     command_rx: Receiver<MoviePlayerCommand>,
 ) -> Result<()> {
-    let (width, height) = probe_video_dimensions(path)?;
+    let (width, height, frame_interval) = probe_video_properties(path)?;
     let mut child = Command::new("ffmpeg")
         .arg("-loglevel")
         .arg("error")
@@ -463,11 +465,13 @@ fn run_ffmpeg_pipeline_inner(
             &frame_pixels,
         );
 
+        let timestamp = frame_interval.map(|interval| interval.mul_f64(frames_sent as f64));
         let frame = MovieFrame {
             width,
             height,
             stride: stride_bytes as u32,
             pixels: frame_pixels,
+            timestamp,
         };
 
         if let Err(err) = event_tx.send(MoviePlaybackEvent::Frame(frame)) {
@@ -496,14 +500,14 @@ fn run_ffmpeg_pipeline_inner(
     }
 }
 
-fn probe_video_dimensions(path: &Path) -> Result<(u32, u32)> {
+fn probe_video_properties(path: &Path) -> Result<(u32, u32, Option<Duration>)> {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
         .arg("v:0")
         .arg("-show_entries")
-        .arg("stream=width,height")
+        .arg("stream=width,height,avg_frame_rate")
         .arg("-of")
         .arg("csv=p=0:s=x")
         .arg(path)
@@ -519,20 +523,23 @@ fn probe_video_dimensions(path: &Path) -> Result<(u32, u32)> {
     }
 
     let stdout = String::from_utf8(output.stdout).context("ffprobe stdout was not valid UTF-8")?;
-    let trimmed = stdout.trim();
-    let mut parts = trimmed.split('x');
+    let first_line = stdout.lines().next().unwrap_or_default().trim();
+    let mut parts = first_line.split('x');
     let width = parts
         .next()
-        .ok_or_else(|| anyhow!("ffprobe missing width output: {trimmed}"))?
+        .ok_or_else(|| anyhow!("ffprobe missing width output: {first_line}"))?
         .parse::<u32>()
         .context("failed to parse ffprobe width")?;
     let height = parts
         .next()
-        .ok_or_else(|| anyhow!("ffprobe missing height output: {trimmed}"))?
+        .ok_or_else(|| anyhow!("ffprobe missing height output: {first_line}"))?
         .parse::<u32>()
         .context("failed to parse ffprobe height")?;
+    let frame_interval = parts
+        .next()
+        .and_then(|raw| parse_avg_frame_rate(raw.trim()));
 
-    Ok((width, height))
+    Ok((width, height, frame_interval))
 }
 
 fn run_pipeline_inner(
@@ -597,7 +604,7 @@ fn run_pipeline_inner(
         }
 
         if let Some(sample) = appsink.try_pull_sample(sink_pull_timeout) {
-            match extract_movie_frame(sample) {
+            match extract_movie_frame(sample, frame_index) {
                 Ok(frame) => {
                     maybe_dump_decoded_frame(
                         "gstreamer",
@@ -666,7 +673,7 @@ fn run_pipeline_inner(
     Ok(())
 }
 
-fn extract_movie_frame(sample: gst::Sample) -> Result<MovieFrame> {
+fn extract_movie_frame(sample: gst::Sample, frame_index: u64) -> Result<MovieFrame> {
     let caps = sample
         .caps()
         .ok_or_else(|| anyhow!("sample missing caps"))?;
@@ -710,11 +717,50 @@ fn extract_movie_frame(sample: gst::Sample) -> Result<MovieFrame> {
     let mut pixels = vec![0u8; expected];
     pixels.copy_from_slice(&slice[..expected]);
 
+    let pts = buffer
+        .pts()
+        .map(|clock| Duration::from_nanos(clock.nseconds()));
+    let fps_timestamp = frame_duration_from_fps(info.fps());
+    let timestamp =
+        pts.or_else(|| fps_timestamp.map(|interval| interval.mul_f64(frame_index as f64)));
+
     let frame = MovieFrame {
         width: info.width(),
         height: info.height(),
         stride: stride as u32,
         pixels,
+        timestamp,
     };
     Ok(frame)
+}
+
+fn frame_duration_from_fps(fps: gst::Fraction) -> Option<Duration> {
+    let numer = fps.numer();
+    let denom = fps.denom();
+    if numer <= 0 || denom <= 0 {
+        return None;
+    }
+    let seconds = (denom as f64) / (numer as f64);
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(seconds))
+}
+
+fn parse_avg_frame_rate(raw: &str) -> Option<Duration> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "0/0" {
+        return None;
+    }
+    let (num_str, den_str) = trimmed.split_once('/')?;
+    let num: f64 = num_str.parse().ok()?;
+    let den: f64 = den_str.parse().ok()?;
+    if num <= 0.0 || den <= 0.0 {
+        return None;
+    }
+    let seconds = den / num;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(seconds))
 }

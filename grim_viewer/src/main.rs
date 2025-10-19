@@ -5,7 +5,7 @@ use std::{
         Arc,
         mpsc::{Receiver, TryRecvError},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 mod display;
@@ -24,7 +24,7 @@ use live_stream::{
     EngineCommand, EngineCommandSender, EngineEvent, RetailEvent, spawn_engine_client,
     spawn_retail_client,
 };
-use movie::{MoviePlayback, MoviePlaybackEvent};
+use movie::{MovieFrame, MoviePlayback, MoviePlaybackEvent};
 use wgpu::SurfaceError;
 use winit::{
     dpi::PhysicalSize,
@@ -119,7 +119,14 @@ struct ActiveMovieStatus {
     playback: MoviePlayback,
     status: MovieDisplayStatus,
     frames_rendered: u64,
+    frames_received: u64,
+    last_pts: Option<Duration>,
+    upload_time_ms_total: f64,
+    last_log_report: Instant,
 }
+
+const MOVIE_PROGRESS_FRAME_INTERVAL: u64 = 60;
+const MOVIE_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 
 enum MovieDisplayStatus {
     Playing,
@@ -132,6 +139,68 @@ impl MovieDisplayStatus {
             MovieDisplayStatus::Playing => "playing",
             MovieDisplayStatus::Skipping => "skipping",
         }
+    }
+}
+
+impl ActiveMovieStatus {
+    fn new(name: String, playback: MoviePlayback) -> Self {
+        Self {
+            name,
+            started: Instant::now(),
+            playback,
+            status: MovieDisplayStatus::Playing,
+            frames_rendered: 0,
+            frames_received: 0,
+            last_pts: None,
+            upload_time_ms_total: 0.0,
+            last_log_report: Instant::now(),
+        }
+    }
+
+    fn log_frame_receipt(&mut self, frame: &MovieFrame) {
+        self.frames_received = self.frames_received.saturating_add(1);
+        self.last_pts = frame.timestamp;
+    }
+
+    fn record_upload(&mut self, viewer: &mut ViewerState, upload_ms: f64, now: Instant) {
+        if self.frames_rendered == 0 {
+            println!(
+                "[grim_viewer] first movie frame presented for {}",
+                self.name
+            );
+            viewer.enable_next_frame_dump();
+        } else if matches!(self.frames_rendered, 5 | 30 | 120) {
+            println!(
+                "[grim_viewer] re-arming frame dump after {} frames",
+                self.frames_rendered
+            );
+            viewer.enable_next_frame_dump();
+        }
+
+        self.frames_rendered = self.frames_rendered.saturating_add(1);
+        self.upload_time_ms_total += upload_ms;
+        if !matches!(self.status, MovieDisplayStatus::Skipping) {
+            self.status = MovieDisplayStatus::Playing;
+        }
+
+        if self.should_log_progress(now) {
+            let avg_upload = self.upload_time_ms_total / self.frames_rendered.max(1) as f64;
+            let pts_ms = self
+                .last_pts
+                .map(|pts| format!("{:.2}", pts.as_secs_f64() * 1000.0))
+                .unwrap_or_else(|| "unknown".to_string());
+            println!(
+                "[grim_viewer] movie {} progress: received={} presented={} avg_upload_ms={:.3} last_pts_ms={}",
+                self.name, self.frames_received, self.frames_rendered, avg_upload, pts_ms
+            );
+            self.last_log_report = now;
+        }
+    }
+
+    fn should_log_progress(&self, now: Instant) -> bool {
+        self.frames_rendered == 1
+            || self.frames_rendered % MOVIE_PROGRESS_FRAME_INTERVAL == 0
+            || now.duration_since(self.last_log_report) >= MOVIE_PROGRESS_TIME_INTERVAL
     }
 }
 
@@ -499,13 +568,7 @@ fn begin_movie_playback(
         path.display()
     );
 
-    stream.active_movie = Some(ActiveMovieStatus {
-        name: start.name.clone(),
-        started: Instant::now(),
-        playback,
-        status: MovieDisplayStatus::Playing,
-        frames_rendered: 0,
-    });
+    stream.active_movie = Some(ActiveMovieStatus::new(start.name.clone(), playback));
 
     Ok(path)
 }
@@ -567,6 +630,8 @@ fn pump_movie_playback(
         loop {
             match active.playback.try_recv() {
                 Ok(MoviePlaybackEvent::Frame(frame)) => {
+                    active.log_frame_receipt(&frame);
+                    let upload_start = Instant::now();
                     if let Err(err) = viewer.upload_movie_frame(
                         frame.width,
                         frame.height,
@@ -585,27 +650,17 @@ fn pump_movie_playback(
                         ));
                         break;
                     }
-                    if active.frames_rendered == 0 {
-                        println!(
-                            "[grim_viewer] first movie frame received for {}",
-                            active.name
-                        );
-                        viewer.enable_next_frame_dump();
-                    } else if matches!(active.frames_rendered, 5 | 30 | 120) {
-                        println!(
-                            "[grim_viewer] re-arming frame dump after {} frames",
-                            active.frames_rendered
-                        );
-                        viewer.enable_next_frame_dump();
-                    }
-                    active.frames_rendered = active.frames_rendered.saturating_add(1);
-                    if !matches!(active.status, MovieDisplayStatus::Skipping) {
-                        active.status = MovieDisplayStatus::Playing;
-                    }
+
+                    let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
+                    active.record_upload(viewer, upload_ms, Instant::now());
                     window.request_redraw();
                     needs_redraw = true;
                 }
                 Ok(MoviePlaybackEvent::Finished) => {
+                    println!(
+                        "[grim_viewer] decoder finished for {} (frames_received={}, frames_presented={})",
+                        active.name, active.frames_received, active.frames_rendered
+                    );
                     completion = Some((
                         active.name.clone(),
                         MovieAction::Finished,
@@ -615,6 +670,10 @@ fn pump_movie_playback(
                     break;
                 }
                 Ok(MoviePlaybackEvent::Skipped) => {
+                    println!(
+                        "[grim_viewer] decoder reported skip for {} (frames_received={}, frames_presented={})",
+                        active.name, active.frames_received, active.frames_rendered
+                    );
                     completion = Some((
                         active.name.clone(),
                         MovieAction::Skipped,
@@ -624,6 +683,10 @@ fn pump_movie_playback(
                     break;
                 }
                 Ok(MoviePlaybackEvent::Error(message)) => {
+                    eprintln!(
+                        "[grim_viewer] decoder error for {}: {} (frames_received={}, frames_presented={})",
+                        active.name, message, active.frames_received, active.frames_rendered
+                    );
                     completion = Some((
                         active.name.clone(),
                         MovieAction::Error,
@@ -634,6 +697,10 @@ fn pump_movie_playback(
                 }
                 Err(CrossbeamTryRecvError::Empty) => break,
                 Err(CrossbeamTryRecvError::Disconnected) => {
+                    eprintln!(
+                        "[grim_viewer] movie pipeline disconnected unexpectedly for {} (frames_received={}, frames_presented={})",
+                        active.name, active.frames_received, active.frames_rendered
+                    );
                     completion = Some((
                         active.name.clone(),
                         MovieAction::Error,

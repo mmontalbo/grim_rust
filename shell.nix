@@ -96,6 +96,8 @@ in pkgs.mkShell {
     qemu              # user-mode emulation for 32-bit binaries
     gdb               # inspect qemu-i386 core dumps
     xdotool           # locate X11 windows for targeted capture
+    linuxPackages.perf # profile CPU hotspots / scheduler contention
+    cargo-flamegraph   # generate annotated perf flamegraphs
     rustc
     cargo
     rustfmt

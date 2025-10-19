@@ -177,12 +177,7 @@ impl ViewerState {
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
 
             render_pass.set_vertex_buffer(0, self.engine_vertex_buffer.slice(..));
-            let movie_visible = self.movie_renderer.is_visible();
-            println!(
-                "[grim_viewer] render movie_visible={movie_visible} rect={:?}",
-                self.engine_rect
-            );
-            if movie_visible {
+            if self.movie_renderer.is_visible() {
                 self.movie_renderer.log_draw();
                 render_pass.set_bind_group(0, self.movie_renderer.bind_group(), &[]);
             } else {
@@ -1114,10 +1109,6 @@ impl MovieRenderer {
                 width, height, stride_bytes
             );
         }
-        println!(
-            "[grim_viewer] movie frame uploaded ({}x{}, stride={})",
-            width, height, stride_bytes
-        );
         Ok(())
     }
 
