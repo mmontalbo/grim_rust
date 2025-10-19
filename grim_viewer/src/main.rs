@@ -31,7 +31,7 @@ use winit::{
     event::{ElementState, Event, KeyEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
-    window::{Window, WindowBuilder},
+    window::WindowBuilder,
 };
 
 #[derive(Parser, Debug)]
@@ -96,26 +96,22 @@ struct EngineStreamState {
     command_tx: EngineCommandSender,
     hello: Option<Hello>,
     last_update: Option<StateUpdate>,
-    last_update_received: Option<Instant>,
     active_movie: Option<ActiveMovieStatus>,
     install_root: PathBuf,
 }
 
 struct QueuedFrame {
     frame: Frame,
-    received_at: Instant,
 }
 
 #[derive(Clone, Copy)]
 struct FrameStats {
     frame_id: u64,
     host_time_ns: u64,
-    received_at: Instant,
 }
 
 struct ActiveMovieStatus {
     name: String,
-    started: Instant,
     playback: MoviePlayback,
     status: MovieDisplayStatus,
     frames_rendered: u64,
@@ -123,10 +119,16 @@ struct ActiveMovieStatus {
     last_pts: Option<Duration>,
     upload_time_ms_total: f64,
     last_log_report: Instant,
+    presentation_origin: Option<Instant>,
+    last_present_wall: Option<Instant>,
+    pending_frame: Option<MovieFrame>,
+    pending_deadline: Option<Instant>,
 }
 
 const MOVIE_PROGRESS_FRAME_INTERVAL: u64 = 60;
 const MOVIE_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_FRAME_LAG: Duration = Duration::from_millis(200);
+const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 enum MovieDisplayStatus {
     Playing,
@@ -146,7 +148,6 @@ impl ActiveMovieStatus {
     fn new(name: String, playback: MoviePlayback) -> Self {
         Self {
             name,
-            started: Instant::now(),
             playback,
             status: MovieDisplayStatus::Playing,
             frames_rendered: 0,
@@ -154,6 +155,10 @@ impl ActiveMovieStatus {
             last_pts: None,
             upload_time_ms_total: 0.0,
             last_log_report: Instant::now(),
+            presentation_origin: None,
+            last_present_wall: None,
+            pending_frame: None,
+            pending_deadline: None,
         }
     }
 
@@ -182,6 +187,7 @@ impl ActiveMovieStatus {
         if !matches!(self.status, MovieDisplayStatus::Skipping) {
             self.status = MovieDisplayStatus::Playing;
         }
+        self.last_present_wall = Some(now);
 
         if self.should_log_progress(now) {
             let avg_upload = self.upload_time_ms_total / self.frames_rendered.max(1) as f64;
@@ -202,6 +208,64 @@ impl ActiveMovieStatus {
             || self.frames_rendered % MOVIE_PROGRESS_FRAME_INTERVAL == 0
             || now.duration_since(self.last_log_report) >= MOVIE_PROGRESS_TIME_INTERVAL
     }
+
+    fn clear_pending(&mut self) {
+        self.pending_frame = None;
+        self.pending_deadline = None;
+    }
+
+    fn poll_pending_ready(&mut self, now: Instant) -> Option<MovieFrame> {
+        match (self.pending_deadline, self.pending_frame.as_ref()) {
+            (Some(deadline), Some(_)) if now >= deadline => {
+                self.pending_deadline = None;
+                self.pending_frame.take()
+            }
+            _ => None,
+        }
+    }
+
+    fn pending_deadline(&self) -> Option<Instant> {
+        self.pending_deadline
+    }
+
+    fn schedule_frame(&mut self, frame: MovieFrame, now: Instant) -> FrameSchedule {
+        if matches!(self.status, MovieDisplayStatus::Skipping) {
+            self.clear_pending();
+            return FrameSchedule::Present(frame);
+        }
+
+        if let Some(pts) = frame.timestamp {
+            let origin = self
+                .presentation_origin
+                .get_or_insert_with(|| now.checked_sub(pts).unwrap_or(now));
+            if let Some(target) = origin.checked_add(pts) {
+                if target > now {
+                    self.pending_deadline = Some(target);
+                    self.pending_frame = Some(frame);
+                    return FrameSchedule::Deferred(target);
+                }
+                if now
+                    .checked_duration_since(target)
+                    .map_or(false, |lag| lag > MAX_FRAME_LAG)
+                {
+                    let realigned = now.checked_sub(pts).unwrap_or(now);
+                    self.presentation_origin = Some(realigned);
+                }
+                self.clear_pending();
+                return FrameSchedule::Present(frame);
+            }
+        } else if let Some(last_wall) = self.last_present_wall {
+            let target = last_wall + DEFAULT_FRAME_INTERVAL;
+            if target > now {
+                self.pending_deadline = Some(target);
+                self.pending_frame = Some(frame);
+                return FrameSchedule::Deferred(target);
+            }
+        }
+
+        self.clear_pending();
+        FrameSchedule::Present(frame)
+    }
 }
 
 #[derive(Default)]
@@ -209,6 +273,17 @@ struct SyncControls {
     paused: bool,
     pending_steps: u32,
     diff_enabled: bool,
+}
+
+enum FrameSchedule {
+    Present(MovieFrame),
+    Deferred(Instant),
+}
+
+#[derive(Default)]
+struct MoviePumpOutcome {
+    needs_redraw: bool,
+    next_deadline: Option<Instant>,
 }
 
 fn main() -> Result<()> {
@@ -251,7 +326,6 @@ fn main() -> Result<()> {
             command_tx: client.commands,
             hello: None,
             last_update: None,
-            last_update_received: None,
             active_movie: None,
             install_root: movie_install_root(),
         }
@@ -260,8 +334,6 @@ fn main() -> Result<()> {
     let mut controls = SyncControls::default();
 
     event_loop.run(move |event, target| {
-        target.set_control_flow(ControlFlow::Poll);
-
         match event {
             Event::WindowEvent { window_id, event } if window_id == viewer.window().id() => {
                 match event {
@@ -302,12 +374,15 @@ fn main() -> Result<()> {
             Event::AboutToWait => {
                 drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
                 drain_engine_events(engine_stream.as_mut(), &mut viewer);
-                let window_handle = viewer.window_handle();
-                let _ = pump_movie_playback(
-                    engine_stream.as_mut(),
-                    &mut viewer,
-                    window_handle.as_ref(),
-                );
+                let outcome = pump_movie_playback(engine_stream.as_mut(), &mut viewer);
+                if outcome.needs_redraw {
+                    viewer.window().request_redraw();
+                }
+                if let Some(deadline) = outcome.next_deadline {
+                    target.set_control_flow(ControlFlow::WaitUntil(deadline));
+                } else {
+                    target.set_control_flow(ControlFlow::Poll);
+                }
                 update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
                 update_debug_panel(
                     &mut viewer,
@@ -316,7 +391,6 @@ fn main() -> Result<()> {
                     engine_stream.as_ref(),
                 );
                 update_window_title(viewer.window(), &controls);
-                viewer.window().request_redraw();
             }
             _ => {}
         }
@@ -372,10 +446,7 @@ fn drain_retail_events(
                     viewer.set_frame_dimensions(width, height);
                 }
                 RetailEvent::Frame(frame) => {
-                    stream.pending_frames.push_back(QueuedFrame {
-                        frame,
-                        received_at: Instant::now(),
-                    });
+                    stream.pending_frames.push_back(QueuedFrame { frame });
                     while stream.pending_frames.len() > 8 {
                         stream.pending_frames.pop_front();
                     }
@@ -446,7 +517,6 @@ fn present_frame(stream: &mut RetailStreamState, viewer: &mut ViewerState, queue
     stream.last_frame = Some(FrameStats {
         frame_id: queued.frame.frame_id,
         host_time_ns: queued.frame.host_time_ns,
-        received_at: queued.received_at,
     });
 }
 
@@ -482,7 +552,6 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                         update.events.len(),
                         update.seq
                     );
-                    stream.last_update_received = Some(Instant::now());
                     stream.last_update = Some(update.clone());
                 }
                 EngineEvent::MovieStart(start) => {
@@ -619,42 +688,79 @@ fn notify_movie_control(
 fn pump_movie_playback(
     stream: Option<&mut EngineStreamState>,
     viewer: &mut ViewerState,
-    window: &Window,
-) -> bool {
+) -> MoviePumpOutcome {
     let Some(stream) = stream else {
-        return false;
+        return MoviePumpOutcome::default();
     };
-    let mut needs_redraw = false;
+    let mut outcome = MoviePumpOutcome::default();
     let mut completion: Option<(String, MovieAction, Option<String>, u64)> = None;
     if let Some(active) = stream.active_movie.as_mut() {
         loop {
+            let now = Instant::now();
+            if let Some(frame) = active.poll_pending_ready(now) {
+                let upload_start = Instant::now();
+                if let Err(err) = viewer.upload_movie_frame(
+                    frame.width,
+                    frame.height,
+                    frame.stride,
+                    &frame.pixels,
+                ) {
+                    eprintln!(
+                        "[grim_viewer] failed to upload movie frame for {}: {err:?}",
+                        active.name
+                    );
+                    completion = Some((
+                        active.name.clone(),
+                        MovieAction::Error,
+                        Some(format!("viewer upload failed: {err}")),
+                        active.frames_rendered,
+                    ));
+                    break;
+                }
+
+                let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
+                active.record_upload(viewer, upload_ms, Instant::now());
+                outcome.needs_redraw = true;
+                continue;
+            } else if let Some(deadline) = active.pending_deadline() {
+                update_deadline(&mut outcome.next_deadline, deadline);
+                break;
+            }
+
             match active.playback.try_recv() {
                 Ok(MoviePlaybackEvent::Frame(frame)) => {
                     active.log_frame_receipt(&frame);
                     let upload_start = Instant::now();
-                    if let Err(err) = viewer.upload_movie_frame(
-                        frame.width,
-                        frame.height,
-                        frame.stride,
-                        &frame.pixels,
-                    ) {
-                        eprintln!(
-                            "[grim_viewer] failed to upload movie frame for {}: {err:?}",
-                            active.name
-                        );
-                        completion = Some((
-                            active.name.clone(),
-                            MovieAction::Error,
-                            Some(format!("viewer upload failed: {err}")),
-                            active.frames_rendered,
-                        ));
-                        break;
-                    }
+                    match active.schedule_frame(frame, Instant::now()) {
+                        FrameSchedule::Present(frame) => {
+                            if let Err(err) = viewer.upload_movie_frame(
+                                frame.width,
+                                frame.height,
+                                frame.stride,
+                                &frame.pixels,
+                            ) {
+                                eprintln!(
+                                    "[grim_viewer] failed to upload movie frame for {}: {err:?}",
+                                    active.name
+                                );
+                                completion = Some((
+                                    active.name.clone(),
+                                    MovieAction::Error,
+                                    Some(format!("viewer upload failed: {err}")),
+                                    active.frames_rendered,
+                                ));
+                                break;
+                            }
 
-                    let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
-                    active.record_upload(viewer, upload_ms, Instant::now());
-                    window.request_redraw();
-                    needs_redraw = true;
+                            let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
+                            active.record_upload(viewer, upload_ms, Instant::now());
+                            outcome.needs_redraw = true;
+                        }
+                        FrameSchedule::Deferred(deadline) => {
+                            update_deadline(&mut outcome.next_deadline, deadline);
+                            break;
+                        }
+                    }
                 }
                 Ok(MoviePlaybackEvent::Finished) => {
                     println!(
@@ -712,7 +818,7 @@ fn pump_movie_playback(
             }
         }
     } else {
-        return needs_redraw;
+        return outcome;
     }
 
     if let Some((name, action, message, frames)) = completion {
@@ -733,13 +839,12 @@ fn pump_movie_playback(
             );
         }
         viewer.hide_movie();
-        window.request_redraw();
-        needs_redraw = true;
+        outcome.needs_redraw = true;
         notify_movie_control(&stream.command_tx, &name, action, message);
         stream.active_movie = None;
     }
 
-    needs_redraw
+    outcome
 }
 
 fn request_movie_skip(stream: &mut EngineStreamState) -> bool {
@@ -859,10 +964,7 @@ fn update_debug_panel(
         lines.push("Status: disabled".to_string());
     } else {
         if let Some(frame) = retail.last_frame.as_ref() {
-            let age_ms = Instant::now()
-                .saturating_duration_since(frame.received_at)
-                .as_millis();
-            lines.push(format!("Frame: {} (age {} ms)", frame.frame_id, age_ms));
+            lines.push(format!("Frame: {}", frame.frame_id));
         } else if retail.hello.is_some() {
             lines.push("Frame: pending".to_string());
         } else {
@@ -885,11 +987,7 @@ fn update_debug_panel(
     match engine {
         Some(stream) if stream.hello.is_some() => {
             if let Some(update) = stream.last_update.as_ref() {
-                let age_ms = stream
-                    .last_update_received
-                    .map(|ts| Instant::now().saturating_duration_since(ts).as_millis())
-                    .unwrap_or(0);
-                lines.push(format!("Seq: {} (age {} ms)", update.seq, age_ms));
+                lines.push(format!("Seq: {}", update.seq));
                 if controls.diff_enabled && retail.enabled {
                     if let Some(frame) = retail.last_frame.as_ref() {
                         let delta_ms = (update.host_time_ns as i128 - frame.host_time_ns as i128)
@@ -899,12 +997,10 @@ fn update_debug_panel(
                     }
                 }
                 if let Some(movie) = stream.active_movie.as_ref() {
-                    let movie_age = movie.started.elapsed().as_millis();
                     lines.push(format!(
-                        "Cutscene: {} [{}; {} ms]",
+                        "Cutscene: {} [{}]",
                         movie.name,
-                        movie.status.as_label(),
-                        movie_age
+                        movie.status.as_label()
                     ));
                 }
             } else {
@@ -920,6 +1016,12 @@ fn update_debug_panel(
     }
 
     viewer.set_debug_lines(&lines);
+}
+
+fn update_deadline(slot: &mut Option<Instant>, candidate: Instant) {
+    if slot.map_or(true, |current| candidate < current) {
+        *slot = Some(candidate);
+    }
 }
 
 fn handle_sync_key(event: &KeyEvent, controls: &mut SyncControls) -> bool {

@@ -35,6 +35,7 @@ pub enum MoviePlaybackEvent {
 }
 
 static FRAME_DUMP_CONFIG: OnceLock<FrameDumpConfig> = OnceLock::new();
+const MOVIE_EVENT_QUEUE_DEPTH: usize = 8;
 
 #[derive(Debug)]
 struct FrameDumpConfig {
@@ -294,7 +295,7 @@ impl MoviePlayback {
             return Err(anyhow!("movie file {:?} not found", movie_path));
         }
 
-        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(MOVIE_EVENT_QUEUE_DEPTH);
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
         let handle = if use_ffmpeg_decoder() {

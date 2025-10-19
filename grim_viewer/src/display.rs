@@ -114,6 +114,7 @@ impl ViewerState {
         &self.window
     }
 
+    #[allow(dead_code)]
     pub fn window_handle(&self) -> std::sync::Arc<Window> {
         self.window.clone()
     }
