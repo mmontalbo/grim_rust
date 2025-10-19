@@ -3,6 +3,7 @@ use bytemuck::{Pod, Zeroable, cast_slice};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, mpsc};
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
@@ -59,6 +60,8 @@ struct PendingFrameDump {
 }
 
 static FRAME_DUMP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static MIRROR_MOVIE_TO_RETAIL: OnceLock<bool> = OnceLock::new();
+static MIRRORED_MOVIE_FRAME: AtomicBool = AtomicBool::new(false);
 
 impl ViewerState {
     pub async fn new(window: std::sync::Arc<Window>, width: u32, height: u32) -> Result<Self> {
@@ -109,6 +112,14 @@ impl ViewerState {
 
     pub fn window(&self) -> &Window {
         &self.window
+    }
+
+    pub fn window_handle(&self) -> std::sync::Arc<Window> {
+        self.window.clone()
+    }
+
+    pub fn enable_next_frame_dump(&mut self) {
+        self.frame_dump_done = false;
     }
 
     pub fn size(&self) -> PhysicalSize<u32> {
@@ -166,7 +177,13 @@ impl ViewerState {
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
 
             render_pass.set_vertex_buffer(0, self.engine_vertex_buffer.slice(..));
-            if self.movie_renderer.is_visible() {
+            let movie_visible = self.movie_renderer.is_visible();
+            println!(
+                "[grim_viewer] render movie_visible={movie_visible} rect={:?}",
+                self.engine_rect
+            );
+            if movie_visible {
+                self.movie_renderer.log_draw();
                 render_pass.set_bind_group(0, self.movie_renderer.bind_group(), &[]);
             } else {
                 render_pass.set_bind_group(0, &self.engine_bind_group, &[]);
@@ -429,11 +446,20 @@ impl ViewerState {
             height,
             stride_bytes,
             data,
-        )
+        )?;
+
+        if mirror_movie_to_retail_enabled() && !MIRRORED_MOVIE_FRAME.swap(true, Ordering::SeqCst) {
+            if let Err(err) = self.debug_mirror_movie_to_retail(width, height, stride_bytes, data) {
+                eprintln!("[grim_viewer] failed to mirror movie frame into retail pane: {err:?}");
+            }
+        }
+
+        Ok(())
     }
 
     pub fn hide_movie(&mut self) {
         self.movie_renderer.hide();
+        MIRRORED_MOVIE_FRAME.store(false, Ordering::SeqCst);
     }
 
     pub fn set_frame_dimensions(&mut self, width: u32, height: u32) {
@@ -460,6 +486,20 @@ impl ViewerState {
 
     pub fn set_engine_label(&mut self, text: &str) {
         self.engine_label_overlay.set_label(text);
+    }
+
+    fn debug_mirror_movie_to_retail(
+        &mut self,
+        width: u32,
+        height: u32,
+        stride_bytes: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        println!(
+            "[grim_viewer] mirroring movie frame into retail pane ({}x{}, stride={})",
+            width, height, stride_bytes
+        );
+        self.upload_frame(width, height, stride_bytes, data)
     }
 
     fn update_layout(&mut self) -> Result<()> {
@@ -917,6 +957,18 @@ fn frame_dump_path() -> Option<PathBuf> {
         .clone()
 }
 
+fn mirror_movie_to_retail_enabled() -> bool {
+    *MIRROR_MOVIE_TO_RETAIL.get_or_init(|| {
+        matches!(
+            std::env::var("GRIM_MOVIE_MIRROR_RETAIL")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
 fn align_to(value: u32, alignment: u32) -> u32 {
     if alignment == 0 {
         return value;
@@ -930,6 +982,8 @@ struct MovieRenderer {
     bind_group: wgpu::BindGroup,
     size: (u32, u32),
     visible: bool,
+    debug_draw_logged: bool,
+    debug_logs_remaining: u32,
 }
 
 impl MovieRenderer {
@@ -959,6 +1013,8 @@ impl MovieRenderer {
             bind_group,
             size: (1, 1),
             visible: false,
+            debug_draw_logged: false,
+            debug_logs_remaining: 5,
         })
     }
 
@@ -973,6 +1029,7 @@ impl MovieRenderer {
         stride_bytes: u32,
         data: &[u8],
     ) -> Result<()> {
+        let was_visible = self.visible;
         if width == 0 || height == 0 {
             self.visible = false;
             return Ok(());
@@ -1010,6 +1067,26 @@ impl MovieRenderer {
             FrameUpload::Owned(repack_rows(row_bytes, stride, height as usize, data))
         };
 
+        if self.debug_logs_remaining > 0 {
+            let bytes = upload.bytes();
+            let mut sample = Vec::new();
+            for chunk in bytes.chunks_exact(4).take(4) {
+                sample.push(format!("{:?}", chunk));
+            }
+            let center_offset = (height as usize / 2) * row_bytes + (width as usize / 2) * 4;
+            let center_pixel = &bytes[center_offset..center_offset + 4];
+            println!(
+                "[grim_viewer] movie frame sample pixels {} center {:?}",
+                sample.join(" "),
+                center_pixel
+            );
+            if center_pixel[..3] != [0, 0, 0] {
+                self.debug_logs_remaining = 0;
+            } else {
+                self.debug_logs_remaining = self.debug_logs_remaining.saturating_sub(1);
+            }
+        }
+
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
@@ -1030,6 +1107,17 @@ impl MovieRenderer {
             },
         );
         self.visible = true;
+        self.debug_draw_logged = false;
+        if !was_visible {
+            println!(
+                "[grim_viewer] movie renderer visible ({}x{}, stride={})",
+                width, height, stride_bytes
+            );
+        }
+        println!(
+            "[grim_viewer] movie frame uploaded ({}x{}, stride={})",
+            width, height, stride_bytes
+        );
         Ok(())
     }
 
@@ -1059,6 +1147,7 @@ impl MovieRenderer {
                 },
             ],
         });
+        self.debug_logs_remaining = 5;
         Ok(())
     }
 
@@ -1068,10 +1157,23 @@ impl MovieRenderer {
 
     fn hide(&mut self) {
         self.visible = false;
+        self.debug_draw_logged = false;
+        self.debug_logs_remaining = 5;
+        println!("[grim_viewer] movie renderer hidden");
     }
 
     fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    fn log_draw(&mut self) {
+        if !self.debug_draw_logged {
+            println!(
+                "[grim_viewer] movie renderer binding {}x{} texture",
+                self.size.0, self.size.1
+            );
+            self.debug_draw_logged = true;
+        }
     }
 }
 

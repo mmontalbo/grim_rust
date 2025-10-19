@@ -21,6 +21,7 @@ gstreamer = "0.22"
 gstreamer-app = "0.22"
 gstreamer-video = "0.22"
 url = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 tempfile = "3"

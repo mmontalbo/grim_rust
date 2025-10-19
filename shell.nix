@@ -75,13 +75,18 @@ let
     pkgs.gst_all_1.gst-libav
   ];
 
+  pythonWithImaging = pkgs.python3.withPackages (ps: with ps; [
+    pillow
+    numpy
+  ]);
+
 in pkgs.mkShell {
   packages = with pkgs; (
     [
     scummvmTools      # extraction tooling for reference data
     lua32             # legacy runtime matching the retail game's Lua 3.x lineage
     lua5_1            # many scripts target classic Lua semantics
-    python3           # quick one-off analysis helpers
+    pythonWithImaging # quick one-off analysis helpers with imaging support
     p7zip             # archive handling when spelunking assets
     ripgrep           # fast code/asset search
     jq                # lightweight JSON inspection for reports
@@ -117,6 +122,7 @@ in pkgs.mkShell {
     xorg.libXxf86vm
     xorg.libXtst
     xorg.xwininfo
+    imagemagick
     ]
     ++ gstPackages
   );

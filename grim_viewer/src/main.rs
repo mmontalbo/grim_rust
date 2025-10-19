@@ -31,7 +31,7 @@ use winit::{
     event::{ElementState, Event, KeyEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
-    window::WindowBuilder,
+    window::{Window, WindowBuilder},
 };
 
 #[derive(Parser, Debug)]
@@ -233,7 +233,12 @@ fn main() -> Result<()> {
             Event::AboutToWait => {
                 drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
                 drain_engine_events(engine_stream.as_mut(), &mut viewer);
-                pump_movie_playback(engine_stream.as_mut(), &mut viewer);
+                let window_handle = viewer.window_handle();
+                let _ = pump_movie_playback(
+                    engine_stream.as_mut(),
+                    &mut viewer,
+                    window_handle.as_ref(),
+                );
                 update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
                 update_debug_panel(
                     &mut viewer,
@@ -548,10 +553,15 @@ fn notify_movie_control(
     }
 }
 
-fn pump_movie_playback(stream: Option<&mut EngineStreamState>, viewer: &mut ViewerState) {
+fn pump_movie_playback(
+    stream: Option<&mut EngineStreamState>,
+    viewer: &mut ViewerState,
+    window: &Window,
+) -> bool {
     let Some(stream) = stream else {
-        return;
+        return false;
     };
+    let mut needs_redraw = false;
     let mut completion: Option<(String, MovieAction, Option<String>, u64)> = None;
     if let Some(active) = stream.active_movie.as_mut() {
         loop {
@@ -580,11 +590,20 @@ fn pump_movie_playback(stream: Option<&mut EngineStreamState>, viewer: &mut View
                             "[grim_viewer] first movie frame received for {}",
                             active.name
                         );
+                        viewer.enable_next_frame_dump();
+                    } else if matches!(active.frames_rendered, 5 | 30 | 120) {
+                        println!(
+                            "[grim_viewer] re-arming frame dump after {} frames",
+                            active.frames_rendered
+                        );
+                        viewer.enable_next_frame_dump();
                     }
                     active.frames_rendered = active.frames_rendered.saturating_add(1);
                     if !matches!(active.status, MovieDisplayStatus::Skipping) {
                         active.status = MovieDisplayStatus::Playing;
                     }
+                    window.request_redraw();
+                    needs_redraw = true;
                 }
                 Ok(MoviePlaybackEvent::Finished) => {
                     completion = Some((
@@ -626,7 +645,7 @@ fn pump_movie_playback(stream: Option<&mut EngineStreamState>, viewer: &mut View
             }
         }
     } else {
-        return;
+        return needs_redraw;
     }
 
     if let Some((name, action, message, frames)) = completion {
@@ -647,9 +666,13 @@ fn pump_movie_playback(stream: Option<&mut EngineStreamState>, viewer: &mut View
             );
         }
         viewer.hide_movie();
+        window.request_redraw();
+        needs_redraw = true;
         notify_movie_control(&stream.command_tx, &name, action, message);
         stream.active_movie = None;
     }
+
+    needs_redraw
 }
 
 fn request_movie_skip(stream: &mut EngineStreamState) -> bool {
