@@ -3,7 +3,8 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Once, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use crossbeam_channel;
 use crossbeam_channel::{Receiver, Sender};
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_app::AppSink;
+use gstreamer_app::{AppSink, AppSinkCallbacks};
 use gstreamer_video::VideoInfo;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder};
@@ -36,6 +37,8 @@ pub enum MoviePlaybackEvent {
 
 static FRAME_DUMP_CONFIG: OnceLock<FrameDumpConfig> = OnceLock::new();
 const MOVIE_EVENT_QUEUE_DEPTH: usize = 8;
+// Treat the pipeline as complete if no video frames arrive within this window.
+const VIDEO_IDLE_EOS_THRESHOLD: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 struct FrameDumpConfig {
@@ -561,6 +564,19 @@ fn run_pipeline_inner(
         .sync(false)
         .build();
 
+    // Shared flag lets the worker thread notice when the video branch signals EOS.
+    let video_eos_flag = Arc::new(AtomicBool::new(false));
+    {
+        let flag = Arc::clone(&video_eos_flag);
+        appsink.set_callbacks(
+            AppSinkCallbacks::builder()
+                .eos(move |_| {
+                    flag.store(true, Ordering::Relaxed);
+                })
+                .build(),
+        );
+    }
+
     let playbin = gst::ElementFactory::make("playbin")
         .name("movie_playbin")
         .property("uri", uri.as_str())
@@ -584,6 +600,7 @@ fn run_pipeline_inner(
     let mut last_sample_wall = Instant::now();
     let mut no_sample_since: Option<Instant> = None;
     let mut last_no_sample_log: Option<Instant> = None;
+    let mut reported_finished = false;
 
     while !finished {
         match command_rx.try_recv() {
@@ -649,19 +666,40 @@ fn run_pipeline_inner(
         } else {
             let now = Instant::now();
             let first_miss = no_sample_since.get_or_insert(now);
-            let since_ms = now
+            let idle = now
                 .checked_duration_since(*first_miss)
-                .map(|delta| delta.as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-            let should_log = last_no_sample_log
-                .map(|prev| now.duration_since(prev) >= Duration::from_millis(200))
-                .unwrap_or(true);
-            if should_log && since_ms >= 100.0 {
-                println!(
-                    "[grim_viewer] movie pipeline stalled waiting for sample wait_ms={:.2} frames_sent={}",
-                    since_ms, frame_index
-                );
-                last_no_sample_log = Some(now);
+                .unwrap_or_default();
+
+            let video_eos = video_eos_flag.load(Ordering::Relaxed);
+            let idle_ms = idle.as_secs_f64() * 1000.0;
+            if video_eos || (frame_index > 0 && idle >= VIDEO_IDLE_EOS_THRESHOLD) {
+                if !reported_finished {
+                    if video_eos {
+                        println!(
+                            "[grim_viewer] movie pipeline video stream reached end {}",
+                            path.display()
+                        );
+                    } else {
+                        println!(
+                            "[grim_viewer] movie pipeline idle for {:.2}ms, forcing end {}",
+                            idle_ms, path.display()
+                        );
+                    }
+                    let _ = event_tx.send(MoviePlaybackEvent::Finished);
+                    reported_finished = true;
+                }
+                finished = true;
+            } else {
+                let should_log = last_no_sample_log
+                    .map(|prev| now.duration_since(prev) >= Duration::from_millis(200))
+                    .unwrap_or(true);
+                if should_log && idle_ms >= 100.0 {
+                    println!(
+                        "[grim_viewer] movie pipeline stalled waiting for sample wait_ms={:.2} frames_sent={}",
+                        idle_ms, frame_index
+                    );
+                    last_no_sample_log = Some(now);
+                }
             }
         }
 
@@ -669,11 +707,14 @@ fn run_pipeline_inner(
             use gstreamer::MessageView;
             match message.view() {
                 MessageView::Eos(..) => {
-                    println!(
-                        "[grim_viewer] movie pipeline reached end {}",
-                        path.display()
-                    );
-                    let _ = event_tx.send(MoviePlaybackEvent::Finished);
+                    if !reported_finished {
+                        println!(
+                            "[grim_viewer] movie pipeline reached end {}",
+                            path.display()
+                        );
+                        let _ = event_tx.send(MoviePlaybackEvent::Finished);
+                        reported_finished = true;
+                    }
                     finished = true;
                     break;
                 }
