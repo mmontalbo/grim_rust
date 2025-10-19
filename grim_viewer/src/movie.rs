@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Once, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel;
@@ -581,6 +581,9 @@ fn run_pipeline_inner(
     let mut finished = false;
     let sink_pull_timeout = gst::ClockTime::from_mseconds(15);
     let mut frame_index: u64 = 0;
+    let mut last_sample_wall = Instant::now();
+    let mut no_sample_since: Option<Instant> = None;
+    let mut last_no_sample_log: Option<Instant> = None;
 
     while !finished {
         match command_rx.try_recv() {
@@ -605,8 +608,24 @@ fn run_pipeline_inner(
         }
 
         if let Some(sample) = appsink.try_pull_sample(sink_pull_timeout) {
+            no_sample_since = None;
+            last_no_sample_log = None;
             match extract_movie_frame(sample, frame_index) {
                 Ok(frame) => {
+                    let now = Instant::now();
+                    let delta_ms = now
+                        .checked_duration_since(last_sample_wall)
+                        .map(|delta| delta.as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0);
+                    last_sample_wall = now;
+                    let pts_ms = frame
+                        .timestamp
+                        .map(|pts| format!("{:.2}", pts.as_secs_f64() * 1000.0))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!(
+                        "[grim_viewer] movie pipeline sample frame_index={} pts_ms={} delta_ms={:.2}",
+                        frame_index, pts_ms, delta_ms
+                    );
                     maybe_dump_decoded_frame(
                         "gstreamer",
                         &path,
@@ -626,6 +645,23 @@ fn run_pipeline_inner(
                     let _ = event_tx.send(MoviePlaybackEvent::Error(err.to_string()));
                     break;
                 }
+            }
+        } else {
+            let now = Instant::now();
+            let first_miss = no_sample_since.get_or_insert(now);
+            let since_ms = now
+                .checked_duration_since(*first_miss)
+                .map(|delta| delta.as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            let should_log = last_no_sample_log
+                .map(|prev| now.duration_since(prev) >= Duration::from_millis(200))
+                .unwrap_or(true);
+            if should_log && since_ms >= 100.0 {
+                println!(
+                    "[grim_viewer] movie pipeline stalled waiting for sample wait_ms={:.2} frames_sent={}",
+                    since_ms, frame_index
+                );
+                last_no_sample_log = Some(now);
             }
         }
 

@@ -123,11 +123,14 @@ struct ActiveMovieStatus {
     last_present_wall: Option<Instant>,
     pending_frame: Option<MovieFrame>,
     pending_deadline: Option<Instant>,
+    pending_since: Option<Instant>,
+    last_pending_log: Option<Instant>,
 }
 
 const MOVIE_PROGRESS_FRAME_INTERVAL: u64 = 60;
 const MOVIE_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_FRAME_LAG: Duration = Duration::from_millis(200);
+const MAX_FRAME_LEAD: Duration = Duration::from_millis(250);
 const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 enum MovieDisplayStatus {
@@ -159,6 +162,8 @@ impl ActiveMovieStatus {
             last_present_wall: None,
             pending_frame: None,
             pending_deadline: None,
+            pending_since: None,
+            last_pending_log: None,
         }
     }
 
@@ -212,13 +217,20 @@ impl ActiveMovieStatus {
     fn clear_pending(&mut self) {
         self.pending_frame = None;
         self.pending_deadline = None;
+        self.pending_since = None;
     }
 
     fn poll_pending_ready(&mut self, now: Instant) -> Option<MovieFrame> {
         match (self.pending_deadline, self.pending_frame.as_ref()) {
             (Some(deadline), Some(_)) if now >= deadline => {
                 self.pending_deadline = None;
-                self.pending_frame.take()
+                if let Some(frame) = self.pending_frame.take() {
+                    self.log_pending_release(deadline, now, frame.timestamp);
+                    self.pending_since = None;
+                    Some(frame)
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -240,8 +252,29 @@ impl ActiveMovieStatus {
                 .get_or_insert_with(|| now.checked_sub(pts).unwrap_or(now));
             if let Some(target) = origin.checked_add(pts) {
                 if target > now {
+                    if target
+                        .checked_duration_since(now)
+                        .map(|lead| lead > MAX_FRAME_LEAD)
+                        .unwrap_or(false)
+                    {
+                        let realigned = now.checked_sub(pts).unwrap_or(now);
+                        println!(
+                            "[grim_viewer] movie {} clamping presentation lead (lead_ms={:.2} pts_ms={:.2})",
+                            self.name,
+                            target.duration_since(now).as_secs_f64() * 1000.0,
+                            pts.as_secs_f64() * 1000.0
+                        );
+                        self.presentation_origin = Some(realigned);
+                        self.clear_pending();
+                        return FrameSchedule::Present(frame);
+                    }
+                    let replaced = self.pending_frame.is_some();
                     self.pending_deadline = Some(target);
+                    if self.pending_since.is_none() {
+                        self.pending_since = Some(now);
+                    }
                     self.pending_frame = Some(frame);
+                    self.log_pending_deferral(target, now, Some(pts), replaced);
                     return FrameSchedule::Deferred(target);
                 }
                 if now
@@ -249,6 +282,12 @@ impl ActiveMovieStatus {
                     .map_or(false, |lag| lag > MAX_FRAME_LAG)
                 {
                     let realigned = now.checked_sub(pts).unwrap_or(now);
+                    println!(
+                        "[grim_viewer] movie {} realigning presentation origin (lag_ms={:.2} pts_ms={:.2})",
+                        self.name,
+                        now.duration_since(target).as_secs_f64() * 1000.0,
+                        pts.as_secs_f64() * 1000.0
+                    );
                     self.presentation_origin = Some(realigned);
                 }
                 self.clear_pending();
@@ -257,14 +296,91 @@ impl ActiveMovieStatus {
         } else if let Some(last_wall) = self.last_present_wall {
             let target = last_wall + DEFAULT_FRAME_INTERVAL;
             if target > now {
+                let replaced = self.pending_frame.is_some();
                 self.pending_deadline = Some(target);
+                if self.pending_since.is_none() {
+                    self.pending_since = Some(now);
+                }
                 self.pending_frame = Some(frame);
+                self.log_pending_deferral(target, now, None, replaced);
                 return FrameSchedule::Deferred(target);
             }
         }
 
         self.clear_pending();
         FrameSchedule::Present(frame)
+    }
+
+    fn log_pending_deferral(
+        &mut self,
+        deadline: Instant,
+        now: Instant,
+        pts: Option<Duration>,
+        replaced: bool,
+    ) {
+        if !self.should_log_pending(now) {
+            return;
+        }
+        let wait_ms = deadline
+            .checked_duration_since(now)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let pending_ms = self
+            .pending_since
+            .and_then(|since| now.checked_duration_since(since))
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let pts_ms = pts
+            .map(|d| format!("{:.2}", d.as_secs_f64() * 1000.0))
+            .unwrap_or_else(|| "unknown".to_string());
+        println!(
+            "[grim_viewer] movie {} pending frame deferral wait_ms={:.2} pending_ms={:.2} pts_ms={} frames_received={} frames_presented={} status={}{}",
+            self.name,
+            wait_ms,
+            pending_ms,
+            pts_ms,
+            self.frames_received,
+            self.frames_rendered,
+            self.status.as_label(),
+            if replaced {
+                " (replacing existing pending frame)"
+            } else {
+                ""
+            },
+        );
+    }
+
+    fn log_pending_release(&mut self, deadline: Instant, now: Instant, pts: Option<Duration>) {
+        if !self.should_log_pending(now) {
+            return;
+        }
+        let overshoot_ms = now
+            .checked_duration_since(deadline)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let pending_ms = self
+            .pending_since
+            .and_then(|since| now.checked_duration_since(since))
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let pts_ms = pts
+            .map(|d| format!("{:.2}", d.as_secs_f64() * 1000.0))
+            .unwrap_or_else(|| "unknown".to_string());
+        println!(
+            "[grim_viewer] movie {} releasing pending frame overshoot_ms={:.2} pending_ms={:.2} pts_ms={} frames_received={} frames_presented={}",
+            self.name, overshoot_ms, pending_ms, pts_ms, self.frames_received, self.frames_rendered,
+        );
+    }
+
+    fn should_log_pending(&mut self, now: Instant) -> bool {
+        const MIN_PENDING_LOG_INTERVAL: Duration = Duration::from_millis(200);
+        match self.last_pending_log {
+            Some(prev) if now.duration_since(prev) < MIN_PENDING_LOG_INTERVAL => false,
+            _ => {
+                self.last_pending_log = Some(now);
+                true
+            }
+        }
     }
 }
 
