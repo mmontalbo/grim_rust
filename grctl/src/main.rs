@@ -43,6 +43,9 @@ enum CommandKind {
     /// Execute test/validation scripts with standard timeouts.
     #[command(subcommand)]
     Check(CheckCommand),
+    /// Run or manage scenario harness sessions.
+    #[command(subcommand)]
+    Scenario(ScenarioCommand),
     /// Show component status for the entire stack.
     Status,
 }
@@ -135,6 +138,16 @@ enum CheckCommand {
     IntroResume(CheckArgs),
     /// Validate that the viewer debug overlay renders engine events.
     EngineOverlay(CheckArgs),
+    /// Run a managed scenario harness.
+    Scenario(ScenarioArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScenarioCommand {
+    /// Run a managed scenario harness.
+    Run(ScenarioArgs),
+    /// Stop any scenario-managed components still running under grctl.
+    Stop,
 }
 
 #[derive(Args, Debug)]
@@ -145,6 +158,52 @@ struct CheckArgs {
     /// Additional arguments forwarded to the check script after '--'.
     #[arg(last = true)]
     extra_args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct ScenarioArgs {
+    /// Scenario to execute.
+    #[arg(value_enum)]
+    scenario: ScenarioKind,
+    /// Maximum runtime in seconds before grctl aborts the scenario (0 disables).
+    /// Defaults to 120s headless, 60s with --with-viewer.
+    #[arg(long)]
+    timeout: Option<u64>,
+    /// Launch grim_viewer alongside the engine when running the scenario.
+    #[arg(long)]
+    with_viewer: bool,
+    /// Additional grim_viewer CLI arguments (repeat flag, requires --with-viewer).
+    #[arg(
+        long,
+        value_name = "ARG",
+        requires = "with_viewer",
+        allow_hyphen_values = true
+    )]
+    viewer_extra: Vec<String>,
+    /// Extra hold time in seconds after the scenario markers appear.
+    #[arg(long, default_value_t = 0.0)]
+    hold_seconds: f64,
+    /// Launch the scenario components and exit immediately without waiting for completion.
+    #[arg(long)]
+    detach: bool,
+    /// Optional directory for scenario artifacts (forwarded to grim_scenarios).
+    #[arg(long)]
+    artifacts_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab_case")]
+enum ScenarioKind {
+    #[clap(name = "intro-to-office-computer")]
+    IntroToOfficeComputer,
+}
+
+impl ScenarioKind {
+    fn as_cli(self) -> &'static str {
+        match self {
+            ScenarioKind::IntroToOfficeComputer => "intro-to-office-computer",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -238,6 +297,7 @@ fn main() -> Result<()> {
         CommandKind::Viewer(cmd) => handle_viewer(cmd, &paths),
         CommandKind::Retail(cmd) => handle_retail(cmd, &paths),
         CommandKind::Check(cmd) => handle_check(cmd, &paths),
+        CommandKind::Scenario(cmd) => handle_scenario(cmd, &paths),
         CommandKind::Status => {
             for component in [
                 ComponentKind::Engine,
@@ -311,6 +371,14 @@ fn handle_check(cmd: CheckCommand, paths: &Paths) -> Result<()> {
             args.timeout,
             "check:engine_overlay",
         ),
+        CheckCommand::Scenario(args) => run_scenario(paths, args),
+    }
+}
+
+fn handle_scenario(cmd: ScenarioCommand, paths: &Paths) -> Result<()> {
+    match cmd {
+        ScenarioCommand::Run(args) => run_scenario(paths, args),
+        ScenarioCommand::Stop => stop_scenario(paths),
     }
 }
 
@@ -829,22 +897,92 @@ fn run_tool_script(
         bail!("tool script not found: {}", script_path.display());
     }
     let mut command = Command::new(program);
-    command.current_dir(&paths.repo_root);
     command.arg(script);
     for arg in extra_args {
         command.arg(arg);
     }
+    run_managed_command(
+        command,
+        paths,
+        timeout_secs,
+        session_label,
+        &format!("{program} {script}"),
+    )
+}
+
+fn stop_scenario(paths: &Paths) -> Result<()> {
+    stop_component(ComponentKind::Viewer, paths, false)?;
+    stop_component(ComponentKind::Engine, paths, false)
+}
+
+fn run_scenario(paths: &Paths, args: ScenarioArgs) -> Result<()> {
+    const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+    const DEFAULT_VIEWER_TIMEOUT_SECONDS: u64 = 60;
+
+    let scenario_timeout = if args.with_viewer && !args.detach {
+        args.timeout.unwrap_or(DEFAULT_VIEWER_TIMEOUT_SECONDS)
+    } else {
+        args.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS)
+    };
+
+    let mut command = Command::new("cargo");
+    command.arg("run");
+    command.arg("-p");
+    command.arg("grim_scenarios");
+    command.arg("--");
+    command.arg("run");
+    command.arg(args.scenario.as_cli());
+    command.arg("--timeout");
+    command.arg(scenario_timeout.to_string());
+    if args.with_viewer {
+        command.arg("--with-viewer");
+        for extra in &args.viewer_extra {
+            command.arg("--viewer-extra");
+            command.arg(extra);
+        }
+    }
+    if args.hold_seconds > 0.0 {
+        command.arg("--hold-seconds");
+        command.arg(args.hold_seconds.to_string());
+    }
+    if args.detach {
+        command.arg("--detach");
+    }
+    if let Some(dir) = &args.artifacts_dir {
+        command.arg("--artifacts-dir");
+        command.arg(dir);
+    }
+    run_managed_command(
+        command,
+        paths,
+        scenario_timeout,
+        &format!("scenario:{}", args.scenario.as_cli()),
+        &format!("grim_scenarios {}", args.scenario.as_cli()),
+    )
+}
+
+fn run_managed_command(
+    mut command: Command,
+    paths: &Paths,
+    timeout_secs: u64,
+    session_label: &str,
+    description: &str,
+) -> Result<()> {
+    command.current_dir(&paths.repo_root);
     let session_id = Uuid::new_v4().to_string();
     command.env("GRCTL_MANAGED", "1");
     command.env("GRCTL_SESSION_ID", &session_id);
     command.env("GRCTL_COMPONENT", session_label);
     command.env("GRCTL_STATE_DIR", &paths.state_dir);
+    if let Ok(bin_path) = std::env::current_exe() {
+        command.env("GRCTL_BIN", bin_path);
+    }
 
-    println!("[grctl] launching {script} (session {session_id})");
+    println!("[grctl] launching {description} (session {session_id})");
 
     let mut child = command
         .spawn()
-        .with_context(|| format!("spawning {script} via {program}"))?;
+        .with_context(|| format!("spawning {description}"))?;
     let timeout = if timeout_secs == 0 {
         None
     } else {
@@ -859,17 +997,19 @@ fn run_tool_script(
     match result {
         Some(status) => {
             if status.success() {
-                println!("[grctl] {script} completed successfully (session {session_id})");
+                println!("[grctl] {description} completed successfully (session {session_id})");
                 Ok(())
             } else {
-                Err(anyhow!("{script} exited with status {status}",))
+                Err(anyhow!("{description} exited with status {status}"))
             }
         }
         None => {
-            println!("[grctl] timeout ({timeout_secs}s) reached for {script}; sending SIGTERM");
-            child.kill().context("terminating timed-out script")?;
+            println!(
+                "[grctl] timeout ({timeout_secs}s) reached for {description}; sending SIGTERM"
+            );
+            child.kill().context("terminating timed-out process")?;
             let _ = child.wait();
-            Err(anyhow!("{script} timed out after {}s", timeout_secs))
+            Err(anyhow!("{description} timed out after {}s", timeout_secs))
         }
     }
 }

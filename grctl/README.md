@@ -19,6 +19,7 @@ Common subcommands:
   `-f`) to stream updates continuously.
 - `check intro-resume` and `check engine-overlay` execute the validation scripts
   with a default 90s guard.
+- `scenario run <name>` launches an end-to-end harness; see below for usage tips.
 
 All child processes are launched with a generated session id and a consistent
 environment:
@@ -35,6 +36,19 @@ State files live in `target/grctl/state/*.json` and logs in
 `target/grctl/logs/*.log`. `grctl` clears stale state automatically when it
 detects that a recorded PID has already exited.
 
+## Scenario runs
+
+- Use `grctl scenario run intro-to-office-computer` for the intro playback. Add
+  `--with-viewer` when you need to watch the stream; the timeout defaults to 60s
+  in this mode to catch hangs, so pass `--timeout <seconds>` (or `--timeout 0`)
+  if you need longer coverage.
+- `--hold-seconds <seconds>` keeps the engine alive briefly after all markers
+  land, which is handy for capturing extra telemetry without restarting.
+- `--detach` leaves grim_engine (and optionally grim_viewer) running under grctl.
+  Remember to stop them later with either `grctl scenario stop` or the explicit
+  `grctl viewer stop` / `grctl engine stop` commands once you are done inspecting
+  the session.
+
 ## Design notes
 
 - Launchers open append-only log files and run a background reaper that removes
@@ -46,8 +60,8 @@ detects that a recorded PID has already exited.
 
 ## Known gaps / follow-up ideas
 
-1. Scenario orchestration is currently disabled; when we revisit it, porting the
-   Python drivers into Rust should help unify process supervision.
+1. Extend the scenario harness beyond the intro playback while continuing to
+   consolidate shared setup so new runs stay lightweight.
 2. The retail launcher currently shells out to `tools/run_dev_install.sh`. A
    native implementation could unify timeout handling and telemetry setup.
 3. Consider teeing component logs to stdout during startup to complement the
