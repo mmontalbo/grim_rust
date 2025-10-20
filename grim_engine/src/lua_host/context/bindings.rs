@@ -2159,6 +2159,7 @@ fn install_actor_methods(
             let (self_table, values) = split_self(args);
             if let Some(table) = self_table {
                 let (id, label) = actor_identity(&table)?;
+                let _ = &label;
                 let requested = values.get(0).and_then(|value| value_to_string(value));
                 let request_label = requested.clone().unwrap_or_else(|| "<nil>".to_string());
                 let hit = {
@@ -2289,6 +2290,27 @@ fn install_actor_methods(
         })?,
     )?;
 
+    let current_chore_context = context.clone();
+    actor.set(
+        "current_chore",
+        lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+            let (self_table, _values) = split_self(args);
+            if let Some(table) = self_table {
+                let (id, _label) = actor_identity(&table)?;
+                match current_chore_context.borrow().actor_current_chore(&id) {
+                    Some(chore) => {
+                        table.set("current_chore", chore.clone())?;
+                        return Ok(Value::String(lua_ctx.create_string(chore)?));
+                    }
+                    None => {
+                        table.set("current_chore", Value::Nil)?;
+                    }
+                }
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+
     let say_context = context.clone();
     let say_system_key = system_key.clone();
     let normal_say_line =
@@ -2355,6 +2377,7 @@ fn install_actor_methods(
             let (self_table, values) = split_self(args);
             if let Some(table) = self_table {
                 let (id, label) = actor_identity(&table)?;
+                let _ = &label;
                 let (has_costume, base_costume) = {
                     let ctx = complete_chore_context.borrow();
                     (
@@ -2365,24 +2388,16 @@ fn install_actor_methods(
                 if !has_costume {
                     return Ok(());
                 }
-                let chore = values
-                    .get(0)
-                    .and_then(|value| value_to_string(value))
-                    .unwrap_or_else(|| "<nil>".to_string());
+                let chore = values.get(0).and_then(|value| value_to_string(value));
+                let chore_label = chore.clone().unwrap_or_else(|| "<nil>".to_string());
                 let costume_override = values.get(1).and_then(|value| value_to_string(value));
                 let costume_label = costume_override
                     .or(base_costume)
                     .unwrap_or_else(|| "<nil>".to_string());
-                {
-                    let mut ctx = complete_chore_context.borrow_mut();
-                    ctx.log_event(format!("actor.{id}.complete_chore {chore} {costume_label}"));
-                    if id.eq_ignore_ascii_case("mo.tube.interest_actor")
-                        || label.eq_ignore_ascii_case("mo.tube.interest_actor")
-                        || label.eq_ignore_ascii_case("/motx083/tube")
-                    {
-                        ctx.update_tube_pose(Some(chore.clone()));
-                    }
-                }
+                let mut ctx = complete_chore_context.borrow_mut();
+                ctx.log_event(format!(
+                    "actor.{id}.complete_chore {chore_label} {costume_label}"
+                ));
             }
             Ok(())
         })?,

@@ -5,6 +5,7 @@ use super::cutscenes::{CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter
 use super::geometry::SectorHit;
 use super::objects::{ObjectRuntime, ObjectRuntimeAdapter};
 use super::sets::SetRuntime;
+use super::{normalize_tube_event, TubePoseAliasCache};
 use crate::lua_host::types::{Vec3, MANNY_OFFICE_SEED_POS};
 
 /// Couples movement-oriented mutations with logging and commentary refreshes.
@@ -14,6 +15,7 @@ pub(super) struct MovementRuntimeAdapter<'a> {
     objects: &'a mut ObjectRuntime,
     cutscenes: &'a mut CutsceneRuntime,
     events: &'a mut Vec<String>,
+    tube_pose_aliases: TubePoseAliasCache,
 }
 
 /// Provides read-only helpers for sector resolution and spatial queries.
@@ -30,6 +32,7 @@ impl<'a> MovementRuntimeAdapter<'a> {
         objects: &'a mut ObjectRuntime,
         cutscenes: &'a mut CutsceneRuntime,
         events: &'a mut Vec<String>,
+        tube_pose_aliases: TubePoseAliasCache,
     ) -> Self {
         Self {
             actors,
@@ -37,6 +40,7 @@ impl<'a> MovementRuntimeAdapter<'a> {
             objects,
             cutscenes,
             events,
+            tube_pose_aliases,
         }
     }
 
@@ -182,7 +186,11 @@ impl<'a> MovementRuntimeAdapter<'a> {
     }
 
     fn actor_runtime(&mut self) -> ActorRuntime<'_> {
-        ActorRuntime::new(self.actors, self.events)
+        ActorRuntime::new(
+            self.actors,
+            self.events,
+            self.tube_pose_aliases.clone(),
+        )
     }
 
     fn object_runtime(&mut self) -> ObjectRuntimeAdapter<'_> {
@@ -198,7 +206,16 @@ impl<'a> MovementRuntimeAdapter<'a> {
     }
 
     fn log(&mut self, message: impl Into<String>) {
-        self.events.push(message.into());
+        let mut message = message.into();
+        if let Some(updated) = {
+            let cache = self.tube_pose_aliases.borrow();
+            cache
+                .as_ref()
+                .and_then(|map| normalize_tube_event(map, &message))
+        } {
+            message = updated;
+        }
+        self.events.push(message);
     }
 }
 

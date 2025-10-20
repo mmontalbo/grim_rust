@@ -20,9 +20,51 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Value};
 
 use crate::lab_collection::LabCollection;
 use crate::stream::{MovieControlEvents, StreamServer, StreamViewerGate};
-use context::EngineContextHandle;
+use context::{EngineContextHandle, TubePoseAliasCache};
 use crossbeam_channel::TryRecvError;
 use state_update::StateUpdateBuilder;
+
+const MO_TUBE_CHORE_LABELS: &[&str] = &[
+    "mo_tube_set_closed_w_can",
+    "mo_tube_open_wo_can",
+    "mo_tube_close_wo_can",
+    "mo_tube_open_w_can",
+    "mo_tube_close_can_exit",
+    "mo_tube_balloon_open_waiting",
+];
+
+fn load_tube_pose_aliases(lua: &Lua) -> Result<BTreeMap<String, String>> {
+    let globals = lua.globals();
+    let mut map = BTreeMap::new();
+    for &name in MO_TUBE_CHORE_LABELS {
+        match globals.get::<_, Value>(name) {
+            Ok(Value::Integer(value)) => {
+                map.insert(value.to_string(), name.to_string());
+            }
+            Ok(Value::Number(value)) => {
+                let label = if value.fract() == 0.0 {
+                    (value as i64).to_string()
+                } else {
+                    value.to_string()
+                };
+                map.insert(label, name.to_string());
+            }
+            Ok(Value::String(text)) => {
+                if let Ok(value) = text.to_str() {
+                    map.insert(value.to_string(), name.to_string());
+                }
+            }
+            Ok(Value::Table(table)) => {
+                if let Ok(Some(id)) = table.get::<_, Option<i64>>("id") {
+                    map.insert(id.to_string(), name.to_string());
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    Ok(map)
+}
 
 pub fn run_boot_sequence(
     data_root: &Path,
@@ -66,12 +108,14 @@ pub fn run_boot_sequence(
 
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
         .context("initialising Lua runtime with standard libraries")?;
+    let tube_pose_aliases: TubePoseAliasCache = Rc::new(RefCell::new(None));
     let context = Rc::new(RefCell::new(context::EngineContext::new(
         resources,
         verbose,
         lab_collection,
         audio_callback,
         lab_root_path.clone(),
+        tube_pose_aliases.clone(),
     )));
     let context_handle = context::EngineContextHandle::new(context.clone());
 
@@ -86,6 +130,18 @@ pub fn run_boot_sequence(
         && context::ensure_intro_cutscene(&lua, context.clone(), defer_intro_playback)?
     {
         context::drive_active_scripts(&lua, context.clone(), 16, 64)?;
+    }
+
+    match load_tube_pose_aliases(&lua) {
+        Ok(map) => {
+            *tube_pose_aliases.borrow_mut() = Some(map);
+        }
+        Err(err) if verbose => {
+            eprintln!(
+                "[grim_engine] warning: failed to preload tube chore aliases: {err:?}"
+            );
+        }
+        Err(_) => {}
     }
 
     let snapshot = context.borrow();
@@ -120,6 +176,7 @@ pub fn run_boot_sequence(
             initial_coverage.clone(),
             start_gate,
             defer_intro_playback,
+            tube_pose_aliases.clone(),
         ))
     } else {
         None
@@ -144,6 +201,7 @@ pub struct EngineRuntime {
     defer_intro_cutscene: bool,
     intro_movie_active: bool,
     manny_office_booted: bool,
+    tube_pose_aliases: TubePoseAliasCache,
 }
 
 impl EngineRuntime {
@@ -157,6 +215,7 @@ impl EngineRuntime {
         initial_coverage: BTreeMap<String, u64>,
         start_gate: Option<StreamReadyGate>,
         defer_intro_cutscene: bool,
+        tube_pose_aliases: TubePoseAliasCache,
     ) -> Self {
         let stream = stream.map(Rc::new);
         {
@@ -194,6 +253,7 @@ impl EngineRuntime {
             defer_intro_cutscene,
             intro_movie_active,
             manny_office_booted: false,
+            tube_pose_aliases,
         }
     }
 
@@ -269,9 +329,20 @@ impl EngineRuntime {
                         continue;
                     }
                     let control = event.control.clone();
-                    self.context
-                        .borrow_mut()
-                        .handle_movie_control(control.clone(), event.generation);
+                    {
+                        let mut ctx = self.context.borrow_mut();
+                        ctx.handle_movie_control(control.clone(), event.generation);
+                    }
+                    if matches!(
+                        control.action,
+                        MovieAction::Finished | MovieAction::Skipped | MovieAction::Error
+                    ) {
+                        let mut ctx = self.context.borrow_mut();
+                        let mut still_active = ctx.poll_fullscreen_movie();
+                        while still_active {
+                            still_active = ctx.poll_fullscreen_movie();
+                        }
+                    }
                     if let Err(err) = self.process_movie_control(&control) {
                         eprintln!(
                             "[grim_engine] failed to apply movie control side effects: {err:?}"
@@ -435,6 +506,7 @@ impl EngineRuntime {
             let mut ctx = self.context.borrow_mut();
             ctx.update_tube_contains(contains);
             ctx.update_tube_pose(pose);
+            ctx.normalize_tube_events();
         }
         Ok(())
     }
@@ -465,14 +537,25 @@ impl EngineRuntime {
     }
 
     fn read_tube_pose_label(&self) -> Result<Option<String>> {
-        if let Some(chore) = {
+        if let Some(pose) = {
             let ctx = self.context.borrow();
-            ctx.actor_current_chore("mo.tube.interest_actor")
-        } {
-            if chore.is_empty() {
-                return Ok(None);
+            if let Some(chore) = ctx.actor_current_chore("mo.tube") {
+                if !chore.is_empty() {
+                    Some(chore.to_string())
+                } else {
+                    None
+                }
+            } else if let Some(chore) = ctx.actor_current_chore("mo.tube.interest_actor") {
+                if !chore.is_empty() {
+                    Some(chore.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
             }
-            return Ok(Some(chore));
+        } {
+            return Ok(Some(self.normalize_tube_pose_label(pose)?));
         }
 
         let globals = self.lua.globals();
@@ -488,6 +571,26 @@ impl EngineRuntime {
         let Value::Table(tube_table) = tube_value else {
             return Ok(None);
         };
+        if let Some(value) = tube_table.get::<_, Option<Value>>("current_chore")? {
+            match value {
+                Value::String(text) => {
+                    let label = text.to_str()?.to_string();
+                    if !label.is_empty() {
+                        return Ok(Some(self.normalize_tube_pose_label(label)?));
+                    }
+                }
+                Value::Integer(value) => {
+                    return Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
+                }
+                Value::Number(value) => {
+                    return Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
+                }
+                Value::Boolean(value) => {
+                    return Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
+                }
+                _ => {}
+            }
+        }
         let Some(actor_value) = tube_table.get::<_, Option<Value>>("interest_actor")? else {
             return Ok(None);
         };
@@ -495,11 +598,47 @@ impl EngineRuntime {
             return Ok(None);
         };
         match actor_table.get::<_, Option<Value>>("current_chore")? {
-            Some(Value::String(text)) => Ok(Some(text.to_str()?.to_string())),
-            Some(Value::Integer(value)) => Ok(Some(value.to_string())),
-            Some(Value::Number(value)) => Ok(Some(value.to_string())),
+            Some(Value::String(text)) => {
+                let label = text.to_str()?.to_string();
+                Ok(Some(self.normalize_tube_pose_label(label)?))
+            }
+            Some(Value::Integer(value)) => {
+                Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
+            }
+            Some(Value::Number(value)) => {
+                Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
+            }
+            Some(Value::Boolean(value)) => {
+                Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
+            }
             _ => Ok(None),
         }
+    }
+
+    fn normalize_tube_pose_label(&self, raw: String) -> Result<String> {
+        if let Some(alias) = self.lookup_tube_pose_alias(&raw)? {
+            Ok(alias)
+        } else {
+            Ok(raw)
+        }
+    }
+
+    fn lookup_tube_pose_alias(&self, raw: &str) -> Result<Option<String>> {
+        if raw.is_empty() || !raw.chars().all(|c| c.is_ascii_digit()) {
+            return Ok(None);
+        }
+        if let Some(alias) = {
+            let cache = self.tube_pose_aliases.borrow();
+            cache
+                .as_ref()
+                .and_then(|map| map.get(raw).cloned())
+        } {
+            return Ok(Some(alias));
+        }
+        let map = load_tube_pose_aliases(&self.lua)?;
+        let alias = map.get(raw).cloned();
+        *self.tube_pose_aliases.borrow_mut() = Some(map);
+        Ok(alias)
     }
 }
 

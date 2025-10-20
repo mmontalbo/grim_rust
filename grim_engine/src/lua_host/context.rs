@@ -3,6 +3,100 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+pub(super) type TubePoseAliasCache = Rc<RefCell<Option<BTreeMap<String, String>>>>;
+
+fn normalize_tube_chore_token(map: &BTreeMap<String, String>, raw: &str) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Some(alias) = map.get(raw) {
+        return Some(alias.clone());
+    }
+
+    if let Ok(value) = raw.parse::<f64>() {
+        let key = if (value - value.trunc()).abs() < f64::EPSILON {
+            (value as i64).to_string()
+        } else {
+            value.to_string()
+        };
+        if let Some(alias) = map.get(&key) {
+            return Some(alias.clone());
+        }
+    }
+
+    None
+}
+
+pub(super) struct ActorEventParts<'a> {
+    pub head: &'a str,
+    pub actor_id: &'a str,
+    pub method: &'a str,
+    pub tokens: Vec<&'a str>,
+}
+
+pub(super) fn parse_actor_event(event: &str) -> Option<ActorEventParts<'_>> {
+    let tokens: Vec<&str> = event.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let head = tokens[0];
+    if !head.starts_with("actor.") {
+        return None;
+    }
+    let Some(method_sep) = head.rfind('.') else {
+        return None;
+    };
+    let prefix_len = "actor.".len();
+    if method_sep <= prefix_len {
+        return None;
+    }
+    let method = &head[method_sep + 1..];
+    let actor_id = &head[prefix_len..method_sep];
+    Some(ActorEventParts {
+        head,
+        actor_id,
+        method,
+        tokens,
+    })
+}
+
+pub(super) fn normalize_tube_event(
+    map: &BTreeMap<String, String>,
+    event: &str,
+) -> Option<String> {
+    let parts = parse_actor_event(event)?;
+    if parts.method != "complete_chore"
+        && parts.method != "chore"
+        && parts.method != "walk_chore"
+        && parts.method != "talk_chore"
+        && parts.method != "mumble_chore"
+    {
+        return None;
+    }
+
+    if !parts.actor_id.contains("tube") {
+        return None;
+    }
+
+    if parts.tokens.len() < 2 {
+        return None;
+    }
+
+    let target = parts.tokens[1];
+    let Some(alias) = normalize_tube_chore_token(map, target) else {
+        return None;
+    };
+
+    let mut updated = Vec::with_capacity(parts.tokens.len());
+    updated.push(parts.head.to_string());
+    updated.push(alias);
+    for token in parts.tokens.iter().skip(2) {
+        updated.push((*token).to_string());
+    }
+    Some(updated.join(" "))
+}
+
 mod achievements;
 mod actors;
 mod audio;
@@ -183,7 +277,8 @@ struct MannyOfficeState {
 
 #[cfg(test)]
 mod hook_tests {
-    use super::{describe_set_hook, HookCategory};
+    use super::{describe_set_hook, normalize_tube_event, HookCategory};
+    use std::collections::BTreeMap;
 
     #[test]
     fn classify_enter_case_insensitive() {
@@ -197,6 +292,18 @@ mod hook_tests {
         let descriptor = describe_set_hook("EXIT").expect("descriptor");
         assert_eq!(descriptor.lookup_key, "exit");
         assert_eq!(descriptor.category, HookCategory::Exit);
+    }
+
+    #[test]
+    fn normalize_tube_event_translates_numeric_chore() {
+        let mut map = BTreeMap::new();
+        map.insert("9".to_string(), "mo_tube_set_closed_w_can".to_string());
+        let event = "actor.motx083tube.complete_chore 9 mo_tube.cos";
+        let normalized = normalize_tube_event(&map, event).expect("normalized event");
+        assert_eq!(
+            normalized,
+            "actor.motx083tube.complete_chore mo_tube_set_closed_w_can mo_tube.cos"
+        );
     }
 
     #[test]
@@ -501,6 +608,7 @@ pub(super) struct EngineContext {
     pause: PauseState,
     audio: AudioRuntime,
     manny_office: MannyOfficeState,
+    tube_pose_aliases: TubePoseAliasCache,
 }
 
 impl EngineContext {
@@ -510,6 +618,7 @@ impl EngineContext {
         lab_collection: Option<Rc<LabCollection>>,
         audio_callback: Option<Rc<dyn AudioCallback>>,
         install_root: PathBuf,
+        tube_pose_aliases: TubePoseAliasCache,
     ) -> Self {
         let coverage = CoverageTracker::from_resources(&resources);
         let sets = SetRuntime::new(resources.clone(), verbose, lab_collection);
@@ -531,11 +640,12 @@ impl EngineContext {
             pause: PauseState::default(),
             audio: AudioRuntime::new(audio_callback),
             manny_office: MannyOfficeState::default(),
+            tube_pose_aliases,
         }
     }
 
     fn actor_runtime(&mut self) -> ActorRuntime<'_> {
-        ActorRuntime::new(&mut self.actors, &mut self.events)
+        ActorRuntime::new(&mut self.actors, &mut self.events, self.tube_pose_aliases.clone())
     }
 
     fn set_runtime(&mut self) -> SetRuntimeAdapter<'_> {
@@ -590,6 +700,7 @@ impl EngineContext {
             &mut self.objects,
             &mut self.cutscenes,
             &mut self.events,
+            self.tube_pose_aliases.clone(),
         )
     }
 
@@ -614,7 +725,48 @@ impl EngineContext {
     }
 
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
-        self.events.push(event.into());
+        let mut message = event.into();
+        if let Some(updated) = {
+            let cache = self.tube_pose_aliases.borrow();
+            cache
+                .as_ref()
+                .and_then(|map| normalize_tube_event(map, &message))
+        } {
+            message = updated;
+        }
+        let interest_alias = parse_actor_event(&message).and_then(|parts| {
+            if parts.method == "complete_chore"
+                && parts.actor_id != "mo.tube.interest_actor"
+                && parts.actor_id.contains("tube")
+                && parts.tokens.len() >= 2
+            {
+                let alias = parts.tokens[1];
+                if !alias.chars().all(|c| c.is_ascii_digit()) {
+                    Some(alias.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        self.events.push(message.clone());
+        if let Some(alias) = interest_alias {
+            self.events
+                .push(format!("actor.mo.tube.interest_actor.complete_chore {alias}"));
+        }
+    }
+
+    pub(super) fn normalize_tube_events(&mut self) {
+        let cache = self.tube_pose_aliases.borrow();
+        let Some(map) = cache.as_ref() else {
+            return;
+        };
+        for event in &mut self.events {
+            if let Some(updated) = normalize_tube_event(map, event) {
+                *event = updated;
+            }
+        }
     }
 
     pub(super) fn record_script_name(&mut self, script: &str) {
@@ -1652,6 +1804,7 @@ mod tests {
             None,
             callback,
             PathBuf::from("dev-install"),
+            Rc::new(RefCell::new(None::<BTreeMap<String, String>>)),
         )
     }
 

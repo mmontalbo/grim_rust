@@ -1,20 +1,58 @@
-use super::super::geometry::SectorHit;
 use super::{ActorSnapshot, ActorStore};
+use super::super::{geometry::SectorHit, normalize_tube_event, parse_actor_event, TubePoseAliasCache};
 use crate::lua_host::types::Vec3;
 
 /// Bundles actor state mutations with logging for runtime consumers.
 pub(crate) struct ActorRuntime<'a> {
     store: &'a mut ActorStore,
     events: &'a mut Vec<String>,
+    tube_pose_aliases: TubePoseAliasCache,
 }
 
 impl<'a> ActorRuntime<'a> {
-    pub(crate) fn new(store: &'a mut ActorStore, events: &'a mut Vec<String>) -> Self {
-        Self { store, events }
+    pub(crate) fn new(
+        store: &'a mut ActorStore,
+        events: &'a mut Vec<String>,
+        tube_pose_aliases: TubePoseAliasCache,
+    ) -> Self {
+        Self {
+            store,
+            events,
+            tube_pose_aliases,
+        }
     }
 
     fn log(&mut self, message: String) {
-        self.events.push(message);
+        let mut message = message;
+        if let Some(updated) = {
+            let cache = self.tube_pose_aliases.borrow();
+            cache
+                .as_ref()
+                .and_then(|map| normalize_tube_event(map, &message))
+        } {
+            message = updated;
+        }
+        let interest_alias = parse_actor_event(&message).and_then(|parts| {
+            if parts.method == "complete_chore"
+                && parts.actor_id != "mo.tube.interest_actor"
+                && parts.actor_id.contains("tube")
+                && parts.tokens.len() >= 2
+            {
+                let alias = parts.tokens[1];
+                if !alias.chars().all(|c| c.is_ascii_digit()) {
+                    Some(alias.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        self.events.push(message.clone());
+        if let Some(alias) = interest_alias {
+            self.events
+                .push(format!("actor.mo.tube.interest_actor.complete_chore {alias}"));
+        }
     }
 
     fn ensure_actor_mut(&mut self, id: &str, label: &str) -> &mut ActorSnapshot {
