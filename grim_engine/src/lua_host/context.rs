@@ -61,10 +61,7 @@ pub(super) fn parse_actor_event(event: &str) -> Option<ActorEventParts<'_>> {
     })
 }
 
-pub(super) fn normalize_tube_event(
-    map: &BTreeMap<String, String>,
-    event: &str,
-) -> Option<String> {
+pub(super) fn normalize_tube_event(map: &BTreeMap<String, String>, event: &str) -> Option<String> {
     let parts = parse_actor_event(event)?;
     if parts.method != "complete_chore"
         && parts.method != "chore"
@@ -645,7 +642,11 @@ impl EngineContext {
     }
 
     fn actor_runtime(&mut self) -> ActorRuntime<'_> {
-        ActorRuntime::new(&mut self.actors, &mut self.events, self.tube_pose_aliases.clone())
+        ActorRuntime::new(
+            &mut self.actors,
+            &mut self.events,
+            self.tube_pose_aliases.clone(),
+        )
     }
 
     fn set_runtime(&mut self) -> SetRuntimeAdapter<'_> {
@@ -752,8 +753,9 @@ impl EngineContext {
         });
         self.events.push(message.clone());
         if let Some(alias) = interest_alias {
-            self.events
-                .push(format!("actor.mo.tube.interest_actor.complete_chore {alias}"));
+            self.events.push(format!(
+                "actor.mo.tube.interest_actor.complete_chore {alias}"
+            ));
         }
     }
 

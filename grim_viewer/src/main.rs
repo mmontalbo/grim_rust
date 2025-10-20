@@ -1,5 +1,7 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
+    fs::File,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
@@ -15,7 +17,7 @@ mod live_stream;
 mod movie;
 mod overlay;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use crossbeam_channel::TryRecvError as CrossbeamTryRecvError;
 use display::ViewerState;
@@ -58,6 +60,22 @@ struct Args {
     /// Initial window height in pixels
     #[arg(long, default_value_t = 720)]
     window_height: u32,
+
+    /// Dump incoming engine StateUpdates (including events) to a JSONL file
+    #[arg(long)]
+    dump_engine_events: Option<PathBuf>,
+
+    /// Automatically request a skip when a movie with the given name starts
+    #[arg(long, value_name = "NAME")]
+    auto_skip_movie: Vec<String>,
+
+    /// Show the engine event log overlay on startup
+    #[arg(long)]
+    show_events: bool,
+
+    /// Dump the next rendered frame after an engine event arrives to this path
+    #[arg(long)]
+    dump_debug_frame: Option<PathBuf>,
 }
 
 struct RetailStreamState {
@@ -101,6 +119,117 @@ struct EngineStreamState {
     active_movie: Option<ActiveMovieStatus>,
     install_root: PathBuf,
     scene: LiveSceneState,
+    event_dump: Option<EventDumpWriter>,
+    auto_skip_movies: HashSet<String>,
+    event_log: EngineEventLog,
+    debug_frame_pending: bool,
+}
+
+struct EngineEventLog {
+    last_seq: Option<u64>,
+    total_events: usize,
+    truncated: bool,
+    preview: Vec<String>,
+}
+
+impl EngineEventLog {
+    fn new() -> Self {
+        Self {
+            last_seq: None,
+            total_events: 0,
+            truncated: false,
+            preview: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.last_seq = None;
+        self.total_events = 0;
+        self.truncated = false;
+        self.preview.clear();
+    }
+
+    fn ingest(&mut self, update: &StateUpdate) -> bool {
+        if update.events.is_empty() {
+            return false;
+        }
+
+        self.last_seq = Some(update.seq);
+        self.total_events = update.events.len();
+        let take = update.events.len().min(MAX_DISPLAY_EVENTS);
+        self.preview.clear();
+        self.preview
+            .extend(update.events.iter().take(take).cloned());
+        self.truncated = self.total_events > self.preview.len();
+        if let Some(first) = self.preview.get(0) {
+            println!(
+                "[grim_viewer] ingesting {} engine events for seq {} (first='{}')",
+                self.total_events, update.seq, first
+            );
+        }
+        true
+    }
+
+    fn render_into(&self, lines: &mut Vec<String>) {
+        if let Some(seq) = self.last_seq {
+            let mut summary = format!("Last seq: {} ({} events", seq, self.total_events);
+            if self.truncated {
+                summary.push_str(&format!(", showing first {}", self.preview.len()));
+            }
+            summary.push(')');
+            lines.push(summary);
+            if self.preview.is_empty() {
+                lines.push("(none)".to_string());
+            } else {
+                for event in &self.preview {
+                    lines.push(format!("- {event}"));
+                }
+                if self.truncated {
+                    let remaining = self.total_events.saturating_sub(self.preview.len());
+                    if remaining > 0 {
+                        lines.push(format!("… (+{remaining} more)"));
+                    }
+                }
+            }
+        } else {
+            lines.push("(no events received yet)".to_string());
+        }
+    }
+
+    fn debug_summary(&self) -> Option<(u64, usize)> {
+        self.last_seq.map(|seq| (seq, self.preview.len()))
+    }
+}
+
+struct EventDumpWriter {
+    writer: BufWriter<File>,
+}
+
+impl EventDumpWriter {
+    fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create engine event dump directory {}",
+                        parent.display()
+                    )
+                })?;
+            }
+        }
+        let file = File::create(path)
+            .with_context(|| format!("failed to create engine event dump at {}", path.display()))?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
+    }
+
+    fn write(&mut self, update: &StateUpdate) -> Result<()> {
+        serde_json::to_writer(&mut self.writer, update)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()?;
+        Ok(())
+    }
 }
 
 struct QueuedFrame {
@@ -160,6 +289,7 @@ const MAX_PRESENTATION_LEAD: Duration = Duration::from_millis(250);
 // Try to hover around 1–2 frames of lead; give ourselves 80–140 ms of slack.
 const TARGET_PRESENTATION_LEAD: Duration = Duration::from_millis(140);
 const MIN_PRESENTATION_LEAD: Duration = Duration::from_millis(80);
+const MAX_DISPLAY_EVENTS: usize = 48;
 
 #[derive(Clone, Copy)]
 enum MovieLogLevel {
@@ -709,6 +839,7 @@ struct SyncControls {
     paused: bool,
     pending_steps: u32,
     diff_enabled: bool,
+    show_events: bool,
 }
 
 enum FrameSchedule {
@@ -725,6 +856,13 @@ struct MoviePumpOutcome {
 fn main() -> Result<()> {
     let args = Args::parse();
     env_logger::init();
+
+    if let Some(path) = args.dump_debug_frame.as_ref() {
+        // This is a CLI-provided path; setting env is required for the frame dump helper.
+        unsafe {
+            std::env::set_var("GRIM_DUMP_FRAME", path);
+        }
+    }
 
     let event_loop = EventLoop::new()?;
     let window = Arc::new(
@@ -754,11 +892,29 @@ fn main() -> Result<()> {
         RetailStreamState::with_receiver(spawn_retail_client(args.retail_stream.clone()))
     };
 
-    let mut engine_stream = args.engine_stream.as_ref().map(|addr| {
+    let mut engine_stream = if let Some(addr) = args.engine_stream.as_ref() {
         println!("[grim_viewer] engine stream -> {addr}");
         let client = spawn_engine_client(addr.clone());
         let install_root = movie_install_root();
-        EngineStreamState {
+        let event_dump = match args.dump_engine_events.as_ref() {
+            Some(path) => match EventDumpWriter::open(path) {
+                Ok(writer) => {
+                    println!("[grim_viewer] dumping engine events to {}", path.display());
+                    Some(writer)
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[grim_viewer] failed to enable engine event dump {}: {err:?}",
+                        path.display()
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let auto_skip_movies: HashSet<String> = args.auto_skip_movie.iter().cloned().collect();
+        let dump_frame_pending = args.dump_debug_frame.is_some();
+        Some(EngineStreamState {
             rx: client.events,
             command_tx: client.commands,
             hello: None,
@@ -766,10 +922,17 @@ fn main() -> Result<()> {
             active_movie: None,
             install_root: install_root.clone(),
             scene: LiveSceneState::new(install_root),
-        }
-    });
+            event_dump,
+            auto_skip_movies,
+            event_log: EngineEventLog::new(),
+            debug_frame_pending: dump_frame_pending,
+        })
+    } else {
+        None
+    };
 
     let mut controls = SyncControls::default();
+    controls.show_events = args.show_events || args.dump_debug_frame.is_some();
 
     event_loop.run(move |event, target| {
         match event {
@@ -794,10 +957,12 @@ fn main() -> Result<()> {
                             },
                         ..
                     } => {
-                        if !handle_sync_key(&key_event, &mut controls) {
-                            if !handle_movie_key(&key_event, engine_stream.as_mut()) {
-                                // no-op for now
-                            }
+                        if handle_sync_key(&key_event, &mut controls) {
+                            viewer.window().request_redraw();
+                        } else if handle_movie_key(&key_event, engine_stream.as_mut()) {
+                            viewer.window().request_redraw();
+                        } else {
+                            // no-op for now
                         }
                     }
                     WindowEvent::RedrawRequested => match viewer.render() {
@@ -981,6 +1146,7 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                     );
                     stream.hello = Some(hello);
                     stream.scene = LiveSceneState::new(stream.install_root.clone());
+                    stream.event_log.reset();
                     if let Some(frame) = stream.scene.compose_frame() {
                         if let Err(err) =
                             viewer.upload_engine_frame(frame.width, frame.height, frame.pixels)
@@ -997,12 +1163,23 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                     println!("[grim_viewer] engine viewer-ready acknowledged");
                 }
                 EngineEvent::State(update) => {
-                    if !update.events.is_empty() {
+                    let ingested_events = if !update.events.is_empty() {
                         println!(
                             "[grim_viewer] received engine update events={} seq={}",
                             update.events.len(),
                             update.seq
                         );
+                        stream.event_log.ingest(&update)
+                    } else {
+                        false
+                    };
+                    if let Some(dump) = stream.event_dump.as_mut() {
+                        if let Err(err) = dump.write(&update) {
+                            eprintln!(
+                                "[grim_viewer] engine event dump failed: {err:?}; disabling writer"
+                            );
+                            stream.event_dump = None;
+                        }
                     }
                     if let Some(frame) = stream.scene.ingest_state_update(&update) {
                         if let Err(err) =
@@ -1012,6 +1189,14 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                         } else {
                             viewer.window().request_redraw();
                         }
+                    }
+                    if ingested_events {
+                        viewer.window().request_redraw();
+                    }
+                    if stream.debug_frame_pending && ingested_events {
+                        println!("[grim_viewer] frame dump armed after engine events");
+                        viewer.enable_next_frame_dump();
+                        stream.debug_frame_pending = false;
                     }
                     stream.last_update = Some(update);
                 }
@@ -1024,6 +1209,14 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                                 start.name,
                                 path.display()
                             );
+                            if stream.auto_skip_movies.contains(&start.name) {
+                                if request_movie_skip(stream) {
+                                    println!(
+                                        "[grim_viewer] auto-skip requested for movie {}",
+                                        start.name
+                                    );
+                                }
+                            }
                         }
                         Err(err) => {
                             eprintln!(
@@ -1430,6 +1623,12 @@ fn update_debug_panel(
         "off".to_string()
     };
     lines.push(format!("Diff overlay: {diff_label}"));
+    let events_label = if controls.show_events {
+        "visible"
+    } else {
+        "hidden"
+    };
+    lines.push(format!("Engine events: {events_label}"));
 
     lines.push(String::new());
     lines.push("Retail Stream".to_string());
@@ -1457,8 +1656,8 @@ fn update_debug_panel(
 
     lines.push(String::new());
     lines.push("Engine Stream".to_string());
-    match engine {
-        Some(stream) if stream.hello.is_some() => {
+    if let Some(stream) = engine {
+        if stream.hello.is_some() {
             if let Some(update) = stream.last_update.as_ref() {
                 lines.push(format!("Seq: {}", update.seq));
                 if controls.diff_enabled && retail.enabled {
@@ -1474,7 +1673,7 @@ fn update_debug_panel(
                 let hotspot_label = update
                     .active_hotspot
                     .as_deref()
-                    .map(|name| format!("[{}]", name))
+                    .map(|name| format!("[{name}]"))
                     .unwrap_or_else(|| "(none)".to_string());
                 lines.push(format!("Hotspot: {hotspot_label}"));
                 if let Some(commentary) = update.commentary.as_ref() {
@@ -1511,16 +1710,39 @@ fn update_debug_panel(
             } else {
                 lines.push("Seq: awaiting updates".to_string());
             }
-        }
-        Some(_) => {
+        } else {
             lines.push("Status: offline".to_string());
         }
-        None => {
-            lines.push("Status: disabled".to_string());
+        if controls.show_events {
+            append_engine_events(&mut lines, Some(stream));
+        }
+    } else {
+        lines.push("Status: disabled".to_string());
+        if controls.show_events {
+            append_engine_events(&mut lines, None);
         }
     }
 
     viewer.set_debug_lines(&lines);
+}
+
+fn append_engine_events(lines: &mut Vec<String>, stream: Option<&EngineStreamState>) {
+    lines.push(String::new());
+    lines.push("Engine Events".to_string());
+    match stream {
+        Some(stream) => {
+            stream.event_log.render_into(lines);
+            if let Some((seq, count)) = stream.event_log.debug_summary() {
+                println!(
+                    "[grim_viewer] debug overlay events cached for seq {} ({} shown)",
+                    seq, count
+                );
+            }
+        }
+        None => {
+            lines.push("(disabled)".to_string());
+        }
+    }
 }
 
 fn update_deadline(slot: &mut Option<Instant>, candidate: Instant) {
@@ -1619,6 +1841,10 @@ fn handle_sync_key(event: &KeyEvent, controls: &mut SyncControls) -> bool {
             }
             "d" | "D" => {
                 controls.diff_enabled = !controls.diff_enabled;
+                true
+            }
+            "e" | "E" => {
+                controls.show_events = !controls.show_events;
                 true
             }
             _ => false,

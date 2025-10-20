@@ -1,5 +1,7 @@
+use super::super::{
+    geometry::SectorHit, normalize_tube_event, parse_actor_event, TubePoseAliasCache,
+};
 use super::{ActorSnapshot, ActorStore};
-use super::super::{geometry::SectorHit, normalize_tube_event, parse_actor_event, TubePoseAliasCache};
 use crate::lua_host::types::Vec3;
 
 /// Bundles actor state mutations with logging for runtime consumers.
@@ -50,8 +52,9 @@ impl<'a> ActorRuntime<'a> {
         });
         self.events.push(message.clone());
         if let Some(alias) = interest_alias {
-            self.events
-                .push(format!("actor.mo.tube.interest_actor.complete_chore {alias}"));
+            self.events.push(format!(
+                "actor.mo.tube.interest_actor.complete_chore {alias}"
+            ));
         }
     }
 

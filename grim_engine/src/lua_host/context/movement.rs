@@ -186,11 +186,7 @@ impl<'a> MovementRuntimeAdapter<'a> {
     }
 
     fn actor_runtime(&mut self) -> ActorRuntime<'_> {
-        ActorRuntime::new(
-            self.actors,
-            self.events,
-            self.tube_pose_aliases.clone(),
-        )
+        ActorRuntime::new(self.actors, self.events, self.tube_pose_aliases.clone())
     }
 
     fn object_runtime(&mut self) -> ObjectRuntimeAdapter<'_> {

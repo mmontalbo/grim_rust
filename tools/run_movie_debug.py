@@ -124,6 +124,10 @@ def build_viewer_command(args: argparse.Namespace) -> List[str]:
             "--no-retail",
         ]
     )
+    if not args.no_auto_skip_intro:
+        command.extend(["--auto-skip-movie", "intro"])
+    if args.dump_engine_events:
+        command.extend(["--dump-engine-events", str(args.dump_engine_events)])
     if args.viewer_extra:
         command.extend(shlex.split(args.viewer_extra))
     return command
@@ -178,6 +182,17 @@ def main() -> None:
         type=float,
         default=10.0,
         help="Seconds to wait for the viewer_ready handshake (default: 10s)",
+    )
+    parser.add_argument(
+        "--dump-engine-events",
+        type=Path,
+        default=None,
+        help="Write engine StateUpdate events to JSONL at this path (forwarded to grim_viewer)",
+    )
+    parser.add_argument(
+        "--no-auto-skip-intro",
+        action="store_true",
+        help="Do not automatically skip the intro movie",
     )
 
     args = parser.parse_args()

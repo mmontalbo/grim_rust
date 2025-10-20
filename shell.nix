@@ -125,6 +125,7 @@ in pkgs.mkShell {
     xorg.libXtst
     xorg.xwininfo
     imagemagick
+    tesseract4
     ]
     ++ gstPackages
   );

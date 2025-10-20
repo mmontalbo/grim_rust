@@ -137,9 +137,7 @@ pub fn run_boot_sequence(
             *tube_pose_aliases.borrow_mut() = Some(map);
         }
         Err(err) if verbose => {
-            eprintln!(
-                "[grim_engine] warning: failed to preload tube chore aliases: {err:?}"
-            );
+            eprintln!("[grim_engine] warning: failed to preload tube chore aliases: {err:?}");
         }
         Err(_) => {}
     }
@@ -629,9 +627,7 @@ impl EngineRuntime {
         }
         if let Some(alias) = {
             let cache = self.tube_pose_aliases.borrow();
-            cache
-                .as_ref()
-                .and_then(|map| map.get(raw).cloned())
+            cache.as_ref().and_then(|map| map.get(raw).cloned())
         } {
             return Ok(Some(alias));
         }

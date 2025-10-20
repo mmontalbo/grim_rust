@@ -7,5 +7,6 @@ members = [
   "grim_stream",
   "tools/live_retail_capture",
   "grctl",
+  "grctl/grim_scenarios",
 ]
 resolver = "2"
