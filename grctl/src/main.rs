@@ -196,12 +196,15 @@ struct ScenarioArgs {
 enum ScenarioKind {
     #[clap(name = "intro-to-office-computer")]
     IntroToOfficeComputer,
+    #[clap(name = "intro-to-office-tube")]
+    IntroToOfficeTube,
 }
 
 impl ScenarioKind {
     fn as_cli(self) -> &'static str {
         match self {
             ScenarioKind::IntroToOfficeComputer => "intro-to-office-computer",
+            ScenarioKind::IntroToOfficeTube => "intro-to-office-tube",
         }
     }
 }

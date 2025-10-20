@@ -42,6 +42,9 @@ detects that a recorded PID has already exited.
   `--with-viewer` when you need to watch the stream; the timeout defaults to 60s
   in this mode to catch hangs, so pass `--timeout <seconds>` (or `--timeout 0`)
   if you need longer coverage.
+- `grctl scenario run intro-to-office-tube` extends the same run and ensures the
+  tube choreography emits the `mo_tube_set_closed_w_can` markers (verifying the
+  note delivery handshake) before completing.
 - `--hold-seconds <seconds>` keeps the engine alive briefly after all markers
   land, which is handy for capturing extra telemetry without restarting.
 - `--detach` leaves grim_engine (and optionally grim_viewer) running under grctl.

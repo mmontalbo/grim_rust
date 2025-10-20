@@ -13,10 +13,17 @@ mod scenario;
 
 use scenario::{LogTailer, ManagedComponent, ScenarioContext};
 
-const INTRO_REQUIRED_MARKERS: [&str; 3] = [
+const INTRO_COMPUTER_REQUIRED_MARKERS: [&str; 3] = [
     "manny_office.resume",
     "cut_scene.fullscreen.end intro",
     "actor.mo.tube.interest_actor.complete_chore",
+];
+
+const INTRO_TUBE_REQUIRED_MARKERS: [&str; 4] = [
+    "manny_office.resume",
+    "cut_scene.fullscreen.end intro",
+    "actor.motx083tube.complete_chore mo_tube_set_closed_w_can",
+    "actor.mo.tube.interest_actor.complete_chore mo_tube_set_closed_w_can",
 ];
 
 #[derive(Parser, Debug)]
@@ -71,12 +78,15 @@ struct RunArgs {
 enum ScenarioKind {
     #[value(name = "intro-to-office-computer")]
     IntroToOfficeComputer,
+    #[value(name = "intro-to-office-tube")]
+    IntroToOfficeTube,
 }
 
 impl ScenarioKind {
     fn as_str(self) -> &'static str {
         match self {
             ScenarioKind::IntroToOfficeComputer => "intro-to-office-computer",
+            ScenarioKind::IntroToOfficeTube => "intro-to-office-tube",
         }
     }
 }
@@ -115,6 +125,17 @@ fn run_command(args: RunArgs) -> Result<()> {
 
     let report = match args.scenario {
         ScenarioKind::IntroToOfficeComputer => run_intro_to_office(
+            ScenarioKind::IntroToOfficeComputer,
+            &INTRO_COMPUTER_REQUIRED_MARKERS,
+            timeout,
+            args.with_viewer,
+            &args.viewer_extra,
+            args.hold_seconds,
+            args.detach,
+        )?,
+        ScenarioKind::IntroToOfficeTube => run_intro_to_office(
+            ScenarioKind::IntroToOfficeTube,
+            &INTRO_TUBE_REQUIRED_MARKERS,
             timeout,
             args.with_viewer,
             &args.viewer_extra,
@@ -155,6 +176,8 @@ fn run_command(args: RunArgs) -> Result<()> {
 }
 
 fn run_intro_to_office(
+    kind: ScenarioKind,
+    required_markers: &[&'static str],
     timeout: Option<Duration>,
     with_viewer: bool,
     viewer_extra: &[String],
@@ -216,7 +239,7 @@ fn run_intro_to_office(
         }
         std::mem::forget(engine);
         return Ok(ScenarioReport {
-            scenario: ScenarioKind::IntroToOfficeComputer.as_str().to_string(),
+            scenario: kind.as_str().to_string(),
             elapsed_ms: start.elapsed().as_millis(),
             timed_out: false,
             markers_expected: Vec::new(),
@@ -227,7 +250,7 @@ fn run_intro_to_office(
     }
 
     let (observed_markers, seen_markers, timed_out_initial) =
-        observe_markers(&mut tailer, start, deadline)?;
+        observe_markers(required_markers, &mut tailer, start, deadline)?;
     let mut timed_out = timed_out_initial;
 
     if hold_seconds > 0.0 && !timed_out {
@@ -241,28 +264,29 @@ fn run_intro_to_office(
     engine.stop()?;
 
     let elapsed_ms = start.elapsed().as_millis();
-    let required_markers: Vec<String> = INTRO_REQUIRED_MARKERS
+    let expected: Vec<String> = required_markers
         .iter()
-        .map(|marker| marker.to_string())
+        .map(|marker| (*marker).to_string())
         .collect();
-    let missing_markers: Vec<String> = INTRO_REQUIRED_MARKERS
+    let missing: Vec<String> = required_markers
         .iter()
         .filter(|marker| !seen_markers.contains(*marker))
         .map(|marker| (*marker).to_string())
         .collect();
 
     Ok(ScenarioReport {
-        scenario: ScenarioKind::IntroToOfficeComputer.as_str().to_string(),
+        scenario: kind.as_str().to_string(),
         elapsed_ms,
         timed_out,
-        markers_expected: required_markers,
+        markers_expected: expected,
         markers_observed: observed_markers,
-        markers_missing: missing_markers,
+        markers_missing: missing,
         verification_skipped: false,
     })
 }
 
 fn observe_markers(
+    required_markers: &[&'static str],
     tailer: &mut LogTailer,
     start: Instant,
     deadline: Option<Instant>,
@@ -271,7 +295,7 @@ fn observe_markers(
     let mut seen: HashSet<&'static str> = HashSet::new();
 
     loop {
-        if seen.len() == INTRO_REQUIRED_MARKERS.len() {
+        if seen.len() == required_markers.len() {
             return Ok((observed, seen, false));
         }
 
@@ -284,9 +308,9 @@ fn observe_markers(
         match tailer.read_line()? {
             Some(line) => {
                 println!("{line}");
-                for marker in INTRO_REQUIRED_MARKERS {
+                for marker in required_markers {
                     if !seen.contains(marker) && line.contains(marker) {
-                        seen.insert(marker);
+                        seen.insert(*marker);
                         let observation = MarkerObservation {
                             marker: marker.to_string(),
                             line: line.clone(),
