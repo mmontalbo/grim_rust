@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -40,9 +40,6 @@ enum CommandKind {
     /// Manage the retail Grim Fandango binary.
     #[command(subcommand)]
     Retail(RetailCommand),
-    /// Run higher-level scenarios composed of multiple components.
-    #[command(subcommand)]
-    Scenario(ScenarioCommand),
     /// Execute test/validation scripts with standard timeouts.
     #[command(subcommand)]
     Check(CheckCommand),
@@ -133,24 +130,6 @@ struct RetailStart {
 }
 
 #[derive(Subcommand, Debug)]
-enum ScenarioCommand {
-    /// Launch the live-preview stack (retail capture + engine + viewer).
-    LivePreview(ScenarioArgs),
-    /// Launch grim_engine + grim_viewer for movie debugging.
-    MovieDebug(ScenarioArgs),
-}
-
-#[derive(Args, Debug)]
-struct ScenarioArgs {
-    /// Maximum runtime in seconds before the scenario is terminated (0 disables).
-    #[arg(long, default_value_t = 180)]
-    timeout: u64,
-    /// Extra arguments forwarded to the underlying scenario script after '--'.
-    #[arg(last = true)]
-    extra_args: Vec<String>,
-}
-
-#[derive(Subcommand, Debug)]
 enum CheckCommand {
     /// Ensure Manny's office resumes after the intro cutscene.
     IntroResume(CheckArgs),
@@ -173,6 +152,9 @@ struct LogArgs {
     /// Number of lines to display from the end of the log (0 prints the entire file).
     #[arg(long, default_value_t = 80)]
     tail: usize,
+    /// Continuously stream log updates after the initial tail.
+    #[arg(long, short = 'f')]
+    follow: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
@@ -255,7 +237,6 @@ fn main() -> Result<()> {
         CommandKind::Engine(cmd) => handle_engine(cmd, &paths),
         CommandKind::Viewer(cmd) => handle_viewer(cmd, &paths),
         CommandKind::Retail(cmd) => handle_retail(cmd, &paths),
-        CommandKind::Scenario(cmd) => handle_scenario(cmd, &paths),
         CommandKind::Check(cmd) => handle_check(cmd, &paths),
         CommandKind::Status => {
             for component in [
@@ -278,7 +259,9 @@ fn handle_engine(cmd: EngineCommand, paths: &Paths) -> Result<()> {
             print_component_status(paths, ComponentKind::Engine)?;
             Ok(())
         }
-        EngineCommand::Logs(args) => show_logs(paths, ComponentKind::Engine, args.tail),
+        EngineCommand::Logs(args) => {
+            show_logs(paths, ComponentKind::Engine, args.tail, args.follow)
+        }
     }
 }
 
@@ -290,7 +273,9 @@ fn handle_viewer(cmd: ViewerCommand, paths: &Paths) -> Result<()> {
             print_component_status(paths, ComponentKind::Viewer)?;
             Ok(())
         }
-        ViewerCommand::Logs(args) => show_logs(paths, ComponentKind::Viewer, args.tail),
+        ViewerCommand::Logs(args) => {
+            show_logs(paths, ComponentKind::Viewer, args.tail, args.follow)
+        }
     }
 }
 
@@ -302,28 +287,9 @@ fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
             print_component_status(paths, ComponentKind::Retail)?;
             Ok(())
         }
-        RetailCommand::Logs(args) => show_logs(paths, ComponentKind::Retail, args.tail),
-    }
-}
-
-fn handle_scenario(cmd: ScenarioCommand, paths: &Paths) -> Result<()> {
-    match cmd {
-        ScenarioCommand::LivePreview(args) => run_tool_script(
-            paths,
-            "python3",
-            "tools/run_live_preview.py",
-            &args.extra_args,
-            args.timeout,
-            "scenario:live_preview",
-        ),
-        ScenarioCommand::MovieDebug(args) => run_tool_script(
-            paths,
-            "python3",
-            "tools/run_movie_debug.py",
-            &args.extra_args,
-            args.timeout,
-            "scenario:movie_debug",
-        ),
+        RetailCommand::Logs(args) => {
+            show_logs(paths, ComponentKind::Retail, args.tail, args.follow)
+        }
     }
 }
 
@@ -741,7 +707,7 @@ fn print_component_status(paths: &Paths, component: ComponentKind) -> Result<()>
     Ok(())
 }
 
-fn show_logs(paths: &Paths, component: ComponentKind, tail: usize) -> Result<()> {
+fn show_logs(paths: &Paths, component: ComponentKind, tail: usize, follow: bool) -> Result<()> {
     let log_path = paths.log_path(component);
     if !log_path.exists() {
         bail!(
@@ -750,12 +716,81 @@ fn show_logs(paths: &Paths, component: ComponentKind, tail: usize) -> Result<()>
             log_path.display()
         );
     }
-    let lines = tail_file(&log_path, tail)?;
     println!("# {}", log_path.display());
-    for line in lines {
-        println!("{line}");
+    if follow {
+        follow_logs(&log_path, tail)?;
+    } else {
+        let lines = tail_file(&log_path, tail)?;
+        for line in lines {
+            println!("{line}");
+        }
     }
     Ok(())
+}
+
+fn follow_logs(path: &Path, tail: usize) -> Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+
+    if tail == 0 {
+        for line in reader.by_ref().lines() {
+            println!("{}", line?);
+        }
+    } else {
+        let mut buffer: VecDeque<String> = VecDeque::with_capacity(tail.max(1));
+        for line in reader.by_ref().lines() {
+            let line = line?;
+            if buffer.len() == tail {
+                buffer.pop_front();
+            }
+            buffer.push_back(line);
+        }
+        for line in buffer {
+            println!("{line}");
+        }
+    }
+
+    let mut file = reader.into_inner();
+    let mut pending: Vec<u8> = Vec::new();
+
+    loop {
+        let mut chunk = [0u8; 4096];
+        let read = loop {
+            match file.read(&mut chunk) {
+                Ok(count) => break count,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err).context(format!("reading {}", path.display())),
+            }
+        };
+        if read == 0 {
+            let current_pos = file.stream_position()?;
+            let file_len = file.metadata()?.len();
+            if file_len < current_pos {
+                println!(
+                    "[grctl] {} log truncated; restarting stream",
+                    path.display()
+                );
+                file.seek(SeekFrom::Start(0))?;
+                pending.clear();
+            }
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+
+        pending.extend_from_slice(&chunk[..read]);
+
+        loop {
+            let newline_pos = pending.iter().position(|&b| b == b'\n');
+            let Some(pos) = newline_pos else { break };
+            let line_bytes: Vec<u8> = pending.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim_end_matches('\n').trim_end_matches('\r');
+            println!("{line}");
+        }
+    }
 }
 
 fn tail_file(path: &Path, tail: usize) -> Result<Vec<String>> {

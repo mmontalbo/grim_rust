@@ -15,9 +15,8 @@ nix-shell --run 'cargo run -p grctl -- status'
 Common subcommands:
 
 - `engine`, `viewer`, and `retail` each support `start`, `stop`, `status`, and
-  `logs`.
-- `scenario live-preview` and `scenario movie-debug` wrap the existing Python
-  orchestration scripts with safety timeouts.
+  `logs`. Pass `--tail <n>` to control the initial output and `--follow` (or
+  `-f`) to stream updates continuously.
 - `check intro-resume` and `check engine-overlay` execute the validation scripts
   with a default 90s guard.
 
@@ -47,13 +46,12 @@ detects that a recorded PID has already exited.
 
 ## Known gaps / follow-up ideas
 
-1. The `scenario` subcommands still rely on Python drivers; porting those flows
-   into Rust would let us reuse the component supervisors directly and remove
-   duplicate process management logic.
+1. Scenario orchestration is currently disabled; when we revisit it, porting the
+   Python drivers into Rust should help unify process supervision.
 2. The retail launcher currently shells out to `tools/run_dev_install.sh`. A
    native implementation could unify timeout handling and telemetry setup.
-3. `grctl logs` only prints the latest lines once. A `--follow` mode or an
-  option to tee logs to stdout during startup would simplify live debugging.
+3. Consider teeing component logs to stdout during startup to complement the
+   `grctl logs --follow` workflow for quicker feedback.
 4. There is no `resume` tracking for processes restarted outside `grctl`.
    Downstream tooling could expose hooks that opt-in components call on clean
    shutdown so we can detect intentional exits vs. crashes.
