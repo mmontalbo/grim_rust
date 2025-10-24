@@ -4414,9 +4414,11 @@ fn make_cut_scene_logos<'lua>(
     let func = lua.create_function(move |_, ()| {
         let mut ctx = logos_context.borrow_mut();
         ctx.record_script_name("cut_scene.logos");
+        ctx.log_event("intro.timeline cut_scene.logos.begin");
         ctx.log_event("cut_scene.logos scheduled");
         ctx.push_cut_scene(Some("cut_scene.logos".to_string()), Vec::new());
         ctx.pop_cut_scene();
+        ctx.log_event("intro.timeline cut_scene.logos.end");
         Ok(())
     })?;
     Ok(func)
@@ -4431,6 +4433,7 @@ fn make_cut_scene_intro<'lua>(
         {
             let mut ctx = intro_context.borrow_mut();
             ctx.record_script_name("cut_scene.intro");
+            ctx.log_event("intro.timeline cut_scene.intro.begin");
             ctx.log_event("cut_scene.intro scheduled");
             ctx.push_cut_scene(Some("cut_scene.intro".to_string()), Vec::new());
             ctx.push_override("cut_scene.intro_override".to_string());
@@ -4446,6 +4449,7 @@ fn make_cut_scene_intro<'lua>(
             let _ = ctx.pop_override();
             ctx.pop_cut_scene();
             ctx.log_event("cut_scene.intro complete");
+            ctx.log_event("intro.timeline cut_scene.intro.end");
         }
         let globals = lua_ctx.globals();
         globals.set("time_to_run_intro", false)?;

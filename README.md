@@ -5,9 +5,10 @@ keep copies of the original game assets locally so we can study the retail boot
 flow and prototype modern tooling around it.
 
 ## Quick Start
-- Copy or symlink your Grim Fandango Remastered install into the local
-  `dev-install/` directory. The development shell exports
-  `GRIM_INSTALL_PATH=dev-install` for tools that still read that variable.
+- Use `grctl retail copy` to copy your Grim Fandango Remastered install into the
+  local `dev-install/` directory (or copy it manually if you prefer). The
+  development shell exports `GRIM_INSTALL_PATH=dev-install` for tools that still
+  read that variable.
 - Enter the development shell with `nix-shell` (Rust toolchain, Lua, ripgrep,
   etc. are provisioned there).
 - Populate extracted assets with `tools/sync_assets.sh [dest] [-- lab_extract

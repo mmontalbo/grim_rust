@@ -752,6 +752,9 @@ impl EngineContext {
             }
         });
         self.events.push(message.clone());
+        if self.verbose && message.starts_with("intro.timeline ") {
+            eprintln!("[grim_engine] {message}");
+        }
         if let Some(alias) = interest_alias {
             self.events.push(format!(
                 "actor.mo.tube.interest_actor.complete_chore {alias}"

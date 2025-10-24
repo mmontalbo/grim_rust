@@ -16,6 +16,8 @@ use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod retail;
+use retail::{extend_env_var, HookMode, RetailLayout};
 #[derive(Parser, Debug)]
 #[command(
     name = "grctl",
@@ -117,6 +119,13 @@ enum RetailCommand {
     Stop,
     Status,
     Logs(LogArgs),
+    /// Copy the Steam install into dev-install (defaults to ~/.steam/...).
+    Copy(RetailCopy),
+    /// Manage the retail instrumentation hooks.
+    Hooks {
+        #[command(subcommand)]
+        command: RetailHooksCommand,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -127,9 +136,32 @@ struct RetailStart {
     /// Disable the timeout entirely (overrides --timeout).
     #[arg(long)]
     no_timeout: bool,
-    /// Additional arguments passed through to tools/run_dev_install.sh.
+    /// Skip the Lua hook + telemetry instrumentation for a vanilla retail launch.
+    #[arg(long)]
+    vanilla: bool,
+    /// Additional arguments passed directly to the retail binary after '--'.
     #[arg(last = true)]
     extra_args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct RetailCopy {
+    /// Source directory to copy from (defaults to $GRIM_STEAM_INSTALL or ~/.steam/...).
+    #[arg(long)]
+    source: Option<PathBuf>,
+    /// Overwrite an existing dev-install directory.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum RetailHooksCommand {
+    /// Enable the telemetry + LD_PRELOAD instrumentation.
+    Enable,
+    /// Disable the instrumentation and restore the vanilla telemetry script.
+    Disable,
+    /// Show the current hook state for dev-install.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -189,6 +221,12 @@ struct ScenarioArgs {
     /// Optional directory for scenario artifacts (forwarded to grim_scenarios).
     #[arg(long)]
     artifacts_dir: Option<PathBuf>,
+    /// Launch the retail capture build so the viewer shows the side-by-side cinematic.
+    #[arg(long)]
+    with_retail: bool,
+    /// Skip the Rust engine launch and only run the retail capture build.
+    #[arg(long)]
+    retail_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -348,10 +386,24 @@ fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
         RetailCommand::Stop => stop_component(ComponentKind::Retail, paths, true),
         RetailCommand::Status => {
             print_component_status(paths, ComponentKind::Retail)?;
+            print_retail_instrumentation(paths)?;
             Ok(())
         }
         RetailCommand::Logs(args) => {
             show_logs(paths, ComponentKind::Retail, args.tail, args.follow)
+        }
+        RetailCommand::Copy(args) => copy_retail(args, paths),
+        RetailCommand::Hooks {
+            command: RetailHooksCommand::Enable,
+        } => set_retail_mode(paths, HookMode::Instrumented),
+        RetailCommand::Hooks {
+            command: RetailHooksCommand::Disable,
+        } => set_retail_mode(paths, HookMode::Vanilla),
+        RetailCommand::Hooks {
+            command: RetailHooksCommand::Status,
+        } => {
+            print_retail_instrumentation(paths)?;
+            Ok(())
         }
     }
 }
@@ -483,26 +535,28 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
     let session_id = Uuid::new_v4().to_string();
     let log_path = paths.log_path(ComponentKind::Retail);
 
-    let mut command = Command::new("tools/run_dev_install.sh");
-    let mut command_line = vec!["tools/run_dev_install.sh".to_string()];
-    if args.no_timeout {
-        command.arg("--no-timeout");
-        command_line.push("--no-timeout".to_string());
+    let layout = RetailLayout::new(&paths.repo_root)?;
+    layout.ensure_dev_install_exists()?;
+    let mode = if args.vanilla {
+        HookMode::Vanilla
     } else {
-        if args.timeout.trim() != "0" {
-            command.arg("--timeout");
-            command.arg(&args.timeout);
-            command_line.push("--timeout".to_string());
-            command_line.push(args.timeout.clone());
-        } else {
-            command.arg("--no-timeout");
-            command_line.push("--no-timeout".to_string());
-        }
+        HookMode::Instrumented
+    };
+    let status = layout.apply_mode(mode)?;
+    if !status.telemetry_linked && matches!(mode, HookMode::Instrumented) {
+        eprintln!(
+            "[grctl] warning: telemetry shim requested but {} is not linked",
+            layout.telemetry_dest().display()
+        );
     }
-    for extra in &args.extra_args {
-        command.arg(extra);
-        command_line.push(extra.clone());
+    if matches!(mode, HookMode::Instrumented) && !status.shim_available {
+        eprintln!(
+            "[grctl] warning: LD_PRELOAD shim missing at {}; retail hooks may be incomplete",
+            layout.shim_path().display()
+        );
     }
+
+    let (command, command_line) = build_retail_command(&layout, &args, mode)?;
 
     launch_component(
         ComponentKind::Retail,
@@ -512,6 +566,118 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
         command,
         command_line,
     )
+}
+
+fn copy_retail(args: RetailCopy, paths: &Paths) -> Result<()> {
+    let layout = RetailLayout::new(&paths.repo_root)?;
+    let destination = layout.sync_from(args.source.as_deref(), args.force)?;
+    println!("[grctl] copied retail install to {}", destination.display());
+    Ok(())
+}
+
+fn set_retail_mode(paths: &Paths, mode: HookMode) -> Result<()> {
+    let layout = RetailLayout::new(&paths.repo_root)?;
+    layout.ensure_dev_install_exists()?;
+    let status = layout.apply_mode(mode)?;
+    println!(
+        "[grctl] retail instrumentation set to {}",
+        describe_instrumentation(&status)
+    );
+    Ok(())
+}
+
+fn print_retail_instrumentation(paths: &Paths) -> Result<()> {
+    let layout = RetailLayout::new(&paths.repo_root)?;
+    if !layout.dev_install().exists() {
+        println!(
+            "[grctl] {:<12} instrumentation: dev-install missing (run 'grctl retail copy')",
+            ComponentKind::Retail.as_str()
+        );
+        return Ok(());
+    }
+    let status = layout.instrumentation_status()?;
+    println!(
+        "[grctl] {:<12} instrumentation: {}",
+        ComponentKind::Retail.as_str(),
+        describe_instrumentation(&status)
+    );
+    Ok(())
+}
+
+fn describe_instrumentation(status: &retail::InstrumentationStatus) -> String {
+    if status.telemetry_linked {
+        if status.shim_available {
+            "instrumented (telemetry linked, shim available)".to_string()
+        } else {
+            "instrumented (telemetry linked, shim missing)".to_string()
+        }
+    } else if status.telemetry_exists {
+        if status.telemetry_backup_exists {
+            "vanilla (local telemetry script active; backup present)".to_string()
+        } else {
+            "vanilla (local telemetry script active; no backup found)".to_string()
+        }
+    } else {
+        "vanilla (telemetry script absent)".to_string()
+    }
+}
+
+fn build_retail_command(
+    layout: &RetailLayout,
+    args: &RetailStart,
+    mode: HookMode,
+) -> Result<(Command, Vec<String>)> {
+    let use_timeout = !args.no_timeout && args.timeout.trim() != "0";
+    let mut command_line = Vec::new();
+    let mut command = if use_timeout {
+        let mut cmd = Command::new("timeout");
+        cmd.arg(&args.timeout);
+        cmd.arg("steam-run");
+        command_line.push("timeout".to_string());
+        command_line.push(args.timeout.clone());
+        command_line.push("steam-run".to_string());
+        cmd
+    } else {
+        command_line.push("steam-run".to_string());
+        Command::new("steam-run")
+    };
+    command.arg("./GrimFandango");
+    command_line.push("./GrimFandango".to_string());
+    for extra in &args.extra_args {
+        command.arg(extra);
+        command_line.push(extra.clone());
+    }
+    command.current_dir(layout.dev_install());
+
+    let ld_prefix = layout.dev_install().to_string_lossy().to_string();
+    let ld_library_path = extend_env_var(std::env::var_os("LD_LIBRARY_PATH"), &ld_prefix);
+    command.env("LD_LIBRARY_PATH", ld_library_path);
+    command.env("LUA_PATH", "./?.lua;./?.LUA;./mods/?.lua");
+    configure_ld_preload(&mut command, mode, layout)?;
+    Ok((command, command_line))
+}
+
+fn configure_ld_preload(
+    command: &mut Command,
+    mode: HookMode,
+    layout: &RetailLayout,
+) -> Result<()> {
+    match mode {
+        HookMode::Instrumented => {
+            let shim = layout.shim_path();
+            if shim.exists() {
+                let shim_value = shim.to_string_lossy().to_string();
+                let combined = extend_env_var(std::env::var_os("LD_PRELOAD"), &shim_value);
+                command.env("LD_PRELOAD", combined);
+            } else {
+                command.env_remove("LD_PRELOAD");
+            }
+        }
+        HookMode::Vanilla => {
+            command.env_remove("LD_PRELOAD");
+        }
+    }
+    Ok(())
 }
 
 fn launch_component(
@@ -922,6 +1088,15 @@ fn run_scenario(paths: &Paths, args: ScenarioArgs) -> Result<()> {
     const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
     const DEFAULT_VIEWER_TIMEOUT_SECONDS: u64 = 60;
 
+    if args.retail_only && args.with_viewer {
+        bail!("--retail-only cannot be combined with --with-viewer");
+    }
+
+    let with_retail = args.with_retail || args.retail_only;
+    if with_retail && !args.with_viewer && !args.retail_only {
+        bail!("--with-retail requires --with-viewer (or use --retail-only)");
+    }
+
     let scenario_timeout = if args.with_viewer && !args.detach {
         args.timeout.unwrap_or(DEFAULT_VIEWER_TIMEOUT_SECONDS)
     } else {
@@ -943,6 +1118,12 @@ fn run_scenario(paths: &Paths, args: ScenarioArgs) -> Result<()> {
             command.arg("--viewer-extra");
             command.arg(extra);
         }
+    }
+    if with_retail {
+        command.arg("--with-retail");
+    }
+    if args.retail_only {
+        command.arg("--retail-only");
     }
     if args.hold_seconds > 0.0 {
         command.arg("--hold-seconds");

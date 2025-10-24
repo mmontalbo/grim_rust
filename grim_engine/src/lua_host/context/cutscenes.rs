@@ -453,6 +453,9 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
         playback: FullscreenMoviePlayback,
     ) -> bool {
         let message = self.runtime.start_fullscreen_movie(movie, yields, playback);
+        if let Some(label) = intro_timeline_movie_label_from_message(&message, "start") {
+            self.events.push(format!("intro.timeline {label}"));
+        }
         self.events.push(message);
         true
     }
@@ -460,6 +463,9 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
     pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
         let (active, maybe_message) = self.runtime.poll_fullscreen_movie();
         if let Some(message) = maybe_message {
+            if let Some(label) = intro_timeline_movie_label_from_message(&message, "end") {
+                self.events.push(format!("intro.timeline {label}"));
+            }
             self.events.push(message);
         }
         active
@@ -513,4 +519,27 @@ impl<'a> CutsceneRuntimeView<'a> {
             FullscreenPlaybackMode::Countdown { .. } => None,
         }
     }
+}
+
+fn intro_timeline_movie_label_from_message(message: &str, phase: &str) -> Option<String> {
+    let prefix = if message.starts_with("cut_scene.fullscreen.start ") {
+        "cut_scene.fullscreen.start "
+    } else if message.starts_with("cut_scene.fullscreen.end ") {
+        "cut_scene.fullscreen.end "
+    } else {
+        return None;
+    };
+    let movie = message[prefix.len()..].trim();
+    intro_timeline_movie_label(movie, phase)
+}
+
+fn intro_timeline_movie_label(movie: &str, phase: &str) -> Option<String> {
+    let normalized = movie.trim().trim_end_matches(".snm").to_ascii_lowercase();
+    let prefix = match normalized.as_str() {
+        "intro" => "movie.intro",
+        "logos" => "movie.logos",
+        "mo_ts" => "movie.mo_ts",
+        _ => return None,
+    };
+    Some(format!("{prefix}.{phase}"))
 }

@@ -49,6 +49,36 @@ impl ScenarioContext {
         }
         Ok(())
     }
+
+    pub fn telemetry_events_path(&self) -> PathBuf {
+        self.repo_root
+            .join("dev-install")
+            .join("mods")
+            .join("telemetry_events.jsonl")
+    }
+
+    pub fn reset_retail_telemetry(&self) -> Result<()> {
+        let path = self.telemetry_events_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating telemetry dir {}", parent.display()))?;
+        }
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| {
+                format!(
+                    "clearing telemetry file before scenario: {}",
+                    path.display()
+                )
+            })?;
+        }
+        File::create(&path).with_context(|| {
+            format!(
+                "initializing telemetry events log for scenario: {}",
+                path.display()
+            )
+        })?;
+        Ok(())
+    }
 }
 
 pub struct ManagedComponent {

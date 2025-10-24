@@ -35,6 +35,10 @@ while [[ $# -gt 0 ]]; do
       TIMEOUT=""
       shift
       ;;
+    --vanilla-retail|--instrumented-retail)
+      echo "[run_dev_install] --vanilla-retail/--instrumented-retail are deprecated; use 'grctl retail vanilla' or 'grctl retail instrument' instead" >&2
+      shift
+      ;;
     *)
       break
       ;;

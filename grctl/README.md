@@ -42,15 +42,44 @@ detects that a recorded PID has already exited.
   `--with-viewer` when you need to watch the stream; the timeout defaults to 60s
   in this mode to catch hangs, so pass `--timeout <seconds>` (or `--timeout 0`)
   if you need longer coverage.
+- Pass both `--with-viewer --with-retail` to launch the retail capture build so
+  the viewer shows the side-by-side cinematic (retail on the left, Rust overlay
+  on the right).
+- When `--with-retail` is supplied, `grctl` clears
+  `dev-install/mods/telemetry_events.jsonl`, compares the retail `intro.timeline`
+  telemetry against the grim_engine `intro.timeline` log entries, prints a brief
+  summary, and records the full diff in the scenario report (use
+  `--artifacts-dir <path>` to persist the JSON output).
+- The JSON report exposes the raw engine/retail event lists under
+  `intro_timeline`. Point `--artifacts-dir target/grctl/scenario_reports` (or a
+  similar path) to capture those files and see
+  `docs/intro_timeline_comparison.md` for the schema plus troubleshooting tips.
 - `grctl scenario run intro-to-office-tube` extends the same run and ensures the
   tube choreography emits the `mo_tube_set_closed_w_can` markers (verifying the
   note delivery handshake) before completing.
 - `--hold-seconds <seconds>` keeps the engine alive briefly after all markers
   land, which is handy for capturing extra telemetry without restarting.
+- `--retail-only` skips the Rust engine entirely, starts just the retail capture
+  build, and waits for the intro movie telemetry (`movie.logos.*` /
+  `movie.intro.*`) to confirm the cinematic plays without being skipped. Pass
+  `--detach` if you simply want `grctl` to launch retail and exit immediately.
 - `--detach` leaves grim_engine (and optionally grim_viewer) running under grctl.
   Remember to stop them later with either `grctl scenario stop` or the explicit
   `grctl viewer stop` / `grctl engine stop` commands once you are done inspecting
   the session.
+- `grctl retail start --vanilla` skips the Lua hook/LD_PRELOAD shim so you can
+  compare a clean retail run against the instrumented build. Leave the flag off
+  (default) to keep telemetry events flowing into the scenario harness.
+
+## Retail helpers
+
+- `grctl retail copy [--source <path>] [--force]` copies the Steam install into
+  `dev-install/`. Point `--source` at an alternate directory when Steam lives in
+  a non-default location.
+- `grctl retail hooks enable/disable/status` manages the telemetry shim and
+  LD_PRELOAD hook. Enable before capture runs; disable when you need to compare
+  against a pristine retail boot. The hook status is also printed as part of
+  `grctl retail status`.
 
 ## Design notes
 
@@ -65,8 +94,8 @@ detects that a recorded PID has already exited.
 
 1. Extend the scenario harness beyond the intro playback while continuing to
    consolidate shared setup so new runs stay lightweight.
-2. The retail launcher currently shells out to `tools/run_dev_install.sh`. A
-   native implementation could unify timeout handling and telemetry setup.
+2. Legacy Python helpers still shell out to `tools/run_dev_install.sh`. Port
+   them to the new `grctl retail` helpers so we can retire the script entirely.
 3. Consider teeing component logs to stdout during startup to complement the
    `grctl logs --follow` workflow for quicker feedback.
 4. There is no `resume` tracking for processes restarted outside `grctl`.
