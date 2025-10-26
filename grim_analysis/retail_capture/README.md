@@ -2,24 +2,52 @@
 
 This directory keeps the artifacts that let the retail executable stream its
 runtime state into our analysis pipeline. The code lives next to
-`grim_analysis` so capture tooling, format specs, and the Rust consumers stay
+`grim_analysis` so capture tooling, format specs, and the runtime consumers stay
 in one place.
 
-- `telemetry.lua` is the Lua script injected into the shipping VM. It now
-  exports a tidy module composed of:
-  - **Coverage helpers** – `telemetry.mark(key)` increments counters written to
-    `mods/telemetry_coverage.json`; `telemetry.flush()` forces a save.
-  - **Event helpers** – `telemetry.event(label, fields)` appends JSON lines to
-    `mods/telemetry_events.jsonl`, which the coordinator or Rust host can tail.
-  - **Installers** – runtime wrappers automatically hook `Set.create`,
-    `Set.switch_to_set`, `source_all_set_files`, and boot functions. Add new
-    hooks by registering another installer near the bottom of the file.
-  Instrument retail paths by calling `telemetry.mark("catalog:key")` alongside
-  `telemetry.event("set.enter", { set = "mo" })`. The shim aggregates counts so
-  `grim_analysis --coverage-counts` can highlight missed resources.
-- `shim/` contains the `LD_PRELOAD` hook (`lua_hook.c` + `Makefile`) that
-  intercepts the engine's `lua_dofile` calls, injects `telemetry.lua` the first
-  time `_system.lua` loads, and logs the hand-off for debugging.
+## Components
+
+- `telemetry.lua` is the Lua 3.1 script injected into the shipping VM. It keeps
+  the API surface tiny (`telemetry.mark`, `telemetry.event`, `telemetry.flush`,
+  `telemetry.reset`) and rebuilds legacy helpers so it survives the stripped-down
+  retail environment.
+  The retail executable always loads `_system.lua` first, so the shim injects
+  `telemetry.lua` the moment that file executes; all other retail scripts
+  (`_cut_scenes.lua`, `year_1.lua`, set loaders, etc.) flow through `_system`.
+  - **Boot-safe IO + string shims** – redefines `openfile`, `write`, `call`,
+    `unpack`, and string primitives when the retail build omits them. If the
+    native shim exposes `telemetry_native_write`, it piggybacks on that for
+    writes.
+  - **Coverage tracking** – `telemetry.mark(key)` bumps `coverage_counts[key]`,
+    periodically rewrites `mods/telemetry_coverage.json`, and `telemetry.flush()`
+    forces a final write so `grim_analysis --coverage-counts` can diff runs.
+  - **Event stream** – `telemetry.event(label, fields)` records JSON objects to
+    `mods/telemetry_events.jsonl` with monotonically increasing `seq`, filtered
+    fields, and timestamps so downstream tools can tail retail behavior.
+  - **Intro instrumentation** – monkey-patches `cut_scene` movies,
+    `RunFullscreenMovie`, `StartMovie`, `wait_for_movie`, `start_script`,
+    `wait_for_script`, and Manny’s `Actor.say_line` call to emit labeled
+    `intro.timeline` events that reconstruct the logos → intro → office flow.
+  - **Load tracing + installers** – wraps `dofile` so every include is logged to
+    `mods/telemetry.loads.log`, and installs the intro hooks when
+    `_cut_scenes.lua` or `year_1.lua` loads. Additional installers can hook new
+    APIs by swapping functions and calling `telemetry.event` or `telemetry.mark`
+    inside the replacements.
+  - **Failure handling** – `telemetry_disable(reason)` swaps in inert stubs if a
+    required primitive is missing, `_ERRORMESSAGE` is wrapped to write bootstrap
+    failures to `mods/telemetry_bootstrap_error.log`, and `telemetry.reset()` wipes
+    all logs so automated tests start from a known state.
+
+- `rust_shim/` contains the new `LD_PRELOAD` hook written in Rust. The crate
+  exports `lua_dofile`, resolves the retail engine’s real symbol, and (for now)
+  logs `_system.lua` loads—the same choke point where we inject `telemetry.lua`.
+  `grctl` builds the shim automatically via
+  `cargo build -p grim_telemetry_shim --release --target i686-unknown-linux-gnu`
+  and preloads the release `.so` before launching retail.
+
+- `shim/` keeps the original C implementation. It still builds via `make` with
+  `zig cc` (or any C compiler) and mirrors the legacy Lua 3.2 structs. We keep
+  it around for reference while the Rust port catches up.
 
 ## Coverage workflow
 
@@ -28,10 +56,12 @@ in one place.
    ```bash
    cargo run -p grim_analysis -- --state-catalog-json artifacts/state_catalog.json
    ```
-2. Place `telemetry.lua` in the game's `mods/` directory, preload the shim, and
-   call `telemetry.mark("<catalog key>")` inside the retail scripts you want to
-   observe. The helper rewrites `mods/telemetry_coverage.json` after every few
-   marks (call `telemetry.flush()` before you exit to force a final write).
+2. Place `telemetry.lua` in the game's `mods/` directory, preload the shim (or
+   run `./grctl.sh retail hooks enable` which symlinks the file and ensures the
+   Rust shim is built), and call `telemetry.mark("<catalog key>")` inside the
+   retail scripts you want to observe. The helper rewrites
+   `mods/telemetry_coverage.json` after every few marks (call `telemetry.flush()`
+   before you exit to force a final write).
 3. Run the analysis coverage check to identify gaps:
    ```bash
    cargo run -p grim_analysis -- \
@@ -41,10 +71,16 @@ in one place.
    Missing keys point at catalog entries never hit by the retail run; unexpected
    keys indicate telemetry emitted IDs that are not yet part of the catalog.
 
-Build the shim by running `make` in the `shim/` directory (the default compiler
-assumes `zig cc`, but any C toolchain that can produce a shared object will do).
-The `Makefile` will automatically locate the Lua 3.2 headers provided by the
-`lua32` package shipped in `shell.nix`; override `LUA32_PREFIX` if you have a
-different install layout. Once the shared object is produced, preload it before
-launching the retail game and drop `telemetry.lua` into the game's `mods/`
-directory so the shim can execute it.
+### Building the shims
+
+- **Rust shim (recommended)** – from the repo root, run
+  `nix-shell --run 'cargo build -p grim_telemetry_shim --release --target i686-unknown-linux-gnu'`.
+  `grctl retail start` does this automatically if the release artifact is
+  missing. Preload `target/i686-unknown-linux-gnu/release/libgrim_telemetry_shim.so`
+  when launching retail.
+
+- **Legacy C shim** – run `make` in `shim/`. The default compiler is `zig cc`,
+  but any toolchain that can emit an ELF shared object works. The `Makefile`
+  auto-locates the Lua 3.2 headers provided by `shell.nix` (override
+  `LUA32_PREFIX` if needed). Preload `shim/libgrim_lua_hook.so` before launching
+  retail.

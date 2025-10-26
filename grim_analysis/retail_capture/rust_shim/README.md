@@ -16,6 +16,11 @@ this directory hosts a fresh, incremental rewrite in Rust.
   disk (`lua do file`). By watching every `lua_dofile` invocation we learn when
   `_system.lua`—the retail bootstrap script—runs, which is the precise moment we
   want to install our telemetry helpers.
+- The retail executable hardcodes `_system.lua` as the first script it loads
+  during boot. Every other include (`_cut_scenes.lua`, `year_1.lua`, etc.)
+  happens after `_system.lua` calls into the game’s registry. Hooking there is
+  the earliest safe window to execute `telemetry.lua`, because the Lua runtime
+  is initialized but no gameplay scripts have run yet.
 
 ## Current Scope
 - Build a `cdylib` (`libgrim_telemetry_shim.so`) with Cargo.
