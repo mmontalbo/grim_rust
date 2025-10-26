@@ -92,15 +92,14 @@ in pkgs.mkShell {
     jq                # lightweight JSON inspection for reports
     git
     rsync
+    rustup            # manage the Rust toolchain (incl. i686 target)
+    gcc_multi         # 32-bit capable linker for the Rust shim
     zig               # build the LD_PRELOAD shim
     qemu              # user-mode emulation for 32-bit binaries
     gdb               # inspect qemu-i386 core dumps
     xdotool           # locate X11 windows for targeted capture
     linuxPackages.perf # profile CPU hotspots / scheduler contention
     cargo-flamegraph   # generate annotated perf flamegraphs
-    rustc
-    cargo
-    rustfmt
     rust-analyzer
     pkg-config
     llvmPackages.libclang
@@ -167,6 +166,22 @@ in pkgs.mkShell {
     if [ -z "$GRIM_INSTALL_PATH" ]; then
       export GRIM_INSTALL_PATH="$DEV_INSTALL_PATH"
     fi
+
+    export RUSTUP_HOME="$REPO_ROOT/.rustup"
+    export CARGO_HOME="$REPO_ROOT/.cargo"
+    export PATH="$CARGO_HOME/bin:$PATH"
+    export RUSTUP_TOOLCHAIN="stable-x86_64-unknown-linux-gnu"
+    mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+    TOOLCHAIN_DIR="$RUSTUP_HOME/toolchains/$RUSTUP_TOOLCHAIN"
+    if [ ! -x "$TOOLCHAIN_DIR/bin/rustc" ]; then
+      rustup toolchain install stable --profile minimal >/dev/null
+    fi
+    if [ ! -d "$TOOLCHAIN_DIR/lib/rustlib/i686-unknown-linux-gnu" ]; then
+      rustup target add --toolchain "$RUSTUP_TOOLCHAIN" i686-unknown-linux-gnu >/dev/null
+    fi
+    export CC_i686_unknown_linux_gnu="${pkgs.gcc_multi}/bin/gcc"
+    export AR_i686_unknown_linux_gnu="${pkgs.binutils}/bin/ar"
+    export CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER="$CC_i686_unknown_linux_gnu"
 
     export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
     export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.glibc.dev}/include"

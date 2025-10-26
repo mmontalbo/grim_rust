@@ -18,10 +18,14 @@ pub enum HookMode {
 pub struct RetailLayout {
     dev_install: PathBuf,
     steam_install: PathBuf,
+    steam_root: Option<PathBuf>,
     telemetry_source: PathBuf,
     telemetry_dest: PathBuf,
     telemetry_backup: PathBuf,
-    shim_path: PathBuf,
+    rust_shim_workspace_release: PathBuf,
+    rust_shim_workspace_debug: PathBuf,
+    rust_shim_local_release: PathBuf,
+    rust_shim_local_debug: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -35,25 +39,37 @@ pub struct InstrumentationStatus {
 impl RetailLayout {
     pub fn new(repo_root: &Path) -> Result<Self> {
         let dev_install = repo_root.join("dev-install");
+        let steam_root = detect_steam_root_path().ok();
         let telemetry_source = repo_root
             .join("grim_analysis")
             .join("retail_capture")
             .join("telemetry.lua");
         let telemetry_dest = dev_install.join("mods").join("telemetry.lua");
         let telemetry_backup = dev_install.join("mods").join("telemetry.lua.retail");
-        let shim_path = repo_root
+        let shim_name = "libgrim_telemetry_shim.so";
+        let rust_workspace_target = repo_root.join("target").join("i686-unknown-linux-gnu");
+        let rust_local_target = repo_root
             .join("grim_analysis")
             .join("retail_capture")
-            .join("shim")
-            .join("libgrim_lua_hook.so");
+            .join("rust_shim")
+            .join("target")
+            .join("i686-unknown-linux-gnu");
+        let rust_shim_workspace_release = rust_workspace_target.join("release").join(shim_name);
+        let rust_shim_workspace_debug = rust_workspace_target.join("debug").join(shim_name);
+        let rust_shim_local_release = rust_local_target.join("release").join(shim_name);
+        let rust_shim_local_debug = rust_local_target.join("debug").join(shim_name);
         let steam_install = detect_steam_install_path()?;
         Ok(Self {
             dev_install,
             steam_install,
+            steam_root,
             telemetry_source,
             telemetry_dest,
             telemetry_backup,
-            shim_path,
+            rust_shim_workspace_release,
+            rust_shim_workspace_debug,
+            rust_shim_local_release,
+            rust_shim_local_debug,
         })
     }
 
@@ -61,8 +77,27 @@ impl RetailLayout {
         &self.dev_install
     }
 
-    pub fn shim_path(&self) -> &Path {
-        &self.shim_path
+    pub fn steam_root(&self) -> Option<&Path> {
+        self.steam_root.as_deref()
+    }
+
+    pub fn resolved_shim_path(&self) -> Option<PathBuf> {
+        let candidates = [
+            &self.rust_shim_workspace_release,
+            &self.rust_shim_local_release,
+            &self.rust_shim_workspace_debug,
+            &self.rust_shim_local_debug,
+        ];
+        for candidate in candidates {
+            if candidate.exists() {
+                return Some(candidate.clone());
+            }
+        }
+        None
+    }
+
+    pub fn preferred_shim_path(&self) -> &Path {
+        &self.rust_shim_workspace_release
     }
 
     pub fn ensure_dev_install_exists(&self) -> Result<()> {
@@ -81,7 +116,7 @@ impl RetailLayout {
             .map(|target| target == self.telemetry_source)
             .unwrap_or(false);
         let telemetry_backup_exists = self.telemetry_backup.exists();
-        let shim_available = self.shim_path.exists();
+        let shim_available = self.resolved_shim_path().is_some();
         Ok(InstrumentationStatus {
             telemetry_exists,
             telemetry_linked,
@@ -126,6 +161,55 @@ impl RetailLayout {
 
     pub fn telemetry_dest(&self) -> &Path {
         &self.telemetry_dest
+    }
+
+    pub fn steam_ld_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let Some(root) = &self.steam_root else {
+            return paths;
+        };
+        let ubuntu32 = root.join("ubuntu12_32");
+        push_unique_if_exists(&mut paths, ubuntu32.clone());
+        push_unique_if_exists(&mut paths, ubuntu32.join("pinned_libs_32"));
+        push_unique_if_exists(&mut paths, root.join("linux32"));
+        if let Some(runtime) = self.steam_runtime_dir() {
+            let candidates = [
+                runtime.clone(),
+                runtime.join("pinned_libs_32"),
+                runtime.join("lib"),
+                runtime.join("lib/i386-linux-gnu"),
+                runtime.join("usr/lib"),
+                runtime.join("usr/lib/i386-linux-gnu"),
+            ];
+            for candidate in candidates {
+                push_unique_if_exists(&mut paths, candidate);
+            }
+        }
+        paths
+    }
+
+    pub fn steam_runtime_dir(&self) -> Option<PathBuf> {
+        let root = self.steam_root.as_ref()?;
+        let runtime = root.join("ubuntu12_32").join("steam-runtime");
+        if runtime.exists() {
+            Some(runtime)
+        } else {
+            None
+        }
+    }
+
+    pub fn steamclient32_path(&self) -> Option<PathBuf> {
+        let root = self.steam_root.as_ref()?;
+        let candidates = [
+            root.join("ubuntu12_32").join("steamclient.so"),
+            root.join("linux32").join("steamclient.so"),
+        ];
+        for candidate in candidates {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     fn install_hooks(&self) -> Result<()> {
@@ -189,6 +273,34 @@ fn detect_steam_install_path() -> Result<PathBuf> {
         .join("common")
         .join("Grim Fandango Remastered");
     Ok(default)
+}
+
+fn detect_steam_root_path() -> Result<PathBuf> {
+    if let Ok(value) = std::env::var("GRIM_STEAM_ROOT") {
+        let path = PathBuf::from(value);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    let home = std::env::var("HOME").context("HOME not set; cannot derive steam root")?;
+    let home_dir = Path::new(&home);
+    let candidates = [
+        home_dir.join(".local/share/Steam"),
+        home_dir.join(".steam/steam"),
+        home_dir.join(".steam/root"),
+    ];
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    bail!("steam root not found (set $GRIM_STEAM_ROOT to override)");
+}
+
+fn push_unique_if_exists(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if candidate.exists() && !paths.iter().any(|existing| existing == &candidate) {
+        paths.push(candidate);
+    }
 }
 
 fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
@@ -267,4 +379,20 @@ pub fn extend_env_var(current: Option<OsString>, prefix: &str) -> OsString {
         }
     }
     value
+}
+
+pub fn warn_if_shaders_missing(layout: &RetailLayout) {
+    let compiled_dir = layout
+        .dev_install()
+        .join("x86")
+        .join("shaders")
+        .join("compiled");
+    let sentinel = compiled_dir.join("deferred_light_v.glsl");
+    if sentinel.exists() {
+        return;
+    }
+    eprintln!(
+        "[grctl] warning: compiled shaders missing under {}; run the shader pack script before launching retail",
+        compiled_dir.display()
+    );
 }

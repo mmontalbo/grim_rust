@@ -16,8 +16,15 @@ use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 mod retail;
-use retail::{extend_env_var, HookMode, RetailLayout};
+use retail::{extend_env_var, warn_if_shaders_missing, HookMode, RetailLayout};
+
+const RETAIL_STEAM_APP_ID: &str = "345350";
+const RETAIL_LUA_PATH: &str = "./?.lua;./?.LUA;./mods/?.lua";
+const RUST_SHIM_TARGET: &str = "i686-unknown-linux-gnu";
 #[derive(Parser, Debug)]
 #[command(
     name = "grctl",
@@ -139,6 +146,9 @@ struct RetailStart {
     /// Skip the Lua hook + telemetry instrumentation for a vanilla retail launch.
     #[arg(long)]
     vanilla: bool,
+    /// Stream the retail stdout/stderr log to this terminal until you Ctrl-C.
+    #[arg(long)]
+    attach: bool,
     /// Additional arguments passed directly to the retail binary after '--'.
     #[arg(last = true)]
     extra_args: Vec<String>,
@@ -297,6 +307,7 @@ struct Paths {
     repo_root: PathBuf,
     state_dir: PathBuf,
     log_dir: PathBuf,
+    launcher_dir: PathBuf,
 }
 
 impl Paths {
@@ -311,12 +322,15 @@ impl Paths {
         let repo_root = repo_root.to_path_buf();
         let state_dir = repo_root.join("target/grctl/state");
         let log_dir = repo_root.join("target/grctl/logs");
+        let launcher_dir = repo_root.join("target/grctl/launchers");
         fs::create_dir_all(&state_dir).context("creating grctl state directory")?;
         fs::create_dir_all(&log_dir).context("creating grctl logs directory")?;
+        fs::create_dir_all(&launcher_dir).context("creating grctl launcher directory")?;
         Ok(Self {
             repo_root,
             state_dir,
             log_dir,
+            launcher_dir,
         })
     }
 
@@ -326,6 +340,10 @@ impl Paths {
 
     fn log_path(&self, component: ComponentKind) -> PathBuf {
         self.log_dir.join(format!("{}.log", component.as_str()))
+    }
+
+    fn launcher_script(&self, session_id: &str) -> PathBuf {
+        self.launcher_dir.join(format!("retail_{session_id}.sh"))
     }
 }
 
@@ -537,11 +555,15 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
 
     let layout = RetailLayout::new(&paths.repo_root)?;
     layout.ensure_dev_install_exists()?;
+    warn_if_shaders_missing(&layout);
     let mode = if args.vanilla {
         HookMode::Vanilla
     } else {
         HookMode::Instrumented
     };
+    if matches!(mode, HookMode::Instrumented) {
+        ensure_rust_shim_ready(paths, &layout)?;
+    }
     let status = layout.apply_mode(mode)?;
     if !status.telemetry_linked && matches!(mode, HookMode::Instrumented) {
         eprintln!(
@@ -551,12 +573,12 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
     }
     if matches!(mode, HookMode::Instrumented) && !status.shim_available {
         eprintln!(
-            "[grctl] warning: LD_PRELOAD shim missing at {}; retail hooks may be incomplete",
-            layout.shim_path().display()
+            "[grctl] warning: LD_PRELOAD shim missing. Run 'cargo build -p grim_telemetry_shim --release' so {} exists; retail hooks will be incomplete until the Rust shim is built.",
+            layout.preferred_shim_path().display(),
         );
     }
 
-    let (command, command_line) = build_retail_command(&layout, &args, mode)?;
+    let (command, command_line) = build_retail_command(&layout, &args, mode, paths, &session_id)?;
 
     launch_component(
         ComponentKind::Retail,
@@ -565,7 +587,69 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
         log_path,
         command,
         command_line,
-    )
+    )?;
+
+    if args.attach {
+        println!(
+            "[grctl] attaching to retail log (Ctrl-C to detach): {}",
+            paths.log_path(ComponentKind::Retail).display()
+        );
+        show_logs(paths, ComponentKind::Retail, 200, true)?;
+    } else {
+        println!(
+            "[grctl] retail log: {} (use 'grctl retail logs -f' to follow)",
+            paths.log_path(ComponentKind::Retail).display()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
+    if layout.resolved_shim_path().is_some() {
+        return Ok(());
+    }
+
+    ensure_i686_target_installed()?;
+    println!("[grctl] building grim_telemetry_shim --release (shim missing)...");
+    let status = Command::new("cargo")
+        .current_dir(&paths.repo_root)
+        .args([
+            "build",
+            "-p",
+            "grim_telemetry_shim",
+            "--release",
+            "--target",
+            RUST_SHIM_TARGET,
+        ])
+        .status()
+        .context("building grim_telemetry_shim --release for i686-unknown-linux-gnu")?;
+    if !status.success() {
+        bail!("grim_telemetry_shim build failed with status {}", status);
+    }
+    if layout.resolved_shim_path().is_some() {
+        Ok(())
+    } else {
+        bail!("grim_telemetry_shim build succeeded but the shared object is still missing (expected {})", layout.preferred_shim_path().display());
+    }
+}
+
+fn ensure_i686_target_installed() -> Result<()> {
+    let status = Command::new("rustup")
+        .args(["target", "add", RUST_SHIM_TARGET])
+        .status();
+    match status {
+        Ok(result) if result.success() => Ok(()),
+        Ok(result) => bail!(
+            "failed to add Rust target {} (rustup exited with {})",
+            RUST_SHIM_TARGET,
+            result
+        ),
+        Err(err) => bail!(
+            "rustup not available while ensuring target {}; install rustup or add the target manually (error: {err})",
+            RUST_SHIM_TARGET
+        ),
+    }
 }
 
 fn copy_retail(args: RetailCopy, paths: &Paths) -> Result<()> {
@@ -626,6 +710,8 @@ fn build_retail_command(
     layout: &RetailLayout,
     args: &RetailStart,
     mode: HookMode,
+    paths: &Paths,
+    session_id: &str,
 ) -> Result<(Command, Vec<String>)> {
     let use_timeout = !args.no_timeout && args.timeout.trim() != "0";
     let mut command_line = Vec::new();
@@ -641,43 +727,203 @@ fn build_retail_command(
         command_line.push("steam-run".to_string());
         Command::new("steam-run")
     };
-    command.arg("./GrimFandango");
-    command_line.push("./GrimFandango".to_string());
+    let retail_bin = layout.dev_install().join("GrimFandango");
+    if !retail_bin.exists() {
+        bail!(
+            "retail binary missing at {}; run 'grctl retail copy' first",
+            retail_bin.display()
+        );
+    }
+    let runtime_preloads = gather_runtime_preloads(layout);
+    let (env_pairs, ld_preload) = assemble_retail_env(layout, mode, &runtime_preloads)?;
+    let script_path =
+        write_retail_launcher_script(paths, session_id, layout, &env_pairs, ld_preload.as_deref())?;
+    let script_str = script_path.to_string_lossy().into_owned();
+    command.arg(&script_str);
+    command_line.push(script_str);
     for extra in &args.extra_args {
         command.arg(extra);
         command_line.push(extra.clone());
     }
-    command.current_dir(layout.dev_install());
-
-    let ld_prefix = layout.dev_install().to_string_lossy().to_string();
-    let ld_library_path = extend_env_var(std::env::var_os("LD_LIBRARY_PATH"), &ld_prefix);
-    command.env("LD_LIBRARY_PATH", ld_library_path);
-    command.env("LUA_PATH", "./?.lua;./?.LUA;./mods/?.lua");
-    configure_ld_preload(&mut command, mode, layout)?;
     Ok((command, command_line))
 }
 
-fn configure_ld_preload(
-    command: &mut Command,
+fn build_ld_preload(
     mode: HookMode,
     layout: &RetailLayout,
-) -> Result<()> {
+    extra_preloads: &[PathBuf],
+) -> Result<Option<String>> {
+    let mut libs: Vec<PathBuf> = Vec::new();
     match mode {
         HookMode::Instrumented => {
-            let shim = layout.shim_path();
-            if shim.exists() {
-                let shim_value = shim.to_string_lossy().to_string();
-                let combined = extend_env_var(std::env::var_os("LD_PRELOAD"), &shim_value);
-                command.env("LD_PRELOAD", combined);
-            } else {
-                command.env_remove("LD_PRELOAD");
+            if let Some(shim) = layout.resolved_shim_path() {
+                libs.push(shim);
             }
         }
-        HookMode::Vanilla => {
-            command.env_remove("LD_PRELOAD");
-        }
+        HookMode::Vanilla => {}
     }
-    Ok(())
+    libs.extend(extra_preloads.iter().cloned());
+
+    if libs.is_empty() {
+        if matches!(mode, HookMode::Vanilla) {
+            return Ok(None);
+        }
+        if let Some(existing) = std::env::var_os("LD_PRELOAD") {
+            return Ok(Some(existing.to_string_lossy().into_owned()));
+        }
+        return Ok(None);
+    }
+
+    let mut value = std::env::var_os("LD_PRELOAD");
+    for lib in libs.into_iter().rev() {
+        let lib_value = lib.to_string_lossy().into_owned();
+        value = Some(extend_env_var(value, &lib_value));
+    }
+    Ok(value.map(|v| v.to_string_lossy().into_owned()))
+}
+
+fn assemble_retail_env(
+    layout: &RetailLayout,
+    mode: HookMode,
+    extra_preloads: &[PathBuf],
+) -> Result<(Vec<(String, String)>, Option<String>)> {
+    let mut envs = Vec::new();
+    if let Some(value) = build_ld_library_path(layout) {
+        envs.push(("LD_LIBRARY_PATH".to_string(), value));
+    }
+    envs.push(("LUA_PATH".to_string(), RETAIL_LUA_PATH.to_string()));
+    if let Some(audio) = default_audio_driver() {
+        envs.push(("SDL_AUDIODRIVER".to_string(), audio));
+    }
+    envs.extend(build_steam_env(layout));
+    let preload = build_ld_preload(mode, layout, extra_preloads)?;
+    Ok((envs, preload))
+}
+
+fn build_ld_library_path(layout: &RetailLayout) -> Option<String> {
+    let mut prefixes: Vec<String> = Vec::new();
+    prefixes.push(layout.dev_install().to_string_lossy().into_owned());
+    prefixes.extend(
+        layout
+            .steam_ld_paths()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+
+    let mut value = std::env::var_os("LD_LIBRARY_PATH");
+    for prefix in prefixes.into_iter().rev() {
+        value = Some(extend_env_var(value, &prefix));
+    }
+    value.map(|v| v.to_string_lossy().into_owned())
+}
+
+fn default_audio_driver() -> Option<String> {
+    if std::env::var_os("SDL_AUDIODRIVER").is_none() {
+        Some("pulse".to_string())
+    } else {
+        None
+    }
+}
+
+fn build_steam_env(layout: &RetailLayout) -> Vec<(String, String)> {
+    let mut vars = vec![
+        ("SteamAppId".to_string(), RETAIL_STEAM_APP_ID.to_string()),
+        ("SteamGameId".to_string(), RETAIL_STEAM_APP_ID.to_string()),
+        (
+            "SteamOverlayGameId".to_string(),
+            RETAIL_STEAM_APP_ID.to_string(),
+        ),
+        ("SteamClientLaunch".to_string(), "1".to_string()),
+        ("SteamEnv".to_string(), "1".to_string()),
+    ];
+
+    if let Some(root) = layout.steam_root() {
+        let root_str = root.to_string_lossy().into_owned();
+        vars.push(("SteamPath".to_string(), root_str.clone()));
+        vars.push((
+            "STEAM_COMPAT_CLIENT_INSTALL_PATH".to_string(),
+            root_str.clone(),
+        ));
+        if let Some(runtime) = layout.steam_runtime_dir() {
+            let runtime_str = runtime.to_string_lossy().into_owned();
+            vars.push(("SteamRuntime".to_string(), runtime_str.clone()));
+            vars.push(("STEAM_RUNTIME".to_string(), runtime_str));
+        } else {
+            eprintln!(
+                "[grctl] warning: steam-runtime directory missing under {}; consider running Steam once to populate it",
+                root.display()
+            );
+        }
+    } else {
+        eprintln!(
+            "[grctl] warning: unable to detect Steam root; set $GRIM_STEAM_ROOT if Steam is installed elsewhere"
+        );
+    }
+
+    vars
+}
+
+fn write_retail_launcher_script(
+    paths: &Paths,
+    session_id: &str,
+    layout: &RetailLayout,
+    env_pairs: &[(String, String)],
+    ld_preload: Option<&str>,
+) -> Result<PathBuf> {
+    let script_path = paths.launcher_script(session_id);
+    let mut file = File::create(&script_path).with_context(|| {
+        format!(
+            "creating retail launcher script at {}",
+            script_path.display()
+        )
+    })?;
+    writeln!(file, "#!/bin/sh")?;
+    writeln!(file, "# Auto-generated by grctl")?;
+    writeln!(file, "set -euo pipefail")?;
+    writeln!(file)?;
+    for (key, value) in env_pairs {
+        writeln!(file, "export {}={}", key, shell_quote(value))?;
+    }
+    writeln!(file, "unset LD_PRELOAD")?;
+    if let Some(preload) = ld_preload {
+        let quoted = shell_quote(preload);
+        writeln!(file, "export LD_PRELOAD_32={}", quoted)?;
+        writeln!(file, "export LD_PRELOAD={}", quoted)?;
+    }
+    let dev_install = layout.dev_install().to_string_lossy().into_owned();
+    writeln!(file, "cd {}", shell_quote(&dev_install))?;
+    writeln!(file, "exec ./GrimFandango \"$@\"")?;
+    drop(file);
+    #[cfg(unix)]
+    {
+        let perms = PermissionsExt::from_mode(0o755);
+        fs::set_permissions(&script_path, perms)
+            .with_context(|| format!("setting permissions on {}", script_path.display()))?;
+    }
+    Ok(script_path)
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn gather_runtime_preloads(layout: &RetailLayout) -> Vec<PathBuf> {
+    let mut preloads = Vec::new();
+    if let Some(path) = layout.steamclient32_path() {
+        preloads.push(path);
+    } else if let Some(root) = layout.steam_root() {
+        eprintln!(
+            "[grctl] warning: steamclient.so not found under {}; SteamAPI may still fail",
+            root.display()
+        );
+    } else {
+        eprintln!("[grctl] warning: steamclient.so preload skipped (Steam root unknown)");
+    }
+    preloads
 }
 
 fn launch_component(
@@ -771,12 +1017,15 @@ fn ensure_component_available(component: ComponentKind, paths: &Paths) -> Result
 fn spawn_reaper(component: ComponentKind, paths: Paths, log_path: PathBuf, mut child: Child) {
     thread::spawn(move || {
         let status = child.wait();
-        let summary = match status {
+        let summary = match &status {
             Ok(code) => format!("exited with {}", code),
             Err(err) => format!("wait error: {err}"),
         };
         if let Ok(mut log) = OpenOptions::new().append(true).open(&log_path) {
             let _ = writeln!(log, "[grctl] {} {}", component.display(), summary);
+        }
+        if let Ok(exit_status) = &status {
+            handle_component_exit(component, &paths, exit_status);
         }
         if let Err(err) = clear_state(component, &paths) {
             if err
@@ -792,6 +1041,69 @@ fn spawn_reaper(component: ComponentKind, paths: Paths, log_path: PathBuf, mut c
             );
         }
     });
+}
+
+fn handle_component_exit(
+    component: ComponentKind,
+    paths: &Paths,
+    status: &std::process::ExitStatus,
+) {
+    if component == ComponentKind::Retail {
+        handle_retail_exit(paths, status);
+    }
+}
+
+fn handle_retail_exit(paths: &Paths, status: &std::process::ExitStatus) {
+    if status.code() != Some(124) {
+        return;
+    }
+    let layout = match RetailLayout::new(&paths.repo_root) {
+        Ok(layout) => layout,
+        Err(err) => {
+            eprintln!(
+                "[grctl] retail timeout triage skipped: unable to inspect dev-install ({err:?})"
+            );
+            return;
+        }
+    };
+    let events_path = layout
+        .dev_install()
+        .join("mods")
+        .join("telemetry_events.jsonl");
+    if !events_path.exists() {
+        println!(
+            "[grctl] retail timeout: {} missing (telemetry hooks inactive or telemetry.lua not linked)",
+            events_path.display()
+        );
+        return;
+    }
+    match has_intro_timeline_events(&events_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            println!(
+                "[grctl] retail timeout: no intro.timeline events recorded in {}; retail likely stalled before the logos/intro (black screen).",
+                events_path.display()
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "[grctl] retail timeout triage failed while reading {}: {err:?}",
+                events_path.display()
+            );
+        }
+    }
+}
+
+fn has_intro_timeline_events(events_path: &Path) -> io::Result<bool> {
+    let file = File::open(events_path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.contains("intro.timeline") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn stop_component(component: ComponentKind, paths: &Paths, force: bool) -> Result<()> {

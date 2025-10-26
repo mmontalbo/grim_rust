@@ -5,6 +5,8 @@ Saves/
 .DS_Store
 patches/build/
 target/
+.cargo/
+.rustup/
 **/target/
 artifacts/
 *.zip
