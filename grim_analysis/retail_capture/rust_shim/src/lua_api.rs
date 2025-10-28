@@ -23,7 +23,6 @@ type LuaTagFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaBeginBlockFn = unsafe extern "C" fn();
 type LuaEndBlockFn = unsafe extern "C" fn();
 type LuaCallFunctionFn = unsafe extern "C" fn(LuaObject) -> c_int;
-type LuaStrlibopenFn = unsafe extern "C" fn();
 
 static LUA_DOFILE: OnceLock<Option<LuaDofileFn>> = OnceLock::new();
 static LUA_PUSH_CLOSURE: OnceLock<Option<LuaPushCClosureFn>> = OnceLock::new();
@@ -40,7 +39,6 @@ static LUA_TAG: OnceLock<Option<LuaTagFn>> = OnceLock::new();
 static LUA_BEGIN_BLOCK: OnceLock<Option<LuaBeginBlockFn>> = OnceLock::new();
 static LUA_END_BLOCK: OnceLock<Option<LuaEndBlockFn>> = OnceLock::new();
 static LUA_CALL_FUNCTION: OnceLock<Option<LuaCallFunctionFn>> = OnceLock::new();
-static LUA_STRLIBOPEN: OnceLock<Option<LuaStrlibopenFn>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct SymbolVariant {
@@ -239,16 +237,6 @@ resolve_fn!(
         symbol: b"lua_callfunction\0",
         label: "lua_callfunction",
         success_message: None,
-    }]
-);
-resolve_fn!(
-    resolve_lua_strlibopen,
-    LUA_STRLIBOPEN,
-    LuaStrlibopenFn,
-    &[SymbolVariant {
-        symbol: b"lua_strlibopen\0",
-        label: "lua_strlibopen",
-        success_message: Some("lua_strlibopen available"),
     }]
 );
 

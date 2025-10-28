@@ -4,7 +4,7 @@ use crate::{
         call_real_lua_dofile, log_bootstrap_error_global, log_lua_stack_snapshot,
         resolve_lua_beginblock, resolve_lua_callfunction, resolve_lua_endblock,
         resolve_lua_getglobal, resolve_lua_getstring, resolve_lua_isfunction, resolve_lua_isstring,
-        resolve_lua_pop, resolve_lua_pushobject, resolve_lua_strlibopen, resolve_lua_tag,
+        resolve_lua_pop, resolve_lua_pushobject, resolve_lua_tag,
         BootstrapGlobalSnapshot, LuaObject,
     },
     native::{register_native_file_helpers, telemetry_native_write},
@@ -54,14 +54,6 @@ pub(crate) fn inject_telemetry_script(config: &BootstrapConfig<'_>) {
     };
 
     let script_path = config.script_path;
-    unsafe {
-        if let Some(strlibopen) = resolve_lua_strlibopen() {
-            strlibopen();
-            log_line("lua_strlibopen invoked before telemetry load");
-        } else {
-            log_line("lua_strlibopen unavailable prior to telemetry load");
-        }
-    }
     let result = call_real_lua_dofile(script.as_ptr() as *mut c_char);
     if result == 0 {
         log_line(&format!("{script_path} executed successfully"));
