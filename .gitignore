@@ -11,3 +11,6 @@ target/
 artifacts/
 *.zip
 shim/*.so
+**/shim/*.so
+steam-library/
+luac.out
