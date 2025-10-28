@@ -1,0 +1,41 @@
+# Keep the Lua 3.2 build in lockstep with the retail Grim Fandango runtime.
+#  - Force gcc -m32 so our shim links against a 32-bit ABI.
+#  - Disable optimisation and add -fcommon; GCC 14 + glibc 2.40 otherwise
+#    tickle long-standing UB in the parser.
+#  - Patch str_checkname to cache the constant index before luaX_lex()
+#    advances the lexer; without this, the retail VM segfaults while loading
+#    telemetry scripts under modern toolchains.
+--- lua.orig/config	2025-10-27 16:30:39.644668714 -0700
++++ lua/config	2025-10-27 16:30:57.327881270 -0700
+@@ -18,8 +18,10 @@
+ # ------------------------------------------------------------------ C compiler
+ 
+ # you need an ANSI C compiler. gcc is a popular one.
+-CC= gcc
+-WARN= -ansi -Wall
++CC= gcc -m32
++WARN= -ansi -Wall -fcommon
++
++# (retail shim) provide flags compatible with MSVC-era 32-bit builds
+ 
+ # on IRIX, cc is a good ANSI compiler.
+ #CC= cc
+@@ -64,5 +66,5 @@
+ INCS= -I$(INC) $(EXTRA_INCS)
+ DEFS= $(COMPAT) $(NUMBER) $(OLD_ANSI) $(EXTRALIB) $(EXTRA_DEFS)
+ 
+-CFLAGS= -O2 $(WARN) $(INCS) $(DEFS)
++CFLAGS= -O0 $(WARN) $(INCS) $(DEFS)
+ 
+--- lua.orig/src/lparser.c	2025-10-27 16:30:39.644668714 -0700
++++ lua/src/lparser.c	2025-10-27 16:31:02.645945581 -0700
+@@ -665,7 +665,8 @@
+ 
+ 
+ static TaggedString *str_checkname (LexState *ls) {
+-  return tsvalue(&ls->fs->f->consts[checkname(ls)]);
++  int idx = checkname(ls);  /* cache before luaX_lex() mutates state */
++  return tsvalue(&ls->fs->f->consts[idx]);
+ }
+ 
+ 

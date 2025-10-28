@@ -48,11 +48,20 @@ let
       sha256 = "sha256-v4vqvUHmXL+MtBxojsoFiP/4Hh5fZ8tCvTcOHsxYXDM=";
     };
 
-    nativeBuildInputs = with pkgs; [ ];
+    nativeBuildInputs = with pkgs; [
+      gcc_multi
+      binutils
+    ];
+
+    NIX_CFLAGS_COMPILE = "-fcommon";
     dontConfigure = true;
 
+    patches = [
+      ./nix/patches/lua32-retail-compat.patch
+    ];
+
     buildPhase = ''
-      make all
+      make
     '';
 
     installPhase = ''
@@ -175,6 +184,9 @@ in pkgs.mkShell {
     TOOLCHAIN_DIR="$RUSTUP_HOME/toolchains/$RUSTUP_TOOLCHAIN"
     if [ ! -x "$TOOLCHAIN_DIR/bin/rustc" ]; then
       rustup toolchain install stable --profile minimal >/dev/null
+    fi
+    if [ ! -x "$TOOLCHAIN_DIR/bin/rustfmt" ]; then
+      rustup component add --toolchain "$RUSTUP_TOOLCHAIN" rustfmt >/dev/null
     fi
     if [ ! -d "$TOOLCHAIN_DIR/lib/rustlib/i686-unknown-linux-gnu" ]; then
       rustup target add --toolchain "$RUSTUP_TOOLCHAIN" i686-unknown-linux-gnu >/dev/null
