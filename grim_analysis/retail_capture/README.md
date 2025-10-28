@@ -37,6 +37,10 @@ in one place.
     required primitive is missing, `_ERRORMESSAGE` is wrapped to write bootstrap
     failures to `mods/telemetry_bootstrap_error.log`, and `telemetry.reset()` wipes
     all logs so automated tests start from a known state.
+  - **Compatibility note** – any helper Lua placed in `mods/` (including
+    `telemetry_simple.lua`) must stay compatible with the game's Lua 3.x
+    interpreter. Avoid Lua 5.x syntax sugar, metamethods, or library calls that
+    were added after Lua 3.x.
 
 - `rust_shim/` contains the new `LD_PRELOAD` hook written in Rust. The crate
   exports `lua_dofile`, resolves the retail engine’s real symbol, and (for now)

@@ -20,6 +20,114 @@ events_sequence = 0
 telemetry_dirty = 0
 
 -- ---------------------------------------------------------------------------
+-- File helpers (support both io library and legacy openfile/write)
+-- ---------------------------------------------------------------------------
+
+if type(io) == 'table' then
+    if type(openfile) ~= 'function' and type(io.open) == 'function' then
+        openfile = function(path, mode)
+            if type(path) ~= 'string' then
+                return nil
+            end
+            return io.open(path, mode or 'r')
+        end
+    end
+    if type(write) ~= 'function' then
+        write = function(file, contents)
+            if file ~= nil and type(file.write) == 'function' then
+                file:write(contents or '')
+                return 1
+            end
+            return nil
+        end
+    end
+    if type(closefile) ~= 'function' then
+        closefile = function(file)
+            if file ~= nil and type(file.close) == 'function' then
+                file:close()
+                return 1
+            end
+            return nil
+        end
+    end
+end
+
+function telemetry_write_file(path, contents, mode)
+    mode = mode or 'w'
+    if type(telemetry_native_write) == 'function' then
+        local ok = telemetry_native_write(path, contents, mode)
+        if ok then
+            return 1
+        end
+    end
+    if type(io) == 'table' and type(io.open) == 'function' then
+        local file = io.open(path, mode)
+        if file then
+            file:write(contents)
+            file:close()
+            return 1
+        end
+    end
+    if type(openfile) == 'function' and type(write) == 'function' and type(closefile) == 'function' then
+        local file = openfile(path, mode)
+        if file then
+            write(file, contents)
+            closefile(file)
+            return 1
+        end
+    end
+    return nil
+end
+
+function telemetry_append_line(path, line)
+    if not telemetry_write_file(path, line .. '\n', 'a') then
+        if type(io) == 'table' and type(io.stderr) == 'userdata' then
+            io.stderr:write('[telemetry] append failed ', path, '\n')
+        elseif type(print) == 'function' then
+            print('[telemetry] append failed ' .. path)
+        end
+    end
+end
+
+telemetry_log_routes = {
+    boot = 'mods/telemetry.boot.log',
+    loads = 'mods/telemetry.loads.log',
+    intro = 'mods/telemetry.timeline.log',
+}
+
+function telemetry_log_mux(category, message)
+    if type(category) ~= 'string' or category == '' or type(message) ~= 'string' then
+        return
+    end
+    local normalized = '[' .. category .. '] ' .. message
+    if type(telemetry_log_path) == 'string' and telemetry_log_path ~= '' then
+        telemetry_append_line(telemetry_log_path, normalized)
+    end
+    local target = telemetry_log_routes[category]
+    if type(target) == 'string' and target ~= '' then
+        telemetry_append_line(target, message)
+    end
+end
+
+function telemetry_disable(reason)
+    if type(reason) ~= 'string' or reason == '' then
+        reason = 'telemetry disabled'
+    end
+    __telemetry_stub_reason = reason
+    telemetry = {
+        mark = function() end,
+        event = function() end,
+        flush = function() end,
+        flush_all = function() end,
+        reset = function() end,
+        _reason = __telemetry_stub_reason,
+    }
+    __telemetry_bootstrap_error = __telemetry_stub_reason
+    telemetry_log_mux('boot', reason)
+    return telemetry
+end
+
+-- ---------------------------------------------------------------------------
 -- Compatibility helpers (string primitives)
 -- ---------------------------------------------------------------------------
 
@@ -39,17 +147,7 @@ if type(strformat) ~= "function" and type(string_table) == "table" and type(stri
 end
 
 if type(strsub) ~= "function" or type(strbyte) ~= "function" or type(strformat) ~= "function" then
-    __telemetry_stub_reason = "telemetry disabled: string library unavailable"
-    telemetry = {
-        mark = function() end,
-        event = function() end,
-        flush = function() end,
-        flush_all = function() end,
-        reset = function() end,
-        _reason = __telemetry_stub_reason,
-    }
-    __telemetry_bootstrap_error = __telemetry_stub_reason
-    return telemetry
+    return telemetry_disable("telemetry disabled: string library unavailable")
 end
 
 __telemetry_builtin_strlen = strlen
@@ -92,45 +190,88 @@ telemetry_mod = function(a, b)
     return 0
 end
 
--- ---------------------------------------------------------------------------
--- File helpers (support both io library and legacy openfile/write)
--- ---------------------------------------------------------------------------
-
-function telemetry_write_file(path, contents, mode)
-    mode = mode or "w"
-    if type(telemetry_native_write) == "function" then
-        local ok = telemetry_native_write(path, contents, mode)
-        if ok then
-            return 1
-        end
+telemetry_array_length = function(values)
+    if type(values) ~= "table" then
+        return 0
     end
-    if type(io) == "table" and type(io.open) == "function" then
-        local file = io.open(path, mode)
-        if file then
-            file:write(contents)
-            file:close()
-            return 1
-        end
+    local count = values.n
+    if type(count) == "number" and count >= 0 then
+        return count
     end
-    if type(openfile) == "function" and type(write) == "function" and type(closefile) == "function" then
-        local file = openfile(path, mode)
-        if file then
-            write(file, contents)
-            closefile(file)
-            return 1
-        end
+    count = 0
+    while values[count + 1] ~= nil do
+        count = count + 1
     end
-    return nil
+    return count
 end
 
-function telemetry_append_line(path, line)
-    if not telemetry_write_file(path, line .. "\n", "a") then
-        if type(io) == "table" and type(io.stderr) == "userdata" then
-            io.stderr:write("[telemetry] append failed ", path, "\n")
-        elseif type(print) == "function" then
-            print("[telemetry] append failed " .. path)
+local telemetry_call_helper = call
+local telemetry_call_helper_name = "call"
+if type(telemetry_call_helper) ~= "function" and type(telemetry_native_call) == "function" then
+    telemetry_call_helper = telemetry_native_call
+    telemetry_call_helper_name = "telemetry_native_call"
+end
+if type(telemetry_call_helper) ~= "function" then
+    return telemetry_disable("telemetry disabled: legacy call helper missing")
+end
+
+local telemetry_unpack_helper = unpack
+local telemetry_unpack_helper_name = "unpack"
+if type(telemetry_unpack_helper) ~= "function" and type(table) == "table" and type(table.unpack) == "function" then
+    telemetry_unpack_helper = table.unpack
+    telemetry_unpack_helper_name = "table.unpack"
+end
+if type(telemetry_unpack_helper) ~= "function" then
+    return telemetry_disable("telemetry disabled: legacy unpack helper missing")
+end
+
+telemetry_pack_args = function()
+    local packed = {}
+    if type(arg) == "table" then
+        local count = telemetry_array_length(arg)
+        packed.n = count
+        local index = 1
+        while index <= count do
+            packed[index] = arg[index]
+            index = index + 1
+        end
+    else
+        packed.n = 0
+    end
+    return packed
+end
+
+telemetry_call_original = function(handler, packed_args)
+    if type(handler) ~= "function" then
+        return {}
+    end
+    local args = packed_args
+    if type(args) ~= "table" then
+        args = { n = 0 }
+    elseif type(args.n) ~= "number" then
+        args.n = telemetry_array_length(args)
+    end
+    if type(telemetry_call_helper) == "function" then
+        local packed_results = telemetry_call_helper(handler, args, "p")
+        if type(packed_results) == "table" then
+            if type(packed_results.n) ~= "number" then
+                packed_results.n = telemetry_array_length(packed_results)
+            end
+            return packed_results
         end
     end
+    return { handler() }
+end
+
+telemetry_call_bridge = function(handler, packed_args)
+    return telemetry_call_original(handler, packed_args)
+end
+
+function telemetry_invoke_original(handler, packed_args)
+    if type(telemetry_call_bridge) == "function" then
+        return telemetry_call_bridge(handler, packed_args)
+    end
+    return telemetry_call_original(handler, packed_args)
 end
 
 -- ---------------------------------------------------------------------------
@@ -293,23 +434,44 @@ end
 -- Intro timeline instrumentation
 -- ---------------------------------------------------------------------------
 
-local function telemetry_intro_unpack(results)
-    if type(unpack) == "function" then
-        return unpack(results)
-    end
-    if type(table) == "table" and type(table.unpack) == "function" then
-        return table.unpack(results)
+function telemetry_intro_unpack(results)
+    if type(telemetry_unpack_helper) == "function" then
+        return telemetry_unpack_helper(results)
     end
     return results[1]
 end
 
-local telemetry_intro_hooks = {
+telemetry_intro_hooks = {
     installed = false,
     pending_movie = nil,
     scripts = {},
 }
 
-local function telemetry_intro_event(name, extra)
+local function telemetry_intro_log_payload(name, extra)
+    if type(name) ~= "string" then
+        return "intro.event"
+    end
+    local parts = { name }
+    if type(extra) == "table" then
+        local key, value = next(extra, nil)
+        while key do
+            parts[#parts + 1] = tostring(key) .. "=" .. tostring(value)
+            key, value = next(extra, key)
+        end
+    end
+    if type(table) == "table" and type(table.concat) == "function" then
+        return table.concat(parts, " ")
+    end
+    local index = 2
+    local text = parts[1]
+    while parts[index] do
+        text = text .. " " .. parts[index]
+        index = index + 1
+    end
+    return text
+end
+
+function telemetry_intro_event(name, extra)
     if type(name) ~= "string" or name == "" then
         return
     end
@@ -321,10 +483,11 @@ local function telemetry_intro_event(name, extra)
             key, value = next(extra, key)
         end
     end
+    telemetry_log_mux("intro", telemetry_intro_log_payload(name, extra))
     telemetry.event("intro.timeline", payload)
 end
 
-local function telemetry_intro_clear_scripts(label)
+function telemetry_intro_clear_scripts(label)
     local removals = {}
     local count = 0
     local key, value = next(telemetry_intro_hooks.scripts, nil)
@@ -342,7 +505,7 @@ local function telemetry_intro_clear_scripts(label)
     end
 end
 
-local function telemetry_intro_install()
+function telemetry_intro_install()
     if telemetry_intro_hooks.installed then
         return
     end
@@ -363,27 +526,31 @@ local function telemetry_intro_install()
     end
 
     if type(cut_scene.logos) == "function" then
-        local original_logos = cut_scene.logos
+        telemetry_intro_hooks.original_logos = cut_scene.logos
         cut_scene.logos = function(...)
+            local call_args = telemetry_pack_args()
             telemetry_intro_event("cut_scene.logos.begin")
-            local results = { original_logos(...) }
+            local results = telemetry_invoke_original(telemetry_intro_hooks.original_logos, call_args)
             telemetry_intro_event("cut_scene.logos.end")
             return telemetry_intro_unpack(results)
         end
     end
 
     if type(cut_scene.intro) == "function" then
-        local original_intro = cut_scene.intro
+        telemetry_intro_hooks.original_intro = cut_scene.intro
         cut_scene.intro = function(...)
+            local call_args = telemetry_pack_args()
             telemetry_intro_event("cut_scene.intro.begin")
-            local results = { original_intro(...) }
+            local results = telemetry_invoke_original(telemetry_intro_hooks.original_intro, call_args)
             telemetry_intro_event("cut_scene.intro.end")
             return telemetry_intro_unpack(results)
         end
     end
 
-    local original_run_fullscreen_movie = RunFullscreenMovie
-    RunFullscreenMovie = function(name, ...)
+    telemetry_intro_hooks.original_run_fullscreen_movie = RunFullscreenMovie
+    RunFullscreenMovie = function(...)
+        local call_args = telemetry_pack_args()
+        local name = call_args[1]
         local label = nil
         if name == "logos.snm" then
             label = "movie.logos"
@@ -393,24 +560,28 @@ local function telemetry_intro_install()
         if label then
             telemetry_intro_event(label .. ".start", { movie = name })
         end
-        local results = { original_run_fullscreen_movie(name, ...) }
+        local results = telemetry_invoke_original(telemetry_intro_hooks.original_run_fullscreen_movie, call_args)
         if label then
             telemetry_intro_event(label .. ".end", { movie = name })
         end
         return telemetry_intro_unpack(results)
     end
 
-    local original_start_movie = StartMovie
-    local original_wait_for_movie = wait_for_movie
-    StartMovie = function(name, ...)
+    telemetry_intro_hooks.original_start_movie = StartMovie
+    telemetry_intro_hooks.original_wait_for_movie = wait_for_movie
+    StartMovie = function(...)
+        local call_args = telemetry_pack_args()
+        local name = call_args[1]
         if name == "mo_ts.snm" then
             telemetry_intro_event("movie.mo_ts.start", { movie = name })
             telemetry_intro_hooks.pending_movie = name
         end
-        return original_start_movie(name, ...)
+        local results = telemetry_invoke_original(telemetry_intro_hooks.original_start_movie, call_args)
+        return telemetry_intro_unpack(results)
     end
     wait_for_movie = function(...)
-        local results = { original_wait_for_movie(...) }
+        local call_args = telemetry_pack_args()
+        local results = telemetry_invoke_original(telemetry_intro_hooks.original_wait_for_movie, call_args)
         if telemetry_intro_hooks.pending_movie ~= nil then
             telemetry_intro_event("movie.mo_ts.end", { movie = telemetry_intro_hooks.pending_movie })
             telemetry_intro_hooks.pending_movie = nil
@@ -418,10 +589,12 @@ local function telemetry_intro_install()
         return telemetry_intro_unpack(results)
     end
 
-    local original_start_script = start_script
-    local original_wait_for_script = wait_for_script
-    start_script = function(fn, ...)
-        local results = { original_start_script(fn, ...) }
+    telemetry_intro_hooks.original_start_script = start_script
+    telemetry_intro_hooks.original_wait_for_script = wait_for_script
+    start_script = function(...)
+        local call_args = telemetry_pack_args()
+        local fn = call_args[1]
+        local results = telemetry_invoke_original(telemetry_intro_hooks.original_start_script, call_args)
         if manny and fn == manny.walk_and_face then
             telemetry_intro_event("script.manny.walk_and_face.start")
             telemetry_intro_hooks.scripts[fn] = "script.manny.walk_and_face"
@@ -432,9 +605,11 @@ local function telemetry_intro_install()
         end
         return telemetry_intro_unpack(results)
     end
-    wait_for_script = function(target, ...)
+    wait_for_script = function(...)
+        local call_args = telemetry_pack_args()
+        local target = call_args[1]
         local label = telemetry_intro_hooks.scripts[target]
-        local results = { original_wait_for_script(target, ...) }
+        local results = telemetry_invoke_original(telemetry_intro_hooks.original_wait_for_script, call_args)
         if label then
             telemetry_intro_event(label .. ".end")
             telemetry_intro_clear_scripts(label)
@@ -442,23 +617,29 @@ local function telemetry_intro_install()
         return telemetry_intro_unpack(results)
     end
 
-    local original_say_line = Actor.say_line
-    Actor.say_line = function(self, line, ...)
-        if self == manny and line == "/intma39/" then
+    telemetry_intro_hooks.original_say_line = Actor.say_line
+    Actor.say_line = function(...)
+        local call_args = telemetry_pack_args()
+        local self_actor = call_args[1]
+        local line = call_args[2]
+        if self_actor == manny and line == "/intma39/" then
             telemetry_intro_event("dialog.manny.intma39", { line = line })
         end
-        return original_say_line(self, line, ...)
+        local results = telemetry_invoke_original(telemetry_intro_hooks.original_say_line, call_args)
+        return telemetry_intro_unpack(results)
     end
 
     telemetry_intro_hooks.installed = true
 end
 
-local telemetry_original_dofile = dofile
+telemetry_original_dofile = dofile
 if type(telemetry_original_dofile) == "function" then
     dofile = function(path)
         local results = { telemetry_original_dofile(path) }
         if type(path) == "string" then
+            telemetry_log_mux("loads", "dofile " .. path)
             if path == "_cut_scenes.lua" or path == "year_1.lua" then
+                telemetry_log_mux("loads", "intro hooks requested by " .. path)
                 telemetry_intro_install()
             end
         end
@@ -483,6 +664,13 @@ function telemetry.reset()
     telemetry_dirty = 0
     telemetry_write_file(telemetry_events_log, "", "w")
     telemetry_write_file(telemetry_coverage_log, "{}", "w")
+    local route, path = next(telemetry_log_routes, nil)
+    while route do
+        if type(path) == "string" then
+            telemetry_write_file(path, "", "w")
+        end
+        route, path = next(telemetry_log_routes, route)
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -501,7 +689,15 @@ function _ERRORMESSAGE(err)
     return err
 end
 
-telemetry_append_line(telemetry_log_path, "telemetry.lua (Lua 3.1 rewrite) loaded")
+local call_state = telemetry_call_helper_name .. "=" .. tostring(type(telemetry_call_helper))
+local unpack_state = telemetry_unpack_helper_name .. "=" .. tostring(type(telemetry_unpack_helper))
+telemetry_log_mux(
+    "boot",
+    "telemetry.lua (Lua 3.1 rewrite) loaded; call="
+        .. call_state
+        .. ", unpack="
+        .. unpack_state
+)
 
 telemetry.reset()
 

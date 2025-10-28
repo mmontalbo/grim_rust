@@ -2,13 +2,16 @@
 #include <lua.h>
 #include <lualib.h>
 
-int main(void) {
+int main(int argc, char **argv) {
     lua_open();
     lua_iolibopen();
     lua_strlibopen();
     lua_mathlibopen();
 
     const char *script = "grim_analysis/retail_capture/telemetry.lua";
+    if (argc > 1 && argv[1] && argv[1][0] != '\0') {
+        script = argv[1];
+    }
     int result = lua_dofile((char *)script);
     printf("lua_dofile(%s) -> %d\n", script, result);
     if (result != 0) {
