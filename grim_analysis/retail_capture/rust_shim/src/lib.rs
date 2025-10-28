@@ -1,102 +1,28 @@
-use std::{
-    ffi::{CStr, CString},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        OnceLock,
-    },
-};
+use libc::{c_char, c_int};
 
-use libc::{c_char, c_int, c_void};
+mod bootstrap;
+mod env;
+mod logging;
+mod lua_api;
+mod native;
 
-type LuaDofileFn = unsafe extern "C" fn(*mut c_char) -> c_int;
-
-static LUA_DOFILE: OnceLock<Option<LuaDofileFn>> = OnceLock::new();
-static TELEMETRY_INJECTED: AtomicBool = AtomicBool::new(false);
+use bootstrap::{inject_telemetry_script, BootstrapConfig};
+use logging::log_line;
+use lua_api::{call_real_lua_dofile, filename_from_ptr, is_system_script};
 
 const TELEMETRY_SCRIPT: &str = "mods/telemetry_simple.lua";
 const TELEMETRY_BOOTSTRAP_ERROR_LOG: &str = "mods/telemetry_bootstrap_error.log";
+const TELEMETRY_BOOTSTRAP_ERROR_GLOBAL: &[u8] = b"__telemetry_bootstrap_error\0";
+const TELEMETRY_NATIVE_NAME_CSTR: &[u8] = b"telemetry_native_write\0";
+const LUA_STACK_SNAPSHOT_LIMIT: usize = 4;
 
-fn log_line(message: &str) {
-    eprintln!("[grim-rust-shim] {message}");
-}
-
-unsafe fn resolve_lua_dofile() -> Option<LuaDofileFn> {
-    LUA_DOFILE
-        .get_or_init(|| {
-            let symbol = b"lua_dofile\0";
-            let ptr = libc::dlsym(libc::RTLD_NEXT, symbol.as_ptr() as *const c_char);
-            if ptr.is_null() {
-                log_line("failed to resolve lua_dofile via dlsym");
-                None
-            } else {
-                log_line("resolved lua_dofile symbol");
-                let func: LuaDofileFn = std::mem::transmute::<*mut c_void, LuaDofileFn>(ptr);
-                Some(func)
-            }
-        })
-        .clone()
-}
-
-fn filename_from_ptr(filename: *mut c_char) -> Option<String> {
-    if filename.is_null() {
-        return None;
-    }
-
-    unsafe { Some(CStr::from_ptr(filename).to_string_lossy().into_owned()) }
-}
-
-fn is_system_script(path: &str) -> bool {
-    let trimmed = path.trim();
-    let filename = trimmed
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(trimmed);
-    filename.eq_ignore_ascii_case("_system.lua")
-}
-
-unsafe fn inject_telemetry_script() {
-    if TELEMETRY_INJECTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    log_line(&format!(
-        "injecting telemetry script via lua_dofile({TELEMETRY_SCRIPT})"
-    ));
-
-    let script = match CString::new(TELEMETRY_SCRIPT) {
-        Ok(value) => value,
-        Err(err) => {
-            log_line(&format!(
-                "failed to build CString for telemetry path {TELEMETRY_SCRIPT}: {err}"
-            ));
-            return;
-        }
-    };
-
-    let result = call_real_lua_dofile(script.as_ptr() as *mut c_char);
-    if result == 0 {
-        log_line("telemetry.lua executed successfully");
-    } else {
-        let note = TELEMETRY_BOOTSTRAP_ERROR_LOG;
-        log_line(&format!(
-            "telemetry.lua returned error code {result}; check {note}"
-        ));
-        if let Ok(contents) = std::fs::read_to_string(format!("dev-install/{note}")) {
-            let trimmed = contents.trim();
-            if !trimmed.is_empty() {
-                log_line(&format!("telemetry bootstrap log: {trimmed}"));
-            }
-        }
-    }
-}
-
-unsafe fn call_real_lua_dofile(filename: *mut c_char) -> c_int {
-    match resolve_lua_dofile() {
-        Some(real) => real(filename),
-        None => {
-            log_line("lua_dofile unavailable; returning error");
-            -1
-        }
+fn telemetry_bootstrap_config() -> BootstrapConfig<'static> {
+    BootstrapConfig {
+        script_path: TELEMETRY_SCRIPT,
+        bootstrap_log: TELEMETRY_BOOTSTRAP_ERROR_LOG,
+        bootstrap_global: TELEMETRY_BOOTSTRAP_ERROR_GLOBAL,
+        native_name: TELEMETRY_NATIVE_NAME_CSTR,
+        stack_snapshot_limit: LUA_STACK_SNAPSHOT_LIMIT,
     }
 }
 
@@ -111,9 +37,11 @@ pub unsafe extern "C" fn lua_dofile(filename: *mut c_char) -> c_int {
 
     if let Some(ref text) = path {
         if is_system_script(text) {
-            log_line(&format!("observed lua_dofile call for {text} (result={result})"));
+            log_line(&format!(
+                "observed lua_dofile call for {text} (result={result})"
+            ));
             if result == 0 {
-                inject_telemetry_script();
+                inject_telemetry_script(&telemetry_bootstrap_config());
             } else {
                 log_line(&format!(
                     "skipping telemetry injection because _system.lua returned error code {result}"
