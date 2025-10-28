@@ -14,7 +14,7 @@ endif
 CFLAGS += -I$(LUA32_INCLUDE)
 
 TARGET := libgrim_lua_hook.so
-SOURCES := lua_hook.c
+SOURCES := lua_hook.c lua_runtime.c
 
 .PHONY: all clean
 
