@@ -22,6 +22,9 @@ pub struct RetailLayout {
     telemetry_source: PathBuf,
     telemetry_dest: PathBuf,
     telemetry_backup: PathBuf,
+    telemetry_simple_source: PathBuf,
+    telemetry_simple_dest: PathBuf,
+    telemetry_simple_backup: PathBuf,
     rust_shim_workspace_release: PathBuf,
     rust_shim_workspace_debug: PathBuf,
     rust_shim_local_release: PathBuf,
@@ -33,7 +36,24 @@ pub struct InstrumentationStatus {
     pub telemetry_exists: bool,
     pub telemetry_linked: bool,
     pub telemetry_backup_exists: bool,
+    pub telemetry_simple_exists: bool,
+    pub telemetry_simple_linked: bool,
+    pub telemetry_simple_backup_exists: bool,
     pub shim_available: bool,
+}
+
+impl InstrumentationStatus {
+    pub fn scripts_linked(&self) -> bool {
+        self.telemetry_linked && self.telemetry_simple_linked
+    }
+
+    pub fn any_scripts_linked(&self) -> bool {
+        self.telemetry_linked || self.telemetry_simple_linked
+    }
+
+    pub fn any_scripts_present(&self) -> bool {
+        self.telemetry_exists || self.telemetry_simple_exists
+    }
 }
 
 impl RetailLayout {
@@ -46,6 +66,12 @@ impl RetailLayout {
             .join("telemetry.lua");
         let telemetry_dest = dev_install.join("mods").join("telemetry.lua");
         let telemetry_backup = dev_install.join("mods").join("telemetry.lua.retail");
+        let telemetry_simple_source = repo_root
+            .join("grim_analysis")
+            .join("retail_capture")
+            .join("telemetry_simple.lua");
+        let telemetry_simple_dest = dev_install.join("mods").join("telemetry_simple.lua");
+        let telemetry_simple_backup = dev_install.join("mods").join("telemetry_simple.lua.retail");
         let shim_name = "libgrim_telemetry_shim.so";
         let rust_workspace_target = repo_root.join("target").join("i686-unknown-linux-gnu");
         let rust_local_target = repo_root
@@ -66,6 +92,9 @@ impl RetailLayout {
             telemetry_source,
             telemetry_dest,
             telemetry_backup,
+            telemetry_simple_source,
+            telemetry_simple_dest,
+            telemetry_simple_backup,
             rust_shim_workspace_release,
             rust_shim_workspace_debug,
             rust_shim_local_release,
@@ -116,11 +145,19 @@ impl RetailLayout {
             .map(|target| target == self.telemetry_source)
             .unwrap_or(false);
         let telemetry_backup_exists = self.telemetry_backup.exists();
+        let telemetry_simple_exists = self.telemetry_simple_dest.exists();
+        let telemetry_simple_linked = read_link_normalized(&self.telemetry_simple_dest)?
+            .map(|target| target == self.telemetry_simple_source)
+            .unwrap_or(false);
+        let telemetry_simple_backup_exists = self.telemetry_simple_backup.exists();
         let shim_available = self.resolved_shim_path().is_some();
         Ok(InstrumentationStatus {
             telemetry_exists,
             telemetry_linked,
             telemetry_backup_exists,
+            telemetry_simple_exists,
+            telemetry_simple_linked,
+            telemetry_simple_backup_exists,
             shim_available,
         })
     }
@@ -161,6 +198,10 @@ impl RetailLayout {
 
     pub fn telemetry_dest(&self) -> &Path {
         &self.telemetry_dest
+    }
+
+    pub fn telemetry_simple_dest(&self) -> &Path {
+        &self.telemetry_simple_dest
     }
 
     pub fn steam_ld_paths(&self) -> Vec<PathBuf> {
@@ -213,46 +254,71 @@ impl RetailLayout {
     }
 
     fn install_hooks(&self) -> Result<()> {
-        if !self.telemetry_source.exists() {
-            bail!(
-                "telemetry source missing at {}; build grim_analysis first?",
-                self.telemetry_source.display()
-            );
-        }
-        let mods_dir = self.telemetry_dest.parent().unwrap();
-        fs::create_dir_all(mods_dir)
-            .with_context(|| format!("creating mods dir {}", mods_dir.display()))?;
-
-        if self.telemetry_dest.exists()
-            && !self.telemetry_dest.is_symlink()
-            && !self.telemetry_backup.exists()
-        {
-            fs::copy(&self.telemetry_dest, &self.telemetry_backup).with_context(|| {
-                format!(
-                    "backing up telemetry script to {}",
-                    self.telemetry_backup.display()
-                )
-            })?;
-        }
-
-        replace_with_symlink(&self.telemetry_source, &self.telemetry_dest)?;
+        self.ensure_script_linked(
+            &self.telemetry_source,
+            &self.telemetry_dest,
+            &self.telemetry_backup,
+            "telemetry.lua",
+        )?;
+        self.ensure_script_linked(
+            &self.telemetry_simple_source,
+            &self.telemetry_simple_dest,
+            &self.telemetry_simple_backup,
+            "telemetry_simple.lua",
+        )?;
         Ok(())
     }
 
     fn remove_hooks(&self) -> Result<()> {
-        let mods_dir = self.telemetry_dest.parent().unwrap();
-        fs::create_dir_all(mods_dir)
-            .with_context(|| format!("ensuring mods dir {}", mods_dir.display()))?;
-        if self.telemetry_backup.exists() {
-            fs::copy(&self.telemetry_backup, &self.telemetry_dest).with_context(|| {
-                format!(
-                    "restoring telemetry script from {}",
-                    self.telemetry_backup.display()
-                )
-            })?;
-        } else if self.telemetry_dest.is_symlink() || self.telemetry_dest.exists() {
-            fs::remove_file(&self.telemetry_dest)
-                .with_context(|| format!("removing {}", self.telemetry_dest.display()))?;
+        self.restore_or_remove_script(
+            &self.telemetry_dest,
+            &self.telemetry_backup,
+            "telemetry.lua",
+        )?;
+        self.restore_or_remove_script(
+            &self.telemetry_simple_dest,
+            &self.telemetry_simple_backup,
+            "telemetry_simple.lua",
+        )?;
+        Ok(())
+    }
+
+    fn ensure_script_linked(
+        &self,
+        source: &Path,
+        dest: &Path,
+        backup: &Path,
+        label: &str,
+    ) -> Result<()> {
+        if !source.exists() {
+            bail!(
+                "{} source missing at {}; build grim_analysis first?",
+                label,
+                source.display()
+            );
+        }
+        if let Some(dir) = dest.parent() {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("creating mods dir {}", dir.display()))?;
+        }
+        if dest.exists() && !dest.is_symlink() && !backup.exists() {
+            fs::copy(dest, backup)
+                .with_context(|| format!("backing up {} to {}", label, backup.display()))?;
+        }
+        replace_with_symlink(source, dest)?;
+        Ok(())
+    }
+
+    fn restore_or_remove_script(&self, dest: &Path, backup: &Path, label: &str) -> Result<()> {
+        if let Some(dir) = dest.parent() {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("ensuring mods dir {}", dir.display()))?;
+        }
+        if backup.exists() {
+            fs::copy(backup, dest)
+                .with_context(|| format!("restoring {} from {}", label, backup.display()))?;
+        } else if dest.is_symlink() || dest.exists() {
+            fs::remove_file(dest).with_context(|| format!("removing {}", dest.display()))?;
         }
         Ok(())
     }

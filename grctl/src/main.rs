@@ -565,17 +565,25 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
         ensure_rust_shim_ready(paths, &layout)?;
     }
     let status = layout.apply_mode(mode)?;
-    if !status.telemetry_linked && matches!(mode, HookMode::Instrumented) {
-        eprintln!(
-            "[grctl] warning: telemetry shim requested but {} is not linked",
-            layout.telemetry_dest().display()
-        );
-    }
-    if matches!(mode, HookMode::Instrumented) && !status.shim_available {
-        eprintln!(
-            "[grctl] warning: LD_PRELOAD shim missing. Run 'cargo build -p grim_telemetry_shim --release' so {} exists; retail hooks will be incomplete until the Rust shim is built.",
-            layout.preferred_shim_path().display(),
-        );
+    if matches!(mode, HookMode::Instrumented) {
+        if !status.telemetry_linked {
+            eprintln!(
+                "[grctl] warning: telemetry shim requested but {} is not linked",
+                layout.telemetry_dest().display()
+            );
+        }
+        if !status.telemetry_simple_linked {
+            eprintln!(
+                "[grctl] warning: telemetry shim requested but {} is not linked",
+                layout.telemetry_simple_dest().display()
+            );
+        }
+        if !status.shim_available {
+            eprintln!(
+                "[grctl] warning: LD_PRELOAD shim missing. Run 'cargo build -p grim_telemetry_shim --release' so {} exists; retail hooks will be incomplete until the Rust shim is built.",
+                layout.preferred_shim_path().display(),
+            );
+        }
     }
 
     let (command, command_line) = build_retail_command(&layout, &args, mode, paths, &session_id)?;
@@ -689,20 +697,36 @@ fn print_retail_instrumentation(paths: &Paths) -> Result<()> {
 }
 
 fn describe_instrumentation(status: &retail::InstrumentationStatus) -> String {
-    if status.telemetry_linked {
+    if status.scripts_linked() {
         if status.shim_available {
-            "instrumented (telemetry linked, shim available)".to_string()
+            "instrumented (telemetry scripts linked, shim available)".to_string()
         } else {
-            "instrumented (telemetry linked, shim missing)".to_string()
+            "instrumented (telemetry scripts linked, shim missing)".to_string()
         }
-    } else if status.telemetry_exists {
-        if status.telemetry_backup_exists {
-            "vanilla (local telemetry script active; backup present)".to_string()
+    } else if status.any_scripts_linked() {
+        "partial (some telemetry scripts linked; rerun 'grctl retail hooks enable')".to_string()
+    } else if status.any_scripts_present() {
+        let telemetry_note = if status.telemetry_exists {
+            if status.telemetry_backup_exists {
+                "telemetry.lua active (backup present)"
+            } else {
+                "telemetry.lua active (no backup)"
+            }
         } else {
-            "vanilla (local telemetry script active; no backup found)".to_string()
-        }
+            "telemetry.lua missing"
+        };
+        let telemetry_simple_note = if status.telemetry_simple_exists {
+            if status.telemetry_simple_backup_exists {
+                "telemetry_simple.lua active (backup present)"
+            } else {
+                "telemetry_simple.lua active (no backup)"
+            }
+        } else {
+            "telemetry_simple.lua missing"
+        };
+        format!("vanilla ({telemetry_note}; {telemetry_simple_note})")
     } else {
-        "vanilla (telemetry script absent)".to_string()
+        "vanilla (telemetry scripts absent)".to_string()
     }
 }
 
