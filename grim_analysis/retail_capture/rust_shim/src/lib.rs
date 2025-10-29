@@ -13,7 +13,8 @@ use lua_api::{call_real_lua_dofile, filename_from_ptr, is_system_script};
 const TELEMETRY_SCRIPT: &str = "mods/telemetry_simple.lua";
 const TELEMETRY_BOOTSTRAP_ERROR_LOG: &str = "mods/telemetry_bootstrap_error.log";
 const TELEMETRY_BOOTSTRAP_ERROR_GLOBAL: &[u8] = b"__telemetry_bootstrap_error\0";
-const TELEMETRY_NATIVE_NAME_CSTR: &[u8] = b"telemetry_native_write\0";
+const TELEMETRY_NATIVE_WRITE_NAME_CSTR: &[u8] = b"telemetry_native_write\0";
+const TELEMETRY_NATIVE_MARK_NAME_CSTR: &[u8] = b"telemetry_native_mark\0";
 const LUA_STACK_SNAPSHOT_LIMIT: usize = 4;
 
 fn telemetry_bootstrap_config() -> BootstrapConfig<'static> {
@@ -21,7 +22,8 @@ fn telemetry_bootstrap_config() -> BootstrapConfig<'static> {
         script_path: TELEMETRY_SCRIPT,
         bootstrap_log: TELEMETRY_BOOTSTRAP_ERROR_LOG,
         bootstrap_global: TELEMETRY_BOOTSTRAP_ERROR_GLOBAL,
-        native_name: TELEMETRY_NATIVE_NAME_CSTR,
+        native_write_name: TELEMETRY_NATIVE_WRITE_NAME_CSTR,
+        native_mark_name: TELEMETRY_NATIVE_MARK_NAME_CSTR,
         stack_snapshot_limit: LUA_STACK_SNAPSHOT_LIMIT,
     }
 }

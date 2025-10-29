@@ -1,9 +1,10 @@
 use crate::{
-    logging::{log_line, TelemetryLogger},
+    env::telemetry_debug_enabled,
+    logging::{log_line, sanitize_lua_string_fragment, TelemetryLogger},
     lua_api::{
-        resolve_lua_getglobal, resolve_lua_getparam, resolve_lua_getstring, resolve_lua_isfunction,
-        resolve_lua_isstring, resolve_lua_pushcclosure, resolve_lua_pushnumber,
-        resolve_lua_setglobal, LuaCFunction,
+        capture_lua_params, resolve_lua_getglobal, resolve_lua_getparam, resolve_lua_getstring,
+        resolve_lua_isfunction, resolve_lua_isstring, resolve_lua_pushcclosure,
+        resolve_lua_pushnumber, resolve_lua_setglobal, LuaCFunction,
     },
 };
 use libc::c_char;
@@ -19,23 +20,49 @@ use std::{
 
 static TELEMETRY_NATIVE_REGISTERED: AtomicBool = AtomicBool::new(false);
 static TELEMETRY_NATIVE_WRITE_SEEN: AtomicBool = AtomicBool::new(false);
+static TELEMETRY_NATIVE_MARK_REGISTERED: AtomicBool = AtomicBool::new(false);
+static TELEMETRY_NATIVE_MARK_SEEN: AtomicBool = AtomicBool::new(false);
 
-pub(crate) unsafe fn register_native_file_helpers(native_name: &[u8], handler: LuaCFunction) {
-    if TELEMETRY_NATIVE_REGISTERED.load(Ordering::SeqCst) {
-        return;
+unsafe fn register_lua_native(
+    flag: &AtomicBool,
+    name: &[u8],
+    handler: LuaCFunction,
+    description: &str,
+) -> bool {
+    if flag.load(Ordering::SeqCst) {
+        log_line(&format!(
+            "skipping {description} registration; flag already set"
+        ));
+        return false;
     }
     let Some(push_closure) = resolve_lua_pushcclosure() else {
-        log_line("lua_pushcclosure unavailable; cannot register telemetry_native_write");
-        return;
+        log_line(&format!(
+            "lua_pushcclosure unavailable; cannot register {description}"
+        ));
+        return false;
     };
     let Some(set_global) = resolve_lua_setglobal() else {
-        log_line("lua_setglobal unavailable; cannot register telemetry_native_write");
-        return;
+        log_line(&format!(
+            "lua_setglobal unavailable; cannot register {description}"
+        ));
+        return false;
     };
     push_closure(handler, 0);
-    set_global(native_name.as_ptr() as *mut c_char);
-    TELEMETRY_NATIVE_REGISTERED.store(true, Ordering::SeqCst);
-    log_line("registered telemetry_native_write helper");
+    set_global(name.as_ptr() as *mut c_char);
+    flag.store(true, Ordering::SeqCst);
+    log_line(&format!("registered {description} helper"));
+    true
+}
+
+pub(crate) unsafe fn register_native_file_helpers(native_name: &[u8], handler: LuaCFunction) {
+    if !register_lua_native(
+        &TELEMETRY_NATIVE_REGISTERED,
+        native_name,
+        handler,
+        "telemetry_native_write",
+    ) {
+        return;
+    }
     if let (Some(get_global), Some(is_function)) =
         (resolve_lua_getglobal(), resolve_lua_isfunction())
     {
@@ -52,6 +79,16 @@ pub(crate) unsafe fn register_native_file_helpers(native_name: &[u8], handler: L
             obj
         ));
     }
+}
+
+pub(crate) unsafe fn register_native_mark(native_name: &[u8]) {
+    log_line("attempting telemetry_native_mark registration");
+    register_lua_native(
+        &TELEMETRY_NATIVE_MARK_REGISTERED,
+        native_name,
+        telemetry_native_mark,
+        "telemetry_native_mark",
+    );
 }
 
 unsafe fn telemetry_native_write_impl() -> bool {
@@ -155,5 +192,51 @@ pub(crate) unsafe extern "C" fn telemetry_native_write() {
         push_number(if success { 1.0 } else { 0.0 });
     } else {
         log_line("lua_pushnumber unavailable; telemetry_native_write skipping return value");
+    }
+}
+
+unsafe fn telemetry_native_mark_impl() -> bool {
+    let Some(arguments) = capture_lua_params(1) else {
+        log_line("telemetry_native_mark missing argument");
+        return false;
+    };
+    let object = arguments[0];
+    let Some(is_string) = resolve_lua_isstring() else {
+        log_line("lua_isstring unavailable; telemetry_native_mark aborted");
+        return false;
+    };
+    if is_string(object) == 0 {
+        log_line("telemetry_native_mark received non-string argument");
+        return false;
+    }
+    let Some(get_string) = resolve_lua_getstring() else {
+        log_line("lua_getstring unavailable; telemetry_native_mark aborted");
+        return false;
+    };
+    let ptr = get_string(object);
+    if ptr.is_null() {
+        log_line("telemetry_native_mark argument string pointer null");
+        return false;
+    }
+    let key = CStr::from_ptr(ptr).to_string_lossy();
+    let sanitized = sanitize_lua_string_fragment(&key);
+    let debug = telemetry_debug_enabled();
+    if !TELEMETRY_NATIVE_MARK_SEEN.swap(true, Ordering::SeqCst) {
+        log_line(&format!(
+            "telemetry_native_mark first invocation key=\"{sanitized}\""
+        ));
+    } else if debug {
+        log_line(&format!("telemetry_native_mark key=\"{sanitized}\""));
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn telemetry_native_mark() {
+    let success = telemetry_native_mark_impl();
+    if let Some(push_number) = resolve_lua_pushnumber() {
+        push_number(if success { 1.0 } else { 0.0 });
+    } else {
+        log_line("lua_pushnumber unavailable; telemetry_native_mark skipping return value");
     }
 }

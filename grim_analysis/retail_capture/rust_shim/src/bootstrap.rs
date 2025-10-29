@@ -7,7 +7,7 @@ use crate::{
         resolve_lua_pop, resolve_lua_pushobject, resolve_lua_tag,
         BootstrapGlobalSnapshot, LuaObject,
     },
-    native::{register_native_file_helpers, telemetry_native_write},
+    native::{register_native_file_helpers, register_native_mark, telemetry_native_write},
 };
 use libc::c_char;
 use std::{
@@ -24,7 +24,8 @@ pub(crate) struct BootstrapConfig<'a> {
     pub script_path: &'a str,
     pub bootstrap_log: &'a str,
     pub bootstrap_global: &'a [u8],
-    pub native_name: &'a [u8],
+    pub native_write_name: &'a [u8],
+    pub native_mark_name: &'a [u8],
     pub stack_snapshot_limit: usize,
 }
 
@@ -34,7 +35,8 @@ pub(crate) fn inject_telemetry_script(config: &BootstrapConfig<'_>) {
     }
 
     unsafe {
-        register_native_file_helpers(config.native_name, telemetry_native_write);
+        register_native_file_helpers(config.native_write_name, telemetry_native_write);
+        register_native_mark(config.native_mark_name);
     }
 
     log_line(&format!(

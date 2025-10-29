@@ -48,7 +48,10 @@ struct SymbolVariant {
 }
 
 unsafe fn resolve_symbol_ptr(symbol: &[u8], label: &str) -> Option<*mut c_void> {
-    let ptr = libc::dlsym(libc::RTLD_NEXT, symbol.as_ptr() as *const c_char);
+    let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol.as_ptr() as *const c_char);
+    if ptr.is_null() {
+        ptr = libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr() as *const c_char);
+    }
     if ptr.is_null() {
         log_line(&format!("failed to resolve {label} via dlsym"));
         None
@@ -397,4 +400,53 @@ pub(crate) fn log_lua_stack_snapshot(context: &str, limit: usize) {
         log_line(&message);
         push_object(obj);
     }
+}
+
+pub(crate) unsafe fn capture_lua_params(count: usize) -> Option<Vec<LuaObject>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    let Some(begin_block) = resolve_lua_beginblock() else {
+        log_line("capture_lua_params requires lua_beginblock");
+        return None;
+    };
+    let Some(end_block) = resolve_lua_endblock() else {
+        log_line("capture_lua_params requires lua_endblock");
+        return None;
+    };
+    let Some(pop_fn) = resolve_lua_pop() else {
+        log_line("capture_lua_params requires lua_pop");
+        return None;
+    };
+    let Some(push_object_fn) = resolve_lua_pushobject() else {
+        log_line("capture_lua_params requires lua_pushobject");
+        return None;
+    };
+
+    begin_block();
+    let mut popped = Vec::with_capacity(count);
+    let mut success = true;
+    for index in 0..count {
+        let value = pop_fn();
+        if value.is_null() {
+            log_line(&format!(
+                "capture_lua_params pop for argument {} returned null",
+                index + 1
+            ));
+            success = false;
+            break;
+        }
+        popped.push(value);
+    }
+    for value in popped.iter().rev() {
+        push_object_fn(*value);
+    }
+    end_block();
+
+    if !success || popped.len() != count {
+        return None;
+    }
+
+    popped.reverse();
+    Some(popped)
 }

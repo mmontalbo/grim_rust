@@ -614,12 +614,8 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
 }
 
 fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
-    if layout.resolved_shim_path().is_some() {
-        return Ok(());
-    }
-
     ensure_i686_target_installed()?;
-    println!("[grctl] building grim_telemetry_shim --release (shim missing)...");
+    println!("[grctl] rebuilding grim_telemetry_shim --release...");
     let status = Command::new("cargo")
         .current_dir(&paths.repo_root)
         .args([
