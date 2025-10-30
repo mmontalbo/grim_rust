@@ -83,6 +83,8 @@ Lua VM stack (top)
 ```
 
 The Lua frame and shim frame share the same stack order; GDB’s `bt` after breaking on `telemetry_native_mark` should resemble the structure above, with `luaD_precall` bridging the Lua bytecode call into the Rust closure.
+`luaD_precall` is the VM dispatcher: it inspects the function slot, allocates the `CallInfo` frame, pads missing arguments with `nil`, and if the callee is a C closure (like our shim) it immediately invokes the native pointer. That’s why you always see `luaD_precall` one frame below `telemetry_native_mark`; it’s the handoff where Lua transitions from bytecode execution into native instrumentation.
+
 ## Process Memory Slice During `telemetry_native_mark`
 
 ```
