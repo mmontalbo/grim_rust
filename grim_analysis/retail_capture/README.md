@@ -38,72 +38,12 @@ This directory keeps the artifacts that let the retail executable stream its run
 
 - **Legacy C shim** – run `make` in `shim/`. The default compiler is `zig cc`, but any toolchain that can emit an ELF shared object works. The `Makefile` auto-locates the Lua 3.2 headers provided by `shell.nix` (override `LUA32_PREFIX` if needed). Preload `shim/libgrim_lua_hook.so` before launching retail.
 
----
 
-## Runtime & Memory Layout Reference
+## Lua Stack & Native Mark Flow
 
-Use these diagrams alongside the GDB probe workflow (section 8) whenever you validate the shim inside the live retail process.
+Use these diagrams when you break in GDB at `telemetry_native_mark` to confirm the Lua parameters and how the shim consumes them.
 
-### 1. Launch & Runtime Context
-
-```
-Retail launcher: dev-install/GrimFandango
-Shim: /home/mmontalbo/Developer/grim_mod/target/i686-unknown-linux-gnu/release/libgrim_telemetry_shim.so
-Injected via:
-  LD_PRELOAD=/…/libgrim_telemetry_shim.so:/…/steamclient.so
-
-Lua VM: Lua 3.1 (alpha)
-Shim base (gdb-probe): 0xf7e8f000
-telemetry_native_mark offset: 0x00010ee0
-⇒ Runtime address = 0xf7e9fee0
-```
-
-### 2. Program Headers (ELF 32 DYN)
-
-```
-Type        VirtAddr   MemSiz  Flags  Sections
-LOAD        0x00000000 0x026e0 R      (.hash …)
-LOAD        0x00003000 0x4a27c R E    (.init .plt .text .fini)
-LOAD        0x0004e000 0x143b4 R      (.rodata .eh_frame*)
-LOAD        0x00063e64 0x027ec RW     (.tdata .init_array .data.rel.ro .data .bss)
-PT_TLS      0x00063e64 0x0002c R      (.tdata .tbss)
-GNU_RELRO   0x00063e64 0x0219c R
-```
-
-Highlights
-• `.text` @ 0x00003330 (~0x49f37 B) • `.rodata` @ 0x0004e000 (~0x6e70 B)
-• `.tdata` @ 0x00063e64 (16 B) • `.tbss` + 28 B • `.bss` @ 0x000665e0 (112 B)
-
-### 3. ELF Section Stack
-
-```
-Mapped module: libgrim_telemetry_shim.so @ 0xf7e8f000
-───────────────────────────────────────────────────────────
-0xf7e8f000  .text  (R E) → telemetry_native_mark, helpers
-0xf7edf000  .rodata (R)  → literals, fmt strings
-0xf7ee2e64  .tdata/.tbss/.data.rel.ro/.data/.bss (RW)
-0xf7ef6e64  end of module mapping
-```
-
-Each worker thread copies `.tdata/.tbss` into its own TLS block.
-
-### 4. Lua → Native Call Path
-
-```
-Lua script: mods/telemetry_simple.lua
-telemetry.mark("capture_params.smoke")
-
-↓ global resolve
-telemetry_native_mark  (C closure from shim)
- ├─ lua_gettop()       validate args
- ├─ lua_lua2C(1)       get Lua handle
- ├─ luaA_Address(h)    read slot words
- ├─ lua_getstring(h)   → "capture_params.smoke"
- ├─ write mods/telemetry.log
- └─ write mods/telemetry_simple_trace.log
-```
-
-### 5. Lua Stack Slot #1 (32-bit TObject)
+### Stack Slot Layout (Lua32 TObject)
 
 ```
 slot[1] @ e.g. 0x082349a0
@@ -117,91 +57,57 @@ ptr → LuaString on VM heap:
 │ struct TString { ttype=-2; len; hash; …  │
 │ char data[] = "capture_params.smoke\0";  │
 └──────────────────────────────────────────┘
-```
 
-### 6. Thread-Local Storage (TLS)
-
-```
-TLS segment @ vaddr 0x00063e64
-filesz 0x10 B, memsz 0x2c B
-.tdata (16 B): template copied to new threads
-.tbss  (28 B): zero-filled tail
-
-Thread A TLS → { lua_state*, seen_first? }
-Thread B TLS → { lua_state*, seen_first? }
-```
-
-Each thread keeps its own shim cache and guard bits.
-
-### 7. Process Map (Excerpt)
+### Lua → Shim Call Stack Example
 
 ```
-00400000-00bff000 r-xp  main binary .text
-00bff000-00c20000 r--p  main binary .rodata
-…
-f7e8f000-f7edf000 r-xp  libgrim_telemetry_shim.so .text
-f7edf000-f7eea000 r--p  libgrim_telemetry_shim.so .rodata
-f7eea000-f7ef1000 rw-p  libgrim_telemetry_shim.so .data/.bss/TLS
-fffde000-ffffe000 rw-p  [stack]
+Lua VM stack (top)
+│
+├─ Frame: telemetry.mark(key="capture_params.smoke")
+│     upvalues: telemetry logger helpers
+│     locals: key → slot[1] (Lua32TObject string)
+│
+├─ Frame: luaD_precall (C)            ← Lua dispatcher
+│     pushes CClosure trampoline and resolves native symbol
+│
+└─ Frame: telemetry_native_mark (Rust shim)
+      params:
+        lua_handle = lua_lua2C(1)  → 0x0812345c
+        slot_ptr   = luaA_Address(handle) → 0x082349a0
+      locals:
+        mark_key = lua_getstring(handle)  → "capture_params.smoke"
+        tls_state = TLS{registered=true, seen_mark=true}
+
+    → on success: logs payload, invokes native mark writer, returns 0
 ```
 
-### 8. GDB-Probe Flow (via grctl)
+The Lua frame and shim frame share the same stack order; GDB’s `bt` after breaking on `telemetry_native_mark` should resemble the structure above, with `luaD_precall` bridging the Lua bytecode call into the Rust closure.
 
-```
-grctl retail gdb-probe
- ├─ find PID → read /proc/<pid>/maps → base 0xf7e8f000
- ├─ break *0xf7e9fee0 (telemetry_native_mark)
- ├─ on hit:
- │     print lua_lua2C(1)
- │     x/6wx slot
- │     lua_getstring → "capture_params.smoke"
- └─ logs auto-written under target/grctl/logs/
-```
-
-### 9. Harness ↔ Retail Parity
-
-```
-┌──────────────────────────┬──────────────────────────┐
-│ grim_analysis harness    │ Retail (live game)       │
-├──────────────────────────┼──────────────────────────┤
-│ Lua 3.1 (alpha)          │ Lua 3.1 (alpha)          │
-│ Same shim build          │ Same offsets             │
-│ telemetry_native_mark @ 0x10ee0 │ identical layout │
-│ Logs: grim_analysis/…     │ Logs: target/grctl/…    │
-└──────────────────────────┴──────────────────────────┘
-```
-
-### 10. Log & Artifact Paths
-
-```
-mods/
- ├─ telemetry_simple.lua
- ├─ telemetry.log
- └─ telemetry_simple_trace.log
-
-grim_analysis/retail_capture/
- └─ harness logs
-
-target/grctl/logs/
- └─ retail_game.log
-```
-
-### 11. 32-Bit Process Memory Slice (Annotated)
+## Process Memory Slice During `telemetry_native_mark`
 
 ```
 Hi addresses (↓ growth)
 
 0xfffff000  [vdso]  r-xp
-0xfffde000  [stack] rw-p   ← grows downward
-            │
+0xfffde000  [stack] rw-p
+            │   ← grows downward
+            │   ├─ liblua trampoline frame (luaD_precall)
+            │   ├─ telemetry_native_mark frame
+            │   │     ret → liblua thunk
+            │   │     locals: lua_handle=0x0812345c, slot=0x082349a0
+            │   └─ spill slots / saved regs for current thread
 0xf7eea000  libgrim_telemetry_shim.so  rw-p (.data/.bss/TLS)
+            │   ├─ .data: TelemetryLogger buffers, coverage flags
+            │   └─ TLS image (template copied per thread)
 0xf7edf000  libgrim_telemetry_shim.so  r--p (RELRO)
 0xf7e8f000  libgrim_telemetry_shim.so  r-xp (.text)
-            └─ telemetry_native_mark @ 0xf7e9fee0
+            └─ telemetry_native_mark @ 0xf7e9fee0 (executing)
 0xf7d00000  liblua/libc/libm/steamclient …
             Heap (malloc/brk) rw-p ↑
 0x08048000  main binary .text  r-xp
 0x08100000  main binary .data/.bss  rw-p
+            ├─ Lua VM state (lua_State, CallInfo chain)
+            └─ Lua stack arena: slot[1] @0x082349a0 → TString @0x08234A10 ("capture_params.smoke")
 Lo addresses
 
 Legend:
@@ -213,13 +119,5 @@ Notes:
  • PIC rule: runtime addr = base + offset
  • RELRO pages → r--p after relocation
  • TLS template (.tdata + .tbss = 44 B) copied into each thread.
-```
-
-### Optional GDB Reference
-
-```bash
-# quick inspection helpers
-nm -n libgrim_telemetry_shim.so | grep telemetry
-readelf -S libgrim_telemetry_shim.so | grep -E '\.text|\.tdata|\.tbss'
-cat /proc/$(pidof grim_fandango)/maps | grep grim_telemetry_shim
+ • Active telemetry mark: Lua slot holds the mark key string; TLS guards ensure native registration runs once per thread.
 ```
