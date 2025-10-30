@@ -6,12 +6,12 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::format_duration;
 use nix::errno::Errno;
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,7 +20,7 @@ use uuid::Uuid;
 use std::os::unix::fs::PermissionsExt;
 
 mod retail;
-use retail::{extend_env_var, warn_if_shaders_missing, HookMode, RetailLayout};
+use retail::{HookMode, RetailLayout, extend_env_var, warn_if_shaders_missing};
 
 const RETAIL_STEAM_APP_ID: &str = "345350";
 const RETAIL_LUA_PATH: &str = "./?.lua;./?.LUA;./mods/?.lua";
@@ -126,6 +126,8 @@ enum RetailCommand {
     Stop,
     Status,
     Logs(LogArgs),
+    /// Launch retail with instrumentation and open a gdb session that probes telemetry_native_mark.
+    GdbProbe,
     /// Copy the Steam install into dev-install (defaults to ~/.steam/...).
     Copy(RetailCopy),
     /// Manage the retail instrumentation hooks.
@@ -407,6 +409,7 @@ fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
             print_retail_instrumentation(paths)?;
             Ok(())
         }
+        RetailCommand::GdbProbe => retail_gdb_probe(paths),
         RetailCommand::Logs(args) => {
             show_logs(paths, ComponentKind::Retail, args.tail, args.follow)
         }
@@ -613,6 +616,85 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn retail_gdb_probe(paths: &Paths) -> Result<()> {
+    let layout = RetailLayout::new(&paths.repo_root)?;
+    layout.ensure_dev_install_exists()?;
+    warn_if_shaders_missing(&layout);
+
+    let mut status = layout.instrumentation_status()?;
+    if !status.scripts_linked() {
+        println!("[grctl] enabling telemetry hooks for gdb probe...");
+        status = layout.apply_mode(HookMode::Instrumented)?;
+    }
+    if !status.shim_available {
+        ensure_rust_shim_ready(paths, &layout)?;
+        status = layout.instrumentation_status()?;
+    }
+    if !status.shim_available {
+        bail!(
+            "telemetry shim missing after rebuild ({})",
+            layout.preferred_shim_path().display()
+        );
+    }
+    let shim_path = layout
+        .resolved_shim_path()
+        .context("resolved shim path disappeared after verification")?;
+
+    let mut launched = false;
+    let state = match load_state(ComponentKind::Retail, paths)? {
+        Some(state) if process_alive(state.pid) => state,
+        _ => {
+            println!("[grctl] retail not running; starting a probe session with --no-timeout");
+            let args = RetailStart {
+                timeout: "0".to_string(),
+                no_timeout: true,
+                vanilla: false,
+                attach: false,
+                extra_args: Vec::new(),
+            };
+            start_retail(args, paths)?;
+            launched = true;
+            wait_for_retail_state(paths)?
+        }
+    };
+    let game_pid = wait_for_grim_process(&state.session_id)?;
+    let pid = game_pid;
+    println!(
+        "[grctl] attaching gdb to retail pid {} (session {})",
+        pid, state.session_id
+    );
+
+    let shim_base = resolve_shim_text_base(pid)?;
+    println!("[grctl] detected libgrim_telemetry_shim.so text base at {shim_base}");
+
+    let gdb_script = write_retail_gdb_script(paths, &layout, pid, &shim_path, &shim_base)?;
+    println!(
+        "[grctl] prepared gdb command file at {}",
+        gdb_script.display()
+    );
+
+    let status = Command::new("gdb")
+        .current_dir(&paths.repo_root)
+        .args(["-q", "-x"])
+        .arg(gdb_script.to_string_lossy().to_string())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("running gdb for retail probe")?;
+    if !status.success() {
+        bail!("gdb exited with status {}", status);
+    }
+
+    if launched {
+        println!(
+            "[grctl] retail session {} (pid {}) is still running; use 'grctl retail stop' when finished.",
+            state.session_id, state.pid
+        );
+    }
+    Ok(())
+}
+
 fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
     ensure_i686_target_installed()?;
     println!("[grctl] rebuilding grim_telemetry_shim --release...");
@@ -634,7 +716,10 @@ fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
     if layout.resolved_shim_path().is_some() {
         Ok(())
     } else {
-        bail!("grim_telemetry_shim build succeeded but the shared object is still missing (expected {})", layout.preferred_shim_path().display());
+        bail!(
+            "grim_telemetry_shim build succeeded but the shared object is still missing (expected {})",
+            layout.preferred_shim_path().display()
+        );
     }
 }
 
@@ -654,6 +739,207 @@ fn ensure_i686_target_installed() -> Result<()> {
             RUST_SHIM_TARGET
         ),
     }
+}
+
+fn wait_for_grim_process(session_id: &str) -> Result<u32> {
+    for attempt in 0..75 {
+        if let Some(pid) = find_grim_process_for_session(session_id)? {
+            if attempt > 0 {
+                println!(
+                    "[grctl] found GrimFandango process after {:.1}s",
+                    attempt as f32 * 0.2
+                );
+            }
+            return Ok(pid);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    bail!("failed to find GrimFandango process for session {session_id}; check retail logs");
+}
+
+fn find_grim_process_for_session(session_id: &str) -> Result<Option<u32>> {
+    let marker = format!("GRCTL_SESSION_ID={session_id}");
+    for entry in fs::read_dir("/proc")? {
+        let entry = match entry {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let file_name = entry.file_name();
+        let pid: u32 = match file_name.to_string_lossy().parse() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let process_dir = entry.path();
+        let environ_path = process_dir.join("environ");
+        let environ = match fs::read(&environ_path) {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+        if !split_null_terminated(&environ).any(|field| field == marker.as_bytes()) {
+            continue;
+        }
+        let cmdline_path = process_dir.join("cmdline");
+        let cmdline = match fs::read(&cmdline_path) {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+        if split_null_terminated(&cmdline).any(|arg| {
+            arg.windows(b"GrimFandango".len())
+                .any(|w| w == b"GrimFandango")
+        }) {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
+}
+
+fn wait_for_retail_state(paths: &Paths) -> Result<ComponentState> {
+    for _ in 0..50 {
+        if let Some(state) = load_state(ComponentKind::Retail, paths)? {
+            if process_alive(state.pid) {
+                return Ok(state);
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    bail!("retail state did not become available; check 'grctl retail logs -f'");
+}
+
+fn resolve_shim_text_base(pid: u32) -> Result<String> {
+    for attempt in 0..50 {
+        if let Some(base) = try_resolve_shim_text_base(pid)? {
+            if attempt > 0 {
+                println!(
+                    "[grctl] shim mapping appeared after {:.1}s",
+                    attempt as f32 * 0.2
+                );
+            }
+            return Ok(base);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    bail!("failed to locate libgrim_telemetry_shim.so text mapping in /proc/{pid}/maps");
+}
+
+fn try_resolve_shim_text_base(pid: u32) -> Result<Option<String>> {
+    let maps_path = format!("/proc/{pid}/maps");
+    let contents =
+        fs::read_to_string(&maps_path).with_context(|| format!("reading {}", maps_path))?;
+    for line in contents.lines() {
+        if line.contains("libgrim_telemetry_shim.so") && line.contains(" r-xp ") {
+            if let Some(range) = line.split_whitespace().next() {
+                if let Some(start) = range.split('-').next() {
+                    return Ok(Some(format!("0x{start}")));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn split_null_terminated(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
+    buffer
+        .split(|&byte| byte == 0)
+        .filter(|slice| !slice.is_empty())
+}
+
+fn write_retail_gdb_script(
+    paths: &Paths,
+    layout: &RetailLayout,
+    pid: u32,
+    shim_path: &Path,
+    shim_base: &str,
+) -> Result<PathBuf> {
+    let script_id = Uuid::new_v4().to_string();
+    let script_path = paths
+        .launcher_dir
+        .join(format!("retail_gdb_{script_id}.cmds"));
+    let mut file = File::create(&script_path)
+        .with_context(|| format!("creating {}", script_path.display()))?;
+
+    let solib_path = build_retail_gdb_solib_path(layout, paths);
+    writeln!(file, "set pagination off")?;
+    writeln!(file, "set language c")?;
+    writeln!(file, "set sysroot /")?;
+    if !solib_path.is_empty() {
+        writeln!(file, "set solib-search-path {}", solib_path)?;
+    }
+    let retail_bin = layout.dev_install().join("GrimFandango");
+    writeln!(file, "file {}", gdb_quote_path(&retail_bin))?;
+    writeln!(file, "set breakpoint pending on")?;
+    writeln!(file, "attach {}", pid)?;
+    writeln!(
+        file,
+        "add-symbol-file {} {}",
+        gdb_quote_path(shim_path),
+        shim_base
+    )?;
+    writeln!(file, "break telemetry_native_mark")?;
+    writeln!(file, "commands")?;
+    writeln!(file, "silent")?;
+    writeln!(file, "printf \"-- telemetry_native_mark hit --\\\\n\"")?;
+    writeln!(
+        file,
+        "set $lua_handle = ((unsigned int (*)(unsigned int)) lua_lua2C)(1)"
+    )?;
+    writeln!(file, "printf \"lua_lua2C(1) => %u\\\\n\", $lua_handle")?;
+    writeln!(
+        file,
+        "set $slot = ((void *(*)(unsigned int)) luaA_Address)($lua_handle)"
+    )?;
+    writeln!(file, "printf \"slot => %p\\\\n\", $slot")?;
+    writeln!(file, "x/6wx $slot")?;
+    writeln!(
+        file,
+        "set $lua_string = ((const char *(*)(unsigned int)) lua_getstring)($lua_handle)"
+    )?;
+    writeln!(file, "printf \"lua_getstring => %s\\\\n\", $lua_string")?;
+    writeln!(file, "continue")?;
+    writeln!(file, "end")?;
+    writeln!(
+        file,
+        "echo Ready. Manually run: call ((int (*)(const char *)) lua_dofile)(\"mods/trigger_mark.lua\")\\\\n"
+    )?;
+
+    Ok(script_path)
+}
+
+fn build_retail_gdb_solib_path(layout: &RetailLayout, paths: &Paths) -> String {
+    let mut entries: Vec<PathBuf> = Vec::new();
+    entries.push(layout.dev_install().to_path_buf());
+    entries.push(layout.dev_install().join("x86"));
+    entries.push(
+        paths
+            .repo_root
+            .join("target")
+            .join(RUST_SHIM_TARGET)
+            .join("release"),
+    );
+    entries.push(
+        paths
+            .repo_root
+            .join("grim_analysis")
+            .join("retail_capture")
+            .join("rust_shim")
+            .join("target")
+            .join(RUST_SHIM_TARGET)
+            .join("release"),
+    );
+    entries.extend(layout.steam_ld_paths());
+    entries.push(PathBuf::from("/lib32"));
+    entries.push(PathBuf::from("/usr/lib32"));
+    entries
+        .into_iter()
+        .filter(|path| path.exists())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn gdb_quote_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn copy_retail(args: RetailCopy, paths: &Paths) -> Result<()> {

@@ -77,7 +77,7 @@ Lua VM stack (top)
         slot_ptr   = luaA_Address(handle) → 0x082349a0
       locals:
         mark_key = lua_getstring(handle)  → "capture_params.smoke"
-        tls_state = TLS{registered=true, seen_mark=true}
+        mark_seen = TELEMETRY_NATIVE_MARK_SEEN (process-global AtomicBool)
 
     → on success: logs payload, invokes native mark writer, returns 0
 ```
@@ -99,8 +99,8 @@ Hi addresses (↓ growth)
             │   │     locals: lua_handle=0x0812345c, slot=0x082349a0
             │   └─ spill slots / saved regs for current thread
 0xf7eea000  libgrim_telemetry_shim.so  rw-p (.data/.bss/TLS)
-            │   ├─ .data: TelemetryLogger buffers, coverage flags
-            │   └─ TLS image (template copied per thread)
+            │   ├─ .data/.bss: AtomicBool flags (registration/seen markers)
+            │   └─ .tdata/.tbss: small Rust runtime TLS template (per-thread bookkeeping)
 0xf7edf000  libgrim_telemetry_shim.so  r--p (RELRO)
 0xf7e8f000  libgrim_telemetry_shim.so  r-xp (.text)
             └─ telemetry_native_mark @ 0xf7e9fee0 (executing)
@@ -120,6 +120,6 @@ Legend:
 Notes:
  • PIC rule: runtime addr = base + offset
  • RELRO pages → r--p after relocation
- • TLS template (.tdata + .tbss = 44 B) copied into each thread.
- • Active telemetry mark: Lua slot holds the mark key string; TLS guards ensure native registration runs once per thread.
+ • Rust’s std runtime ships a ~44 B TLS template; the shim itself keeps per-process state in Atomics.
+ • Active telemetry mark: Lua slot holds the mark key string; Atomics gate registration/log spam.
 ```

@@ -1,11 +1,10 @@
 use crate::{
     logging::{log_line, sanitize_lua_string_fragment},
     lua_api::{
-        call_real_lua_dofile, log_bootstrap_error_global, log_lua_stack_snapshot,
-        resolve_lua_beginblock, resolve_lua_callfunction, resolve_lua_endblock,
-        resolve_lua_getglobal, resolve_lua_getstring, resolve_lua_isfunction, resolve_lua_isstring,
-        resolve_lua_pop, resolve_lua_pushobject, resolve_lua_tag,
-        BootstrapGlobalSnapshot, LuaObject,
+        BootstrapGlobalSnapshot, LuaObject, call_real_lua_dofile, log_bootstrap_error_global,
+        log_lua_stack_snapshot, resolve_lua_beginblock, resolve_lua_callfunction,
+        resolve_lua_endblock, resolve_lua_getglobal, resolve_lua_getstring, resolve_lua_isfunction,
+        resolve_lua_isstring, resolve_lua_pop, resolve_lua_pushobject, resolve_lua_tag,
     },
     native::{register_native_file_helpers, register_native_mark, telemetry_native_write},
 };
