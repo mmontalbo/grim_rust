@@ -57,6 +57,7 @@ ptr → LuaString on VM heap:
 │ struct TString { ttype=-2; len; hash; …  │
 │ char data[] = "capture_params.smoke\0";  │
 └──────────────────────────────────────────┘
+```
 
 ### Lua → Shim Call Stack Example
 
@@ -82,7 +83,6 @@ Lua VM stack (top)
 ```
 
 The Lua frame and shim frame share the same stack order; GDB’s `bt` after breaking on `telemetry_native_mark` should resemble the structure above, with `luaD_precall` bridging the Lua bytecode call into the Rust closure.
-
 ## Process Memory Slice During `telemetry_native_mark`
 
 ```
