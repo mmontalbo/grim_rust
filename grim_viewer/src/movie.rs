@@ -356,13 +356,14 @@ fn run_pipeline(
 }
 
 fn use_ffmpeg_decoder() -> bool {
-    matches!(
-        std::env::var("GRIM_MOVIE_DECODER")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "ffmpeg" | "1" | "true"
-    )
+    let value = std::env::var("GRIM_MOVIE_DECODER")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "" => true, // Default to ffmpeg when unset.
+        "gstreamer" | "gst" | "0" | "false" => false,
+        _ => true,
+    }
 }
 
 fn run_ffmpeg_pipeline(

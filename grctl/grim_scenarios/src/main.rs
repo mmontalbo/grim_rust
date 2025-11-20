@@ -70,14 +70,6 @@ struct RunArgs {
     /// Launch grim_viewer alongside the engine for this scenario.
     #[arg(long)]
     with_viewer: bool,
-    /// Additional arguments forwarded to grim_viewer (repeat flag, requires --with-viewer).
-    #[arg(
-        long,
-        value_name = "ARG",
-        requires = "with_viewer",
-        allow_hyphen_values = true
-    )]
-    viewer_extra: Vec<String>,
     /// Extra hold time in seconds after all markers appear (0 disables).
     #[arg(long, default_value_t = 0.0)]
     hold_seconds: f64,
@@ -148,7 +140,6 @@ fn run_command(args: RunArgs) -> Result<()> {
             &INTRO_COMPUTER_REQUIRED_MARKERS,
             timeout,
             args.with_viewer,
-            &args.viewer_extra,
             args.with_retail || args.retail_only,
             args.hold_seconds,
             args.detach,
@@ -159,7 +150,6 @@ fn run_command(args: RunArgs) -> Result<()> {
             &INTRO_TUBE_REQUIRED_MARKERS,
             timeout,
             args.with_viewer,
-            &args.viewer_extra,
             args.with_retail || args.retail_only,
             args.hold_seconds,
             args.detach,
@@ -203,7 +193,6 @@ fn run_intro_to_office(
     required_markers: &[&'static str],
     timeout: Option<Duration>,
     with_viewer: bool,
-    viewer_extra: &[String],
     with_retail: bool,
     hold_seconds: f64,
     detach: bool,
@@ -247,10 +236,6 @@ fn run_intro_to_office(
         let mut args = vec!["--engine-stream".to_string(), addr.to_string()];
         if !with_retail {
             args.push("--no-retail".to_string());
-        }
-        if !viewer_extra.is_empty() {
-            args.push("--".to_string());
-            args.extend(viewer_extra.iter().cloned());
         }
         Some(ManagedComponent::start(&ctx, "viewer", &args)?)
     } else {

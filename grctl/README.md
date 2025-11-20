@@ -17,8 +17,7 @@ Common subcommands:
 - `engine`, `viewer`, and `retail` each support `start`, `stop`, `status`, and
   `logs`. Pass `--tail <n>` to control the initial output and `--follow` (or
   `-f`) to stream updates continuously.
-- `check intro-resume` and `check engine-overlay` execute the validation scripts
-  with a default 90s guard.
+- `check intro-resume` executes the validation script with a default 90s guard.
 - `scenario run <name>` launches an end-to-end harness; see below for usage tips.
 
 All child processes are launched with a generated session id and a consistent
@@ -83,8 +82,8 @@ detects that a recorded PID has already exited.
 
 - Launchers open append-only log files and run a background reaper that removes
   state and records the process exit code.
-- Scenario and check wrappers still defer to the Python scripts in `tools/` so
-  we retain their existing handshake logic while providing a uniform entrypoint.
+- Scenario and check wrappers run under `cargo run` so the shared logging and
+  timeout handling stay consistent across runs.
 - All orchestration commands accept `--timeout`. Passing `--timeout 0` disables
   the guard when longer sessions are unavoidable.
 

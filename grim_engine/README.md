@@ -33,7 +33,7 @@ cargo run -p grim_engine -- \
 - `--stream-bind` exposes a GrimStream server; omit it to run without
   networking.
 - `--stream-ready-file` writes a marker once streaming starts. This is used by
-  `tools/run_live_preview.py` to coordinate viewer bring-up.
+  orchestration layers to coordinate viewer bring-up.
 - `--headless` skips the GrimStream handshake and prints emitted engine events
   to stdout instead of waiting for a viewer connection.
 
@@ -42,16 +42,11 @@ No other flags are recognised. Scripts that still reference `--run-lua`,
 
 ## Typical Usage
 
-- Local smoke test without streaming:
+- Managed intro playback with the viewer:
   ```
-  cargo run -p grim_engine --
+  grctl scenario run intro-to-office-computer --with-viewer
   ```
-- Live preview with the viewer:
-  ```
-  python tools/run_live_preview.py
-  ```
-  The helper script launches the viewer and the engine, passing
-  `--stream-bind 127.0.0.1:17500` and a temporary ready marker automatically.
+  Adds `--with-retail` if you also need to see the retail capture pane.
 - Quick headless smoke test (no viewer handshake):
   ```
   cargo run -p grim_engine -- --headless --verbose

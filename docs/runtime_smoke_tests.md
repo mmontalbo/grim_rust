@@ -6,8 +6,9 @@ binary that only supports the viewer handshake and GrimStream state updates.
 
 For the current milestone:
 
-- Use `python tools/run_live_preview.py` to launch the viewer and engine
-  together and confirm the intro stream flows end-to-end.
+- Use `grctl scenario run intro-to-office-computer --with-viewer` and confirm
+  the intro stream flows end-to-end. Add `--with-retail` only when you need the
+  retail capture pane.
 - Rely on commit history if you need to resurrect the old timeline/hotspot demo
   captures; none of those CLI flags are available in the trimmed binary.
 

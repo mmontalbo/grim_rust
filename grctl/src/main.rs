@@ -163,8 +163,6 @@ struct RetailCopy {
 enum CheckCommand {
     /// Ensure Manny's office resumes after the intro cutscene.
     IntroResume(CheckArgs),
-    /// Validate that the viewer debug overlay renders engine events.
-    EngineOverlay(CheckArgs),
     /// Run a managed scenario harness.
     Scenario(ScenarioArgs),
 }
@@ -199,14 +197,6 @@ struct ScenarioArgs {
     /// Launch grim_viewer alongside the engine when running the scenario.
     #[arg(long)]
     with_viewer: bool,
-    /// Additional grim_viewer CLI arguments (repeat flag, requires --with-viewer).
-    #[arg(
-        long,
-        value_name = "ARG",
-        requires = "with_viewer",
-        allow_hyphen_values = true
-    )]
-    viewer_extra: Vec<String>,
     /// Extra hold time in seconds after the scenario markers appear.
     #[arg(long, default_value_t = 0.0)]
     hold_seconds: f64,
@@ -408,14 +398,6 @@ fn handle_check(cmd: CheckCommand, paths: &Paths) -> Result<()> {
             &args.extra_args,
             args.timeout,
             "check:intro_resume",
-        ),
-        CheckCommand::EngineOverlay(args) => run_tool_script(
-            paths,
-            "python3",
-            "tools/check_engine_event_overlay.py",
-            &args.extra_args,
-            args.timeout,
-            "check:engine_overlay",
         ),
         CheckCommand::Scenario(args) => run_scenario(paths, args),
     }
@@ -1368,10 +1350,6 @@ fn run_scenario(paths: &Paths, args: ScenarioArgs) -> Result<()> {
     command.arg(scenario_timeout.to_string());
     if args.with_viewer {
         command.arg("--with-viewer");
-        for extra in &args.viewer_extra {
-            command.arg("--viewer-extra");
-            command.arg(extra);
-        }
     }
     if with_retail {
         command.arg("--with-retail");
