@@ -76,11 +76,9 @@ detects that a recorded PID has already exited.
 - `grctl retail copy [--source <path>] [--force]` copies the Steam install into
   `dev-install/`. Point `--source` at an alternate directory when Steam lives in
   a non-default location.
-- `grctl retail hooks enable/disable/status` manages the telemetry shim and
-  LD_PRELOAD hook. Enable before capture runs; disable when you need to compare
-  against a pristine retail boot. The hook status is also printed as part of
-  `grctl retail status`.
-
+- `grctl retail start --vanilla` skips the LD_PRELOAD shim when you need to
+  compare against a pristine retail boot. The default launch path always
+  preloads the shim once it is built.
 ## Design notes
 
 - Launchers open append-only log files and run a background reaper that removes
