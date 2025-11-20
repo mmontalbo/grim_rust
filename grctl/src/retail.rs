@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use walkdir::WalkDir;
 
 #[cfg(unix)]
@@ -19,12 +19,6 @@ pub struct RetailLayout {
     dev_install: PathBuf,
     steam_install: PathBuf,
     steam_root: Option<PathBuf>,
-    telemetry_source: PathBuf,
-    telemetry_dest: PathBuf,
-    telemetry_backup: PathBuf,
-    telemetry_simple_source: PathBuf,
-    telemetry_simple_dest: PathBuf,
-    telemetry_simple_backup: PathBuf,
     rust_shim_workspace_release: PathBuf,
     rust_shim_workspace_debug: PathBuf,
     rust_shim_local_release: PathBuf,
@@ -33,45 +27,13 @@ pub struct RetailLayout {
 
 #[derive(Clone, Debug)]
 pub struct InstrumentationStatus {
-    pub telemetry_exists: bool,
-    pub telemetry_linked: bool,
-    pub telemetry_backup_exists: bool,
-    pub telemetry_simple_exists: bool,
-    pub telemetry_simple_linked: bool,
-    pub telemetry_simple_backup_exists: bool,
     pub shim_available: bool,
-}
-
-impl InstrumentationStatus {
-    pub fn scripts_linked(&self) -> bool {
-        self.telemetry_linked && self.telemetry_simple_linked
-    }
-
-    pub fn any_scripts_linked(&self) -> bool {
-        self.telemetry_linked || self.telemetry_simple_linked
-    }
-
-    pub fn any_scripts_present(&self) -> bool {
-        self.telemetry_exists || self.telemetry_simple_exists
-    }
 }
 
 impl RetailLayout {
     pub fn new(repo_root: &Path) -> Result<Self> {
         let dev_install = repo_root.join("dev-install");
         let steam_root = detect_steam_root_path().ok();
-        let telemetry_source = repo_root
-            .join("grim_analysis")
-            .join("retail_capture")
-            .join("telemetry.lua");
-        let telemetry_dest = dev_install.join("mods").join("telemetry.lua");
-        let telemetry_backup = dev_install.join("mods").join("telemetry.lua.retail");
-        let telemetry_simple_source = repo_root
-            .join("grim_analysis")
-            .join("retail_capture")
-            .join("telemetry_simple.lua");
-        let telemetry_simple_dest = dev_install.join("mods").join("telemetry_simple.lua");
-        let telemetry_simple_backup = dev_install.join("mods").join("telemetry_simple.lua.retail");
         let shim_name = "libgrim_telemetry_shim.so";
         let rust_workspace_target = repo_root.join("target").join("i686-unknown-linux-gnu");
         let rust_local_target = repo_root
@@ -89,12 +51,6 @@ impl RetailLayout {
             dev_install,
             steam_install,
             steam_root,
-            telemetry_source,
-            telemetry_dest,
-            telemetry_backup,
-            telemetry_simple_source,
-            telemetry_simple_dest,
-            telemetry_simple_backup,
             rust_shim_workspace_release,
             rust_shim_workspace_debug,
             rust_shim_local_release,
@@ -140,34 +96,10 @@ impl RetailLayout {
     }
 
     pub fn instrumentation_status(&self) -> Result<InstrumentationStatus> {
-        let telemetry_exists = self.telemetry_dest.exists();
-        let telemetry_linked = read_link_normalized(&self.telemetry_dest)?
-            .map(|target| target == self.telemetry_source)
-            .unwrap_or(false);
-        let telemetry_backup_exists = self.telemetry_backup.exists();
-        let telemetry_simple_exists = self.telemetry_simple_dest.exists();
-        let telemetry_simple_linked = read_link_normalized(&self.telemetry_simple_dest)?
-            .map(|target| target == self.telemetry_simple_source)
-            .unwrap_or(false);
-        let telemetry_simple_backup_exists = self.telemetry_simple_backup.exists();
         let shim_available = self.resolved_shim_path().is_some();
         Ok(InstrumentationStatus {
-            telemetry_exists,
-            telemetry_linked,
-            telemetry_backup_exists,
-            telemetry_simple_exists,
-            telemetry_simple_linked,
-            telemetry_simple_backup_exists,
             shim_available,
         })
-    }
-
-    pub fn apply_mode(&self, mode: HookMode) -> Result<InstrumentationStatus> {
-        match mode {
-            HookMode::Instrumented => self.install_hooks()?,
-            HookMode::Vanilla => self.remove_hooks()?,
-        }
-        self.instrumentation_status()
     }
 
     pub fn sync_from(&self, source_override: Option<&Path>, force: bool) -> Result<PathBuf> {
@@ -194,14 +126,6 @@ impl RetailLayout {
         }
         copy_tree(&source, &self.dev_install)?;
         Ok(self.dev_install.clone())
-    }
-
-    pub fn telemetry_dest(&self) -> &Path {
-        &self.telemetry_dest
-    }
-
-    pub fn telemetry_simple_dest(&self) -> &Path {
-        &self.telemetry_simple_dest
     }
 
     pub fn steam_ld_paths(&self) -> Vec<PathBuf> {
@@ -253,75 +177,6 @@ impl RetailLayout {
         None
     }
 
-    fn install_hooks(&self) -> Result<()> {
-        self.ensure_script_linked(
-            &self.telemetry_source,
-            &self.telemetry_dest,
-            &self.telemetry_backup,
-            "telemetry.lua",
-        )?;
-        self.ensure_script_linked(
-            &self.telemetry_simple_source,
-            &self.telemetry_simple_dest,
-            &self.telemetry_simple_backup,
-            "telemetry_simple.lua",
-        )?;
-        Ok(())
-    }
-
-    fn remove_hooks(&self) -> Result<()> {
-        self.restore_or_remove_script(
-            &self.telemetry_dest,
-            &self.telemetry_backup,
-            "telemetry.lua",
-        )?;
-        self.restore_or_remove_script(
-            &self.telemetry_simple_dest,
-            &self.telemetry_simple_backup,
-            "telemetry_simple.lua",
-        )?;
-        Ok(())
-    }
-
-    fn ensure_script_linked(
-        &self,
-        source: &Path,
-        dest: &Path,
-        backup: &Path,
-        label: &str,
-    ) -> Result<()> {
-        if !source.exists() {
-            bail!(
-                "{} source missing at {}; build grim_analysis first?",
-                label,
-                source.display()
-            );
-        }
-        if let Some(dir) = dest.parent() {
-            fs::create_dir_all(dir)
-                .with_context(|| format!("creating mods dir {}", dir.display()))?;
-        }
-        if dest.exists() && !dest.is_symlink() && !backup.exists() {
-            fs::copy(dest, backup)
-                .with_context(|| format!("backing up {} to {}", label, backup.display()))?;
-        }
-        replace_with_symlink(source, dest)?;
-        Ok(())
-    }
-
-    fn restore_or_remove_script(&self, dest: &Path, backup: &Path, label: &str) -> Result<()> {
-        if let Some(dir) = dest.parent() {
-            fs::create_dir_all(dir)
-                .with_context(|| format!("ensuring mods dir {}", dir.display()))?;
-        }
-        if backup.exists() {
-            fs::copy(backup, dest)
-                .with_context(|| format!("restoring {} from {}", label, backup.display()))?;
-        } else if dest.is_symlink() || dest.exists() {
-            fs::remove_file(dest).with_context(|| format!("removing {}", dest.display()))?;
-        }
-        Ok(())
-    }
 }
 
 fn detect_steam_install_path() -> Result<PathBuf> {
@@ -414,25 +269,6 @@ fn replace_with_symlink(source: &Path, dest: &Path) -> Result<()> {
         fs::copy(source, dest)
             .with_context(|| format!("copying {} to {}", source.display(), dest.display()))?;
         Ok(())
-    }
-}
-
-fn read_link_normalized(path: &Path) -> Result<Option<PathBuf>> {
-    match fs::read_link(path) {
-        Ok(target) => {
-            if target.is_absolute() {
-                Ok(Some(target))
-            } else {
-                let resolved = path
-                    .parent()
-                    .map(|parent| parent.join(&target))
-                    .unwrap_or(target);
-                Ok(Some(resolved))
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => Ok(None),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("reading link {}", path.display())),
     }
 }
 

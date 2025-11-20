@@ -176,6 +176,10 @@ in pkgs.mkShell {
       export GRIM_INSTALL_PATH="$DEV_INSTALL_PATH"
     fi
 
+    if [ -f "$REPO_ROOT/grctl.sh" ]; then
+      alias gr="$REPO_ROOT/grctl.sh" # quick access to the control script
+    fi
+
     export RUSTUP_HOME="$REPO_ROOT/.rustup"
     export CARGO_HOME="$REPO_ROOT/.cargo"
     export PATH="$CARGO_HOME/bin:$PATH"

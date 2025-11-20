@@ -4,12 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-if [[ -z "${IN_NIX_SHELL:-}" ]]; then
-    cmd="cargo run -p grctl --"
-    if [[ $# -gt 0 ]]; then
-        cmd+=" $(printf '%q ' "$@")"
-    fi
-    exec nix-shell --run "$cmd"
+if [[ -n "${IN_NIX_SHELL:-}" && -n "${DEV_INSTALL_PATH:-}" ]]; then
+    exec cargo run -p grctl -- "$@"
 fi
 
-exec cargo run -p grctl -- "$@"
+cmd="cargo run -p grctl --"
+if [[ $# -gt 0 ]]; then
+    cmd+=" $(printf '%q ' "$@")"
+fi
+exec nix-shell --run "$cmd"

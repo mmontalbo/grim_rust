@@ -1,125 +1,54 @@
-# Retail Telemetry & Shim
+# Retail Binary Map
 
-This directory keeps the artifacts that let the retail executable stream its runtime state into our analysis pipeline. The code lives next to `grim_analysis` so capture tooling, format specs, and the runtime consumers stay in one place.
-
-## Components
-
-- `telemetry.lua` is the Lua 3.1 script injected into the shipping VM. It keeps the API surface tiny (`telemetry.mark`, `telemetry.event`, `telemetry.flush`, `telemetry.reset`) and rebuilds legacy helpers so it survives the stripped-down retail environment. The retail executable always loads `_system.lua` first, so the shim injects `telemetry.lua` the moment that file executes; all other retail scripts (`_cut_scenes.lua`, `year_1.lua`, set loaders, etc.) flow through `_system`.
-  - **Boot-safe IO + string shims** – redefines `openfile`, `write`, `call`, `unpack`, and string primitives when the retail build omits them. If the native shim exposes `telemetry_native_write`, it piggybacks on that for writes.
-  - **Coverage tracking** – `telemetry.mark(key)` bumps `coverage_counts[key]`, periodically rewrites `mods/telemetry_coverage.json`, and `telemetry.flush()` forces a final write so `grim_analysis --coverage-counts` can diff runs.
-  - **Event stream** – `telemetry.event(label, fields)` records JSON objects to `mods/telemetry_events.jsonl` with monotonically increasing `seq`, filtered fields, and timestamps so downstream tools can tail retail behavior.
-  - **Intro instrumentation** – monkey-patches `cut_scene` movies, `RunFullscreenMovie`, `StartMovie`, `wait_for_movie`, `start_script`, `wait_for_script`, and Manny’s `Actor.say_line` call to emit labeled `intro.timeline` events that reconstruct the logos → intro → office flow.
-  - **Load tracing + installers** – wraps `dofile` so every include is logged to `mods/telemetry.loads.log`, and installs the intro hooks when `_cut_scenes.lua` or `year_1.lua` loads. Additional installers can hook new APIs by swapping functions and calling `telemetry.event` or `telemetry.mark` inside the replacements.
-  - **Failure handling** – `telemetry_disable(reason)` swaps in inert stubs if a required primitive is missing, `_ERRORMESSAGE` is wrapped to write bootstrap failures to `mods/telemetry_bootstrap_error.log`, and `telemetry.reset()` wipes all logs so automated tests start from a known state.
-  - **Compatibility note** – any helper Lua placed in `mods/` (including `telemetry_simple.lua`) must stay compatible with the game's Lua 3.x interpreter. Avoid Lua 5.x syntax sugar, metamethods, or library calls that were added after Lua 3.x.
-
-- `rust_shim/` contains the new `LD_PRELOAD` hook written in Rust. The crate exports `lua_dofile`, resolves the retail engine’s real symbol, and (for now) logs `_system.lua` loads—the same choke point where we inject `telemetry.lua`. `grctl` builds the shim automatically via `cargo build -p grim_telemetry_shim --release --target i686-unknown-linux-gnu` and preloads the release `.so` before launching retail. See the runtime reference below for the exact launch environment, offsets, and memory layout used during debugging.
-
-- `shim/` keeps the original C implementation. It still builds via `make` with `zig cc` (or any C compiler) and mirrors the legacy Lua 3.2 structs. We keep it around for reference while the Rust port catches up.
-
-## Coverage workflow
-
-1. Generate the state catalog and copy it (or just its `coverage.keys`) beside the retail install:
-   ```bash
-   cargo run -p grim_analysis -- --state-catalog-json artifacts/state_catalog.json
-   ```
-2. Place `telemetry.lua` in the game's `mods/` directory, preload the shim (or run `./grctl.sh retail hooks enable` which symlinks the file and ensures the Rust shim is built), and call `telemetry.mark("<catalog key>")` inside the retail scripts you want to observe. The helper rewrites `mods/telemetry_coverage.json` after every few marks (call `telemetry.flush()` before you exit to force a final write).
-3. Run the analysis coverage check to identify gaps:
-   ```bash
-   cargo run -p grim_analysis -- \
-      --coverage-counts mods/telemetry_coverage.json \
-      --coverage-summary-json artifacts/coverage_report.json
-   ```
-   Missing keys point at catalog entries never hit by the retail run; unexpected keys indicate telemetry emitted IDs that are not yet part of the catalog.
-
-### Building the shims
-
-- **Rust shim (recommended)** – from the repo root, run `nix-shell --run 'cargo build -p grim_telemetry_shim --release --target i686-unknown-linux-gnu'`. `grctl retail start` does this automatically if the release artifact is missing. Preload `target/i686-unknown-linux-gnu/release/libgrim_telemetry_shim.so` when launching retail.
-
-- **Legacy C shim** – run `make` in `shim/`. The default compiler is `zig cc`, but any toolchain that can emit an ELF shared object works. The `Makefile` auto-locates the Lua 3.2 headers provided by `shell.nix` (override `LUA32_PREFIX` if needed). Preload `shim/libgrim_lua_hook.so` before launching retail.
-
-
-## Lua Stack & Native Mark Flow
-
-Use these diagrams when you break in GDB at `telemetry_native_mark` to confirm the Lua parameters and how the shim consumes them.
-
-### Stack Slot Layout (Lua32 TObject)
+A tree-style snapshot of the retail ELF and the symbol surface we interact with.
 
 ```
-slot[1] @ e.g. 0x082349a0
-┌──────────────┬────────────────────┬─────────────┐
-│ ttype=-2     │ ptr→LuaString      │ aux/hash    │
-│ 0xFFFFFFFE   │ 0x08234A10         │ 0x000000??  │
-└──────────────┴────────────────────┴─────────────┘
+dev-install/
+└── GrimFandango (ELF, 32-bit x86)
+    ├── Native engine subsystems (own process memory; exposed indirectly via Lua closures)
+    │   ├── Rendering / camera / scene graph
+    │   ├── Audio / speech / music
+    │   ├── Input / controller mapping
+    │   ├── Actor / pathfinding / animation controllers
+    │   ├── Room + cutscene managers
+    │   └── Resource streaming (models, textures, VO)
+    ├── Embedded Lua host
+    │   ├── Dynamically links libLua.so (Lua 3.2 runtime shared object)
+    │   ├── Calls exported Lua 3.2 API directly to open states, run scripts, and marshal data
+    │   └── Registers native helpers into Lua globals/tables via Lua closures
+    └── Lua-facing entry points (refer to libLua.so for implementations)
 
-ptr → LuaString on VM heap:
-┌──────────────────────────────────────────┐
-│ struct TString { ttype=-2; len; hash; …  │
-│ char data[] = "capture_params.smoke\0";  │
-└──────────────────────────────────────────┘
+libLua exports (subset we rely on)
+├── Core VM / state (lifecycle + handles)
+│   ├── lua_open / lua_close / lua_setstate
+│   ├── lua_lua2C (macro target for lua_getparam / lua_getresult)
+│   ├── lua_getglobal / lua_setglobal / lua_rawgetglobal / lua_rawsetglobal
+│   ├── lua_tag / lua_newtag / lua_settag / lua_settagmethod / lua_gettagmethod
+│   └── lua_ref / lua_getref / lua_unref / lua_pushobject / lua_pop
+├── Execution (script loading + dispatcher)
+│   ├── lua_dofile / lua_dostring / lua_dobuffer
+│   ├── lua_callfunction / lua_call / lua_beginblock / lua_endblock
+│   ├── luaD_call / luaD_taskHook / lua_updatetasks / lua_currenttask
+│   └── lua_error / lua_seterrormethod
+├── Stack/object inspection (type checks + conversions)
+│   ├── lua_isnil / lua_isnumber / lua_isstring / lua_isfunction / lua_isuserdata
+│   ├── lua_getnumber / lua_getstring / lua_strlen / lua_getcfunction / lua_getuserdata
+│   ├── lua_pushnumber / lua_pushstring / lua_pushcclosure / lua_pushusertag / lua_pushnil
+│   └── lua_next / lua_nextvar / lua_createtable / lua_settable / lua_rawsettable / lua_gettable / lua_rawgettable
+├── Libraries (stdlib bring-up + diagnostics)
+│   ├── lua_strlibopen / lua_iolibopen / lua_mathlibopen / lua_openlib / lua_recognizelib
+│   └── lua_printstack / lua_PrintGlobals
+└── Misc helpers (GC, serialization, aliases)
+    ├── lua_beginblock / lua_endblock
+    ├── lua_collectgarbage
+    ├── lua_pushCclosure (alias lua_pushcclosure) / lua_pushCfunction
+    └── lua_Save / lua_Restore (engine serialization hooks)
 ```
 
-### Lua → Shim Call Stack Example
+Lua closure: in Lua 3.x every function value is a closure that bundles code with any upvalues it captures; the C API mirrors this by letting the engine call `lua_pushcclosure` to wrap a native function plus upvalues into a callable Lua object. Those closures are what the engine binds to globals for scripts to invoke.
 
-```
-Lua VM stack (top)
-│
-├─ Frame: telemetry.mark(key="capture_params.smoke")
-│     upvalues: telemetry logger helpers
-│     locals: key → slot[1] (Lua32TObject string)
-│
-├─ Frame: luaD_precall (C)            ← Lua dispatcher
-│     pushes CClosure trampoline and resolves native symbol
-│
-└─ Frame: telemetry_native_mark (Rust shim)
-      params:
-        lua_handle = lua_lua2C(1)  → 0x0812345c
-        slot_ptr   = luaA_Address(handle) → 0x082349a0
-      locals:
-        mark_key = lua_getstring(handle)  → "capture_params.smoke"
-        mark_seen = TELEMETRY_NATIVE_MARK_SEEN (process-global AtomicBool)
+libLua.so usage: the retail binary links this shared library at runtime and treats it as the authoritative Lua 3.2 VM. The host code invokes `lua_open`, `lua_dofile`, `lua_pushcclosure`, `lua_callfunction`, `lua_collectgarbage`, and the other exports listed above to manage Lua state. All bytecode interpretation happens inside libLua.so; the native engine’s job is to feed scripts to it and expose C closures so those scripts can reach back into engine subsystems.
 
-    → on success: logs payload, invokes native mark writer, returns 0
-```
+Rust shim placement (hypothetical): conceptually, an `LD_PRELOAD` shim wedges itself at the Lua boundary—exporting a handful of Lua functions (usually `lua_dofile` plus any other chokepoints we care about), looking up the real implementations via `dlsym(RTLD_NEXT)`, and layering custom behavior before handing control back. There is rarely a need to patch every libLua export: hooking a focused subset (`lua_dofile` for script injection, possibly `lua_pushcclosure` or `lua_callfunction` for tracepoints) keeps the shim simpler, reduces compatibility risk, and still observes all higher-level interactions because the retail engine funnels its Lua work through those APIs.
 
-The Lua frame and shim frame share the same stack order; GDB’s `bt` after breaking on `telemetry_native_mark` should resemble the structure above, with `luaD_precall` bridging the Lua bytecode call into the Rust closure.
-`luaD_precall` is the VM dispatcher: it inspects the function slot, allocates the `CallInfo` frame, pads missing arguments with `nil`, and if the callee is a C closure (like our shim) it immediately invokes the native pointer. That’s why you always see `luaD_precall` one frame below `telemetry_native_mark`; it’s the handoff where Lua transitions from bytecode execution into native instrumentation.
-
-## Process Memory Slice During `telemetry_native_mark`
-
-```
-Hi addresses (↓ growth)
-
-0xfffff000  [vdso]  r-xp
-0xfffde000  [stack] rw-p
-            │   ← grows downward
-            │   ├─ liblua trampoline frame (luaD_precall)
-            │   ├─ telemetry_native_mark frame
-            │   │     ret → liblua thunk
-            │   │     locals: lua_handle=0x0812345c, slot=0x082349a0
-            │   └─ spill slots / saved regs for current thread
-0xf7eea000  libgrim_telemetry_shim.so  rw-p (.data/.bss/TLS)
-            │   ├─ .data/.bss: AtomicBool flags (registration/seen markers)
-            │   └─ .tdata/.tbss: small Rust runtime TLS template (per-thread bookkeeping)
-0xf7edf000  libgrim_telemetry_shim.so  r--p (RELRO)
-0xf7e8f000  libgrim_telemetry_shim.so  r-xp (.text)
-            └─ telemetry_native_mark @ 0xf7e9fee0 (executing)
-0xf7d00000  liblua/libc/libm/steamclient …
-            Heap (malloc/brk) rw-p ↑
-0x08048000  main binary .text  r-xp
-0x08100000  main binary .data/.bss  rw-p
-            ├─ Lua VM state (lua_State, CallInfo chain)
-            └─ Lua stack arena: slot[1] @0x082349a0 → TString @0x08234A10 ("capture_params.smoke")
-Lo addresses
-
-Legend:
- r-xp  executable code (.text)
- r--p  read-only (.rodata / RELRO)
- rw-p  writable (.data / .bss / TLS image)
-
-Notes:
- • PIC rule: runtime addr = base + offset
- • RELRO pages → r--p after relocation
- • Rust’s std runtime ships a ~44 B TLS template; the shim itself keeps per-process state in Atomics.
- • Active telemetry mark: Lua slot holds the mark key string; Atomics gate registration/log spam.
-```
+Use `readelf -sW dev-install/libLua.so` or `nm -D dev-install/GrimFandango` to confirm offsets and verify additional symbols if needed. This list captures every exported function we touch when embedding instrumentation or interacting with the runtime via GDB.
