@@ -73,7 +73,7 @@ pub fn run_boot_sequence(
     headless: bool,
     geometry_json: Option<&Path>,
     audio_callback: Option<Rc<dyn AudioCallback>>,
-    stream: Option<StreamServer>,
+    stream: Option<Rc<StreamServer>>,
     stream_ready: Option<PathBuf>,
 ) -> Result<Option<EngineRuntime>> {
     let resources = Rc::new(
@@ -117,6 +117,10 @@ pub fn run_boot_sequence(
         lab_root_path.clone(),
         tube_pose_aliases.clone(),
     )));
+    {
+        let mut ctx = context.borrow_mut();
+        ctx.set_stream(stream.clone());
+    }
     let context_handle = context::EngineContextHandle::new(context.clone());
 
     context::install_package_path(&lua, data_root)?;
@@ -168,7 +172,7 @@ pub fn run_boot_sequence(
             lua,
             context,
             context_handle,
-            stream,
+            stream.clone(),
             headless,
             initial_event_cursor,
             initial_coverage.clone(),
@@ -207,7 +211,7 @@ impl EngineRuntime {
         lua: Lua,
         context: Rc<RefCell<context::EngineContext>>,
         context_handle: EngineContextHandle,
-        stream: Option<StreamServer>,
+        stream: Option<Rc<StreamServer>>,
         headless: bool,
         initial_event_cursor: usize,
         initial_coverage: BTreeMap<String, u64>,
@@ -215,7 +219,6 @@ impl EngineRuntime {
         defer_intro_cutscene: bool,
         tube_pose_aliases: TubePoseAliasCache,
     ) -> Self {
-        let stream = stream.map(Rc::new);
         {
             let mut ctx = context.borrow_mut();
             ctx.set_stream(stream.clone());

@@ -103,6 +103,7 @@ mod geometry;
 mod geometry_export;
 mod inventory;
 mod menus;
+mod movies;
 mod movement;
 mod objects;
 mod pause;
@@ -115,9 +116,9 @@ pub use audio::AudioCallback;
 use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView, MusicState, SfxState};
 use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
-    FullscreenMoviePlayback,
 };
 use geometry::SectorHit;
+use movies::{select_playback, viewer_ready};
 use inventory::{InventoryRuntimeAdapter, InventoryRuntimeView, InventoryState};
 use menus::{MenuRegistry, MenuRegistryView, MenuState};
 use movement::{MovementRuntimeAdapter, MovementRuntimeView};
@@ -137,7 +138,7 @@ use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
 use crate::stream::StreamServer;
 use grim_analysis::resources::{ResourceGraph, SetMetadata};
-use grim_stream::{MovieAction, MovieControl, MovieStart};
+use grim_stream::{MovieAction, MovieControl};
 use mlua::RegistryKey;
 
 #[derive(Clone)]
@@ -837,53 +838,14 @@ impl EngineContext {
                 .fullscreen_movie_viewer_generation()
                 .is_some()
         {
-            let mut runtime = self.cutscene_runtime();
-            if runtime.force_movie_completion(MovieAction::Error) {
-                self.log_event("cut_scene.fullscreen.force_complete error".to_string());
-            }
+            panic!("stream dropped while fullscreen movie is in progress");
         }
         self.stream = stream;
     }
 
-    fn prepare_fullscreen_playback(&mut self, movie: &str) -> Option<FullscreenMoviePlayback> {
-        let stream = self.stream.as_ref()?;
-        if !stream.viewer_gate().is_ready() {
-            return None;
-        }
-        let relative_path = self.resolve_remastered_movie(movie)?;
-        let generation = stream.current_generation();
-        let start = MovieStart {
-            name: movie.to_string(),
-            relative_path: Some(relative_path.clone()),
-        };
-        if let Err(err) = stream.send_movie_start(start) {
-            eprintln!(
-                "[grim_engine] failed to send MovieStart for {movie}: {err:?}; using countdown fallback"
-            );
-            return None;
-        }
-        Some(FullscreenMoviePlayback::Viewer { generation })
-    }
-
-    fn resolve_remastered_movie(&self, movie: &str) -> Option<String> {
-        let stem = Path::new(movie).file_stem()?;
-        let lowered = stem.to_string_lossy().to_lowercase();
-        if lowered.is_empty() {
-            return None;
-        }
-        let relative = Path::new("MoviesHD").join(format!("{lowered}.ogv"));
-        let full = self.install_root.join(&relative);
-        if full.is_file() {
-            Some(relative.to_string_lossy().to_string())
-        } else {
-            None
-        }
-    }
-
     fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
-        let playback = self
-            .prepare_fullscreen_playback(&movie)
-            .unwrap_or(FullscreenMoviePlayback::Countdown);
+        let playback = select_playback(self.stream.clone(), &self.install_root, &movie)
+            .unwrap_or_else(|| panic!("viewer playback unavailable for fullscreen movie {movie}"));
         self.cutscene_runtime()
             .start_fullscreen_movie(movie, yields, playback)
     }
@@ -891,19 +853,14 @@ impl EngineContext {
     pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
         if let Some(expected_generation) = self.cutscene_view().fullscreen_movie_viewer_generation()
         {
-            let viewer_ready = self
-                .stream
-                .as_ref()
-                .map(|stream| {
-                    stream.current_generation() == expected_generation
-                        && stream.viewer_gate().is_ready()
-                })
-                .unwrap_or(false);
-            if !viewer_ready {
-                let mut runtime = self.cutscene_runtime();
-                if runtime.force_movie_completion(MovieAction::Error) {
-                    self.log_event("cut_scene.fullscreen.force_complete error".to_string());
-                }
+            if !viewer_ready(self.stream.as_ref(), expected_generation) {
+                let actual_generation = self
+                    .stream
+                    .as_ref()
+                    .map(|stream| stream.current_generation());
+                panic!(
+                    "viewer not ready for fullscreen movie: expected generation {expected_generation}, stream generation {actual_generation:?}"
+                );
             }
         }
         self.cutscene_runtime().poll_fullscreen_movie()

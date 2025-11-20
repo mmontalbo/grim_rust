@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::rc::Rc;
 
 use crate::cli::RunLuaArgs;
 use crate::lua_host::run_boot_sequence;
@@ -23,10 +24,10 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         }
         None
     } else if let Some(addr) = stream_bind.as_ref() {
-        Some(StreamServer::bind(
+        Some(Rc::new(StreamServer::bind(
             addr,
             Some(env!("CARGO_PKG_VERSION").to_string()),
-        )?)
+        )?))
     } else {
         None
     };
