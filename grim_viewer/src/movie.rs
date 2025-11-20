@@ -39,6 +39,8 @@ static FRAME_DUMP_CONFIG: OnceLock<FrameDumpConfig> = OnceLock::new();
 const MOVIE_EVENT_QUEUE_DEPTH: usize = 8;
 // Treat the pipeline as complete if no video frames arrive within this window.
 const VIDEO_IDLE_EOS_THRESHOLD: Duration = Duration::from_millis(250);
+// Fail fast if the pipeline never produces a frame.
+const FIRST_FRAME_DEADLINE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug)]
 struct FrameDumpConfig {
@@ -487,6 +489,13 @@ fn run_ffmpeg_pipeline_inner(
     let status = child
         .wait()
         .context("failed to await ffmpeg process termination")?;
+    if frames_sent == 0 {
+        return Err(anyhow!(
+            "ffmpeg decoded zero frames for {:?} (exit status {})",
+            path,
+            status
+        ));
+    }
     if status.success() {
         println!(
             "[grim_viewer] ffmpeg pipeline reached end {} (frames={})",
@@ -670,7 +679,18 @@ fn run_pipeline_inner(
 
             let video_eos = video_eos_flag.load(Ordering::Relaxed);
             let idle_ms = idle.as_secs_f64() * 1000.0;
-            if video_eos || (frame_index > 0 && idle >= VIDEO_IDLE_EOS_THRESHOLD) {
+            if video_eos && frame_index == 0 {
+                let _ = event_tx.send(MoviePlaybackEvent::Error(
+                    "movie pipeline reached EOS before first frame".to_string(),
+                ));
+                finished = true;
+            } else if frame_index == 0 && idle >= FIRST_FRAME_DEADLINE {
+                let _ = event_tx.send(MoviePlaybackEvent::Error(format!(
+                    "no movie frames decoded after {:.2}ms",
+                    idle_ms
+                )));
+                finished = true;
+            } else if video_eos || idle >= VIDEO_IDLE_EOS_THRESHOLD {
                 if !reported_finished {
                     if video_eos {
                         println!(

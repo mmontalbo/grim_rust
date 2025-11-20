@@ -105,6 +105,21 @@ def main() -> None:
         help="Extra arguments passed directly to grim_viewer after '--'",
     )
     parser.add_argument(
+        "--viewer-use-ffmpeg",
+        action="store_true",
+        help="Set GRIM_MOVIE_DECODER=ffmpeg for the viewer movie pipeline",
+    )
+    parser.add_argument(
+        "--engine-first",
+        action="store_true",
+        help="Launch grim_engine before grim_viewer to avoid viewer retry loops",
+    )
+    parser.add_argument(
+        "--viewer-no-retail",
+        action="store_true",
+        help="Launch grim_viewer with --no-retail (disables retail stream socket)",
+    )
+    parser.add_argument(
         "--launch-retail",
         action="store_true",
         help="Launch tools/run_dev_install.sh before starting capture",
@@ -162,14 +177,22 @@ def main() -> None:
                 raise
 
         viewer_cmd = build_viewer_command(args)
-        viewer_process = spawn("grim_viewer", viewer_cmd, inherit_env=True)
-        procs.append(viewer_process)
-        wait_for_viewer_ready(viewer_process)
+        viewer_env = {"GRIM_MOVIE_DECODER": "ffmpeg"} if args.viewer_use_ffmpeg else None
 
-        if not args.no_engine:
+        if args.engine_first and not args.no_engine:
             engine_cmd = build_engine_command(args)
             engine_process = spawn("grim_engine", engine_cmd)
             procs.append(engine_process)
+
+        viewer_process = spawn("grim_viewer", viewer_cmd, inherit_env=True, extra_env=viewer_env)
+        procs.append(viewer_process)
+        wait_for_viewer_ready(viewer_process)
+
+        if engine_process is None and not args.no_engine:
+            engine_cmd = build_engine_command(args)
+            engine_process = spawn("grim_engine", engine_cmd)
+            procs.append(engine_process)
+        if engine_process is not None:
             wait_for_process_healthy(engine_process, "grim_engine", warmup_seconds=2.0)
 
         if not args.no_engine and not args.no_capture:
@@ -417,13 +440,16 @@ def build_viewer_command(args) -> List[str]:
     viewer_width = getattr(args, "viewer_window_width", args.width)
     viewer_height = getattr(args, "viewer_window_height", args.height)
     viewer_args: List[str] = [
-        "--retail-stream",
-        args.retail_addr,
         "--window-width",
         str(viewer_width),
         "--window-height",
         str(viewer_height),
     ]
+
+    if not args.viewer_no_retail:
+        viewer_args.extend(["--retail-stream", args.retail_addr])
+    else:
+        viewer_args.append("--no-retail")
 
     if not args.no_engine:
         viewer_args.extend(["--engine-stream", args.engine_addr])
@@ -689,8 +715,16 @@ def restore_tty_state(state: Optional[Any]) -> None:
         subprocess.run(["stty", "sane"], check=False)
 
 
-def spawn(name: str, command: Sequence[str], foreground: bool = False, inherit_env: bool = False) -> ManagedProcess:
-    env = os.environ.copy() if inherit_env else None
+def spawn(
+    name: str,
+    command: Sequence[str],
+    foreground: bool = False,
+    inherit_env: bool = False,
+    extra_env: Optional[dict[str, str]] = None,
+) -> ManagedProcess:
+    env = os.environ.copy() if inherit_env or extra_env else None
+    if env is not None and extra_env:
+        env.update(extra_env)
     print(f"[run_live_preview] launching {name}: {' '.join(command)}")
     proc = subprocess.Popen(command, cwd=ROOT_DIR, env=env)
     if foreground:
