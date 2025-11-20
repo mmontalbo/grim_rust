@@ -4,7 +4,7 @@ use crate::{
 };
 use libc::{c_char, c_int, Dl_info};
 use std::{
-    ffi::{c_void, CStr},
+    ffi::{c_void, CStr, CString},
     mem::MaybeUninit,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -39,7 +39,11 @@ fn describe_closure_target(ptr: *const c_void) -> String {
             fragments.push(format!("module={module}"));
         }
         if let Some(symbol) = symbol {
-            fragments.push(format!("symbol={symbol}"));
+            let mut fragment = format!("symbol={symbol}");
+            if let Some(demangled) = demangle_symbol(&symbol) {
+                fragment.push_str(&format!(" ({demangled})"));
+            }
+            fragments.push(fragment);
         }
         if fragments.is_empty() {
             String::new()
@@ -55,4 +59,37 @@ unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
     } else {
         Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     }
+}
+
+fn demangle_symbol(symbol: &str) -> Option<String> {
+    // retail binaries are C++ and often expose mangled names; try to recover readable signatures
+    let Ok(symbol) = CString::new(symbol) else {
+        return None;
+    };
+    let mut status: c_int = 0;
+    let ptr = unsafe {
+        __cxa_demangle(
+            symbol.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut status,
+        )
+    };
+    if ptr.is_null() || status != 0 {
+        return None;
+    }
+    let demangled = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+    unsafe {
+        libc::free(ptr as *mut c_void);
+    }
+    Some(demangled)
+}
+
+extern "C" {
+    fn __cxa_demangle(
+        mangled_name: *const c_char,
+        output_buffer: *mut c_char,
+        length: *mut usize,
+        status: *mut c_int,
+    ) -> *mut c_char;
 }

@@ -2,7 +2,13 @@ use crate::logging::log_line;
 use libc::{c_char, c_int, c_void};
 use std::sync::OnceLock;
 
-pub(crate) type LuaCFunction = unsafe extern "C" fn();
+/// Opaque handle matching Lua's lua_State.
+#[repr(C)]
+pub struct lua_State {
+    _private: [u8; 0],
+}
+
+pub(crate) type LuaCFunction = unsafe extern "C" fn(*mut lua_State) -> c_int;
 type LuaPushCClosureFn = unsafe extern "C" fn(LuaCFunction, c_int);
 
 static LUA_PUSH_CCLOSURE: OnceLock<Option<LuaPushCClosureFn>> = OnceLock::new();
@@ -24,16 +30,10 @@ pub(crate) fn call_real_lua_push_c_closure(func: LuaCFunction, upvalues: c_int) 
 
 fn lua_push_c_closure_symbol() -> Option<LuaPushCClosureFn> {
     *LUA_PUSH_CCLOSURE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[
-            SymbolVariant {
-                symbol: b"lua_pushCclosure\0",
-                label: "lua_pushCclosure",
-            },
-            SymbolVariant {
-                symbol: b"lua_pushcclosure\0",
-                label: "lua_pushcclosure",
-            },
-        ])
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushCclosure\0",
+            label: "lua_pushCclosure",
+        }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushCClosureFn>(ptr))
     })
 }
