@@ -196,18 +196,29 @@ fn install_footsteps_table(lua: &Lua) -> LuaResult<()> {
 fn install_color_constants(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
-    let make_color = |r: f32, g: f32, b: f32| -> LuaResult<Value> {
-        let table = lua.create_table()?;
+    let make_color = lua.create_function(|lua_ctx, args: Variadic<Value>| {
+        let to_unit = |value: Option<f32>| -> f32 {
+            let raw = value.unwrap_or(0.0);
+            if raw > 1.0 { raw / 255.0 } else { raw }
+        };
+        let r = to_unit(args.get(0).and_then(value_to_f32));
+        let g = to_unit(args.get(1).and_then(value_to_f32));
+        let b = to_unit(args.get(2).and_then(value_to_f32));
+        let table = lua_ctx.create_table()?;
         table.set("r", r)?;
         table.set("g", g)?;
         table.set("b", b)?;
         Ok(Value::Table(table))
-    };
+    })?;
+    globals.set("MakeColor", make_color.clone())?;
 
-    globals.set("White", make_color(1.0, 1.0, 1.0)?)?;
-    globals.set("Yellow", make_color(1.0, 0.9, 0.2)?)?;
-    globals.set("Magenta", make_color(0.9, 0.1, 0.9)?)?;
-    globals.set("Aqua", make_color(0.1, 0.7, 0.9)?)?;
+    let make_constant =
+        |r: f32, g: f32, b: f32| -> LuaResult<Value> { make_color.call((r, g, b)) };
+
+    globals.set("White", make_constant(255.0, 255.0, 255.0)?)?;
+    globals.set("Yellow", make_constant(255.0, 229.5, 51.0)?)?;
+    globals.set("Magenta", make_constant(229.5, 25.5, 229.5)?)?;
+    globals.set("Aqua", make_constant(25.5, 178.5, 229.5)?)?;
 
     Ok(())
 }
@@ -543,37 +554,49 @@ fn install_controls_scaffold(
 }
 
 pub(crate) fn candidate_paths(path: &str) -> Vec<PathBuf> {
-    let mut base_candidates = Vec::new();
-    base_candidates.push(path.to_string());
+    fn add_variants(path: &str, candidates: &mut Vec<PathBuf>) {
+        let mut base_candidates = Vec::new();
+        base_candidates.push(path.to_string());
 
-    if path.ends_with(".lua") {
-        let mut alt = path.to_string();
-        alt.truncate(alt.len().saturating_sub(4));
-        alt.push_str(".decompiled.lua");
-        base_candidates.push(alt);
-    } else if path.ends_with(".decompiled.lua") {
-        let mut alt = path.to_string();
-        alt.truncate(alt.len().saturating_sub(".decompiled.lua".len()));
-        alt.push_str(".lua");
-        base_candidates.push(alt);
-    } else {
-        base_candidates.push(format!("{path}.lua"));
-        base_candidates.push(format!("{path}.decompiled.lua"));
-    }
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let mut push_unique = |candidate: PathBuf| {
-        if !candidates.iter().any(|existing| existing == &candidate) {
-            candidates.push(candidate);
+        if path.ends_with(".lua") {
+            let mut alt = path.to_string();
+            alt.truncate(alt.len().saturating_sub(4));
+            alt.push_str(".decompiled.lua");
+            base_candidates.push(alt);
+        } else if path.ends_with(".decompiled.lua") {
+            let mut alt = path.to_string();
+            alt.truncate(alt.len().saturating_sub(".decompiled.lua".len()));
+            alt.push_str(".lua");
+            base_candidates.push(alt);
+        } else {
+            base_candidates.push(format!("{path}.lua"));
+            base_candidates.push(format!("{path}.decompiled.lua"));
         }
-    };
 
-    for candidate in base_candidates {
-        let direct = PathBuf::from(&candidate);
-        push_unique(direct.clone());
-        push_unique(PathBuf::from("Scripts").join(&direct));
+        for candidate in base_candidates {
+            let direct = PathBuf::from(&candidate);
+            push_unique(&direct, candidates);
+            if Path::new(&direct).components().count() == 1 {
+                push_unique(&PathBuf::from("Scripts").join(&direct), candidates);
+            }
+        }
     }
 
+    fn push_unique(candidate: &PathBuf, candidates: &mut Vec<PathBuf>) {
+        if !candidates.iter().any(|existing| existing == candidate) {
+            candidates.push(candidate.clone());
+        }
+    }
+
+    let normalized = path.replace('\\', "/");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    add_variants(&normalized, &mut candidates);
+    if let Some(file_name) = Path::new(&normalized)
+        .file_name()
+        .and_then(|name| name.to_str())
+    {
+        add_variants(file_name, &mut candidates);
+    }
     candidates
 }
 
@@ -4610,9 +4633,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::lua_host::telemetry::{log_event, EventBuilder};
 use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::normalize_legacy_lua;
-use crate::lua_host::telemetry::{log_event, EventBuilder};
 use mlua::{
     Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Thread,
     ThreadStatus, Value, Variadic,

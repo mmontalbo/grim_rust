@@ -1,5 +1,5 @@
 use crate::logging::log_line;
-use libc::{c_char, c_int, c_void, size_t};
+use libc::{c_char, c_double, c_int, c_void, size_t};
 use std::{ffi::CStr, sync::OnceLock};
 
 /// Opaque handle matching Lua's lua_State.
@@ -8,7 +8,8 @@ pub struct lua_State {
     _private: [u8; 0],
 }
 
-pub(crate) type LuaCFunction = unsafe extern "C" fn(*mut lua_State) -> c_int;
+/// Retail Lua 3.2 uses a `void (*)(void)` callback type for C functions.
+pub(crate) type LuaCFunction = unsafe extern "C" fn();
 pub(crate) type LuaObject = u32;
 type LuaPushCClosureFn = unsafe extern "C" fn(LuaCFunction, c_int);
 type LuaDoFileFn = unsafe extern "C" fn(*const c_char) -> c_int;
@@ -20,6 +21,12 @@ type LuaGetObjNameFn = unsafe extern "C" fn(LuaObject, *mut *mut c_char) -> *mut
 type LuaSetGlobalFn = unsafe extern "C" fn(*const c_char);
 type LuaGetGlobalFn = unsafe extern "C" fn(*const c_char) -> LuaObject;
 type LuaGetCFunctionFn = unsafe extern "C" fn(LuaObject) -> Option<LuaCFunction>;
+type LuaLua2CFn = unsafe extern "C" fn(c_int) -> LuaObject;
+type LuaIsStringFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaGetStringFn = unsafe extern "C" fn(LuaObject) -> *const c_char;
+type LuaIsNilFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaIsNumberFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaGetNumberFn = unsafe extern "C" fn(LuaObject) -> c_double;
 type LuaRefFn = unsafe extern "C" fn(c_int) -> c_int;
 type LuaGetRefFn = unsafe extern "C" fn(c_int) -> LuaObject;
 type LuaSetTagMethodFn = unsafe extern "C" fn(c_int, *const c_char);
@@ -36,6 +43,12 @@ static LUA_GETOBJNAME: OnceLock<Option<LuaGetObjNameFn>> = OnceLock::new();
 static LUA_SETGLOBAL: OnceLock<Option<LuaSetGlobalFn>> = OnceLock::new();
 static LUA_GETGLOBAL: OnceLock<Option<LuaGetGlobalFn>> = OnceLock::new();
 static LUA_GETCFUNCTION: OnceLock<Option<LuaGetCFunctionFn>> = OnceLock::new();
+static LUA_LUA2C: OnceLock<Option<LuaLua2CFn>> = OnceLock::new();
+static LUA_ISSTRING: OnceLock<Option<LuaIsStringFn>> = OnceLock::new();
+static LUA_GETSTRING: OnceLock<Option<LuaGetStringFn>> = OnceLock::new();
+static LUA_ISNIL: OnceLock<Option<LuaIsNilFn>> = OnceLock::new();
+static LUA_ISNUMBER: OnceLock<Option<LuaIsNumberFn>> = OnceLock::new();
+static LUA_GETNUMBER: OnceLock<Option<LuaGetNumberFn>> = OnceLock::new();
 static LUA_REF: OnceLock<Option<LuaRefFn>> = OnceLock::new();
 static LUA_GETREF: OnceLock<Option<LuaGetRefFn>> = OnceLock::new();
 static LUA_SETTAGMETHOD: OnceLock<Option<LuaSetTagMethodFn>> = OnceLock::new();
@@ -114,6 +127,55 @@ pub(crate) fn call_real_lua_getglobal(name: *const c_char) -> Option<LuaObject> 
 
 pub(crate) fn call_real_lua_getcfunction(handle: LuaObject) -> Option<LuaCFunction> {
     unsafe { lua_getcfunction_symbol().and_then(|symbol| symbol(handle)) }
+}
+
+pub(crate) fn call_real_lua_getparam(index: c_int) -> Option<LuaObject> {
+    unsafe {
+        lua_lua2c_symbol()
+            .map(|symbol| symbol(index))
+            .filter(|obj| *obj != 0)
+    }
+}
+
+pub(crate) fn call_real_lua_isstring(object: LuaObject) -> bool {
+    unsafe {
+        lua_isstring_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn call_real_lua_getstring(object: LuaObject) -> Option<String> {
+    unsafe {
+        lua_getstring_symbol().and_then(|symbol| {
+            let ptr = symbol(object);
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            }
+        })
+    }
+}
+
+pub(crate) fn call_real_lua_isnil(object: LuaObject) -> bool {
+    unsafe {
+        lua_isnil_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn call_real_lua_isnumber(object: LuaObject) -> bool {
+    unsafe {
+        lua_isnumber_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn call_real_lua_getnumber(object: LuaObject) -> Option<f64> {
+    unsafe { lua_getnumber_symbol().map(|symbol| symbol(object)) }
 }
 
 pub(crate) fn call_real_lua_ref(lock: c_int) -> Option<c_int> {
@@ -266,6 +328,66 @@ fn lua_getcfunction_symbol() -> Option<LuaGetCFunctionFn> {
             label: "lua_getcfunction",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetCFunctionFn>(ptr))
+    })
+}
+
+fn lua_lua2c_symbol() -> Option<LuaLua2CFn> {
+    *LUA_LUA2C.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_lua2C\0",
+            label: "lua_lua2C",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaLua2CFn>(ptr))
+    })
+}
+
+fn lua_isstring_symbol() -> Option<LuaIsStringFn> {
+    *LUA_ISSTRING.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_isstring\0",
+            label: "lua_isstring",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsStringFn>(ptr))
+    })
+}
+
+fn lua_getstring_symbol() -> Option<LuaGetStringFn> {
+    *LUA_GETSTRING.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_getstring\0",
+            label: "lua_getstring",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetStringFn>(ptr))
+    })
+}
+
+fn lua_isnil_symbol() -> Option<LuaIsNilFn> {
+    *LUA_ISNIL.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_isnil\0",
+            label: "lua_isnil",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsNilFn>(ptr))
+    })
+}
+
+fn lua_isnumber_symbol() -> Option<LuaIsNumberFn> {
+    *LUA_ISNUMBER.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_isnumber\0",
+            label: "lua_isnumber",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsNumberFn>(ptr))
+    })
+}
+
+fn lua_getnumber_symbol() -> Option<LuaGetNumberFn> {
+    *LUA_GETNUMBER.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_getnumber\0",
+            label: "lua_getnumber",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetNumberFn>(ptr))
     })
 }
 

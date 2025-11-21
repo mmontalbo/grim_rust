@@ -1,8 +1,12 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +18,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 #[cfg(unix)]
@@ -25,6 +30,7 @@ use retail::{extend_env_var, warn_if_shaders_missing, HookMode, RetailLayout};
 const RETAIL_STEAM_APP_ID: &str = "345350";
 const RETAIL_LUA_PATH: &str = "./?.lua;./?.LUA;./mods/?.lua";
 const RUST_SHIM_TARGET: &str = "i686-unknown-linux-gnu";
+const DEFAULT_ENGINE_STREAM: &str = "127.0.0.1:17500";
 #[derive(Parser, Debug)]
 #[command(
     name = "grctl",
@@ -55,6 +61,9 @@ enum CommandKind {
     /// Run or manage scenario harness sessions.
     #[command(subcommand)]
     Scenario(ScenarioCommand),
+    /// Watch live parity signals between engine and retail.
+    #[command(subcommand)]
+    Watch(WatchCommand),
     /// Show component status for the entire stack.
     Status,
 }
@@ -232,6 +241,37 @@ impl ScenarioKind {
     }
 }
 
+#[derive(Subcommand, Debug)]
+enum WatchCommand {
+    /// Watch intro.timeline parity between grim_engine logs and retail telemetry.
+    IntroTimeline(WatchIntroArgs),
+}
+
+#[derive(Args, Debug)]
+struct WatchIntroArgs {
+    /// Path to the grim_engine log to watch.
+    #[arg(long, default_value = "target/grctl/logs/grim_engine.log")]
+    engine_log: PathBuf,
+    /// Path to the retail telemetry JSONL file.
+    #[arg(long, default_value = "dev-install/mods/telemetry_events.jsonl")]
+    retail_events: PathBuf,
+    /// Poll interval (ms) for reading new lines.
+    #[arg(long, default_value_t = 500)]
+    poll_interval_ms: u64,
+    /// Skip existing content and start watching from the end of each file.
+    #[arg(long)]
+    from_end: bool,
+    /// Launch grim_engine and the retail capture before watching.
+    #[arg(long)]
+    launch: bool,
+    /// Also start grim_viewer alongside the intro watch (implies non-headless engine).
+    #[arg(long, requires = "launch")]
+    with_viewer: bool,
+    /// Run grim_engine/grim_viewer with --release when launching the session.
+    #[arg(long, requires = "launch")]
+    engine_release: bool,
+}
+
 #[derive(Args, Debug)]
 struct LogArgs {
     /// Number of lines to display from the end of the log (0 prints the entire file).
@@ -320,6 +360,13 @@ impl Paths {
     fn launcher_script(&self, session_id: &str) -> PathBuf {
         self.launcher_dir.join(format!("retail_{session_id}.sh"))
     }
+
+    fn retail_telemetry_path(&self) -> PathBuf {
+        self.repo_root
+            .join("dev-install")
+            .join("mods")
+            .join("telemetry_events.jsonl")
+    }
 }
 
 fn main() -> Result<()> {
@@ -332,6 +379,7 @@ fn main() -> Result<()> {
         CommandKind::Retail(cmd) => handle_retail(cmd, &paths),
         CommandKind::Check(cmd) => handle_check(cmd, &paths),
         CommandKind::Scenario(cmd) => handle_scenario(cmd, &paths),
+        CommandKind::Watch(cmd) => handle_watch(cmd, &paths),
         CommandKind::Status => {
             for component in [
                 ComponentKind::Engine,
@@ -407,6 +455,12 @@ fn handle_scenario(cmd: ScenarioCommand, paths: &Paths) -> Result<()> {
     match cmd {
         ScenarioCommand::Run(args) => run_scenario(paths, args),
         ScenarioCommand::Stop => stop_scenario(paths),
+    }
+}
+
+fn handle_watch(cmd: WatchCommand, paths: &Paths) -> Result<()> {
+    match cmd {
+        WatchCommand::IntroTimeline(args) => watch_intro_timeline(args, paths),
     }
 }
 
@@ -1287,6 +1341,390 @@ fn tail_file(path: &Path, tail: usize) -> Result<Vec<String>> {
         buffer.push_back(line);
     }
     Ok(buffer.into_iter().collect())
+}
+
+#[derive(Default)]
+struct LaunchGuard {
+    components: Vec<ComponentKind>,
+}
+
+impl LaunchGuard {
+    fn push(&mut self, component: ComponentKind) {
+        self.components.push(component);
+    }
+
+    fn stop_all(&mut self, paths: &Paths) {
+        for component in self.components.iter().rev() {
+            if let Err(err) = stop_component(*component, paths, false) {
+                eprintln!(
+                    "[grctl] warning: failed to stop {}: {err:?}",
+                    component.display()
+                );
+            }
+        }
+        self.components.clear();
+    }
+}
+
+fn watch_intro_timeline(args: WatchIntroArgs, paths: &Paths) -> Result<()> {
+    let WatchIntroArgs {
+        engine_log,
+        retail_events,
+        poll_interval_ms,
+        from_end,
+        launch,
+        with_viewer,
+        engine_release,
+    } = args;
+
+    if with_viewer && !launch {
+        bail!("--with-viewer requires --launch");
+    }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    install_watch_shutdown_handler(shutdown.clone())?;
+
+    let poll_interval = Duration::from_millis(poll_interval_ms);
+    let mut guard = LaunchGuard::default();
+    let headless_engine = !with_viewer;
+
+    let (engine_path, retail_path) = if launch {
+        ensure_component_available(ComponentKind::Engine, paths)?;
+        ensure_component_available(ComponentKind::Retail, paths)?;
+        if with_viewer {
+            ensure_component_available(ComponentKind::Viewer, paths)?;
+        }
+        prepare_intro_watch_sources(paths)?;
+        start_intro_watch_components(
+            paths,
+            &mut guard,
+            headless_engine,
+            engine_release,
+            with_viewer,
+        )?;
+        (
+            paths.log_path(ComponentKind::Engine),
+            paths.retail_telemetry_path(),
+        )
+    } else {
+        (
+            resolve_repo_path(paths, &engine_log),
+            resolve_repo_path(paths, &retail_events),
+        )
+    };
+
+    println!("[grctl] watching intro.timeline parity");
+    println!("  engine log: {}", engine_path.display());
+    println!("  retail telemetry: {}", retail_path.display());
+    println!("  poll interval: {}ms", poll_interval_ms);
+    if from_end {
+        println!("  starting from end of both files");
+    }
+    if launch {
+        println!(
+            "  launched: grim_engine{} and retail capture{}",
+            if headless_engine {
+                " (headless, --verbose)"
+            } else {
+                " (--verbose)"
+            },
+            if with_viewer { ", grim_viewer" } else { "" }
+        );
+        println!("[grctl] press Ctrl-C to stop the watch and shut down launched components");
+    }
+
+    let result = run_intro_timeline_loop(
+        &engine_path,
+        &retail_path,
+        from_end,
+        poll_interval,
+        &shutdown,
+    );
+
+    if launch {
+        println!("[grctl] stopping launched components...");
+        guard.stop_all(paths);
+    }
+
+    result
+}
+
+fn install_watch_shutdown_handler(flag: Arc<AtomicBool>) -> Result<()> {
+    ctrlc::set_handler(move || {
+        flag.store(true, Ordering::SeqCst);
+    })
+    .context("installing Ctrl-C handler for intro timeline watch")
+}
+
+fn start_intro_watch_components(
+    paths: &Paths,
+    guard: &mut LaunchGuard,
+    headless_engine: bool,
+    engine_release: bool,
+    with_viewer: bool,
+) -> Result<()> {
+    let engine_args = EngineStart {
+        release: engine_release,
+        headless: headless_engine,
+        verbose: true,
+        stream_bind: DEFAULT_ENGINE_STREAM.to_string(),
+        extra_args: Vec::new(),
+    };
+    start_engine(engine_args, paths)?;
+    guard.push(ComponentKind::Engine);
+
+    if with_viewer {
+        let viewer_args = ViewerStart {
+            release: engine_release,
+            engine_stream: DEFAULT_ENGINE_STREAM.to_string(),
+            no_retail: false,
+            window_width: 1280,
+            window_height: 720,
+            extra_args: Vec::new(),
+        };
+        start_viewer(viewer_args, paths)?;
+        guard.push(ComponentKind::Viewer);
+    }
+
+    let retail_args = RetailStart {
+        timeout: "0".to_string(),
+        no_timeout: true,
+        vanilla: false,
+        attach: false,
+        extra_args: Vec::new(),
+    };
+    start_retail(retail_args, paths)?;
+    guard.push(ComponentKind::Retail);
+
+    Ok(())
+}
+
+fn prepare_intro_watch_sources(paths: &Paths) -> Result<()> {
+    let engine_path = paths.log_path(ComponentKind::Engine);
+    let retail_path = paths.retail_telemetry_path();
+    reset_file(&engine_path)?;
+    reset_file(&retail_path)?;
+    Ok(())
+}
+
+fn reset_file(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent directory for {}", path.display()))?;
+    }
+    if path.exists() {
+        fs::remove_file(path).with_context(|| format!("clearing {}", path.display()))?;
+    }
+    File::create(path).with_context(|| format!("initializing {}", path.display()))?;
+    Ok(())
+}
+
+fn run_intro_timeline_loop(
+    engine_path: &Path,
+    retail_path: &Path,
+    from_end: bool,
+    poll_interval: Duration,
+    shutdown: &Arc<AtomicBool>,
+) -> Result<()> {
+    let mut engine_pos = start_position(engine_path, from_end);
+    let mut retail_pos = start_position(retail_path, from_end);
+    let mut engine_events: Vec<String> = Vec::new();
+    let mut retail_events: Vec<String> = Vec::new();
+    let mut last_snapshot = String::new();
+    let mut first_snapshot = true;
+    let mut waiting_for_engine = false;
+    let mut waiting_for_retail = false;
+
+    while !shutdown.load(Ordering::SeqCst) {
+        let mut changed = false;
+
+        match read_new_lines(engine_path, &mut engine_pos, from_end) {
+            Ok((lines, reset)) => {
+                if reset {
+                    engine_events.clear();
+                    changed = true;
+                    println!(
+                        "[grctl] {} truncated; restarting {}",
+                        engine_path.display(),
+                        if from_end { "at end" } else { "from start" }
+                    );
+                }
+                for line in lines {
+                    if let Some(event) = parse_intro_timeline_line(&line) {
+                        engine_events.push(event);
+                        changed = true;
+                    }
+                }
+                if waiting_for_engine {
+                    println!(
+                        "[grctl] engine log available; resuming watch at {}",
+                        engine_path.display()
+                    );
+                    waiting_for_engine = false;
+                    changed = true;
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                if !waiting_for_engine {
+                    println!(
+                        "[grctl] waiting for engine log {}; retrying...",
+                        engine_path.display()
+                    );
+                    waiting_for_engine = true;
+                }
+            }
+            Err(err) => return Err(err).context(format!("reading {}", engine_path.display())),
+        };
+
+        match read_new_lines(retail_path, &mut retail_pos, from_end) {
+            Ok((lines, reset)) => {
+                if reset {
+                    retail_events.clear();
+                    changed = true;
+                    println!(
+                        "[grctl] {} truncated; restarting {}",
+                        retail_path.display(),
+                        if from_end { "at end" } else { "from start" }
+                    );
+                }
+                for line in lines {
+                    if let Some(event) = parse_intro_timeline_line(&line) {
+                        retail_events.push(event);
+                        changed = true;
+                    }
+                }
+                if waiting_for_retail {
+                    println!(
+                        "[grctl] retail telemetry available; resuming watch at {}",
+                        retail_path.display()
+                    );
+                    waiting_for_retail = false;
+                    changed = true;
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                if !waiting_for_retail {
+                    println!(
+                        "[grctl] waiting for retail telemetry {}; retrying...",
+                        retail_path.display()
+                    );
+                    waiting_for_retail = true;
+                }
+            }
+            Err(err) => return Err(err).context(format!("reading {}", retail_path.display())),
+        };
+
+        if changed || first_snapshot {
+            let snapshot = render_intro_snapshot(&engine_events, &retail_events);
+            if snapshot != last_snapshot {
+                println!("{snapshot}");
+                last_snapshot = snapshot;
+            }
+            first_snapshot = false;
+        }
+
+        thread::sleep(poll_interval);
+    }
+
+    Ok(())
+}
+
+fn start_position(path: &Path, from_end: bool) -> Option<u64> {
+    if from_end {
+        fs::metadata(path).map(|meta| meta.len()).ok()
+    } else {
+        Some(0)
+    }
+}
+
+fn read_new_lines(
+    path: &Path,
+    position: &mut Option<u64>,
+    from_end_on_reset: bool,
+) -> io::Result<(Vec<String>, bool)> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let len = reader.get_ref().metadata()?.len();
+    let mut reset = false;
+    let mut pos = position.unwrap_or_else(|| if from_end_on_reset { len } else { 0 });
+    if len < pos {
+        pos = if from_end_on_reset { len } else { 0 };
+        reset = true;
+    }
+    reader.seek(SeekFrom::Start(pos))?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut new_pos = pos;
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        new_pos += bytes as u64;
+        let trimmed = line.trim_end_matches(&['\n', '\r'][..]).to_string();
+        lines.push(trimmed);
+    }
+    *position = Some(new_pos);
+    Ok((lines, reset))
+}
+
+fn parse_intro_timeline_line(line: &str) -> Option<String> {
+    let start = line.find('{')?;
+    let value: Value = serde_json::from_str(&line[start..]).ok()?;
+    if value.get("label").and_then(|label| label.as_str()) != Some("intro.timeline") {
+        return None;
+    }
+    value
+        .get("data")
+        .and_then(|data| data.get("event"))
+        .and_then(|event| event.as_str())
+        .map(|event| event.to_string())
+}
+
+fn render_intro_snapshot(engine_events: &[String], retail_events: &[String]) -> String {
+    let missing_in_engine = missing_events(retail_events, engine_events);
+    let missing_in_retail = missing_events(engine_events, retail_events);
+    let order_matches = engine_events == retail_events;
+    format!(
+        "[grctl] intro.timeline: order_match={} missing_in_engine=[{}] missing_in_retail=[{}]\n  engine ({}): {}\n  retail ({}): {}",
+        order_matches,
+        missing_in_engine.join(", "),
+        missing_in_retail.join(", "),
+        engine_events.len(),
+        render_event_list(engine_events),
+        retail_events.len(),
+        render_event_list(retail_events),
+    )
+}
+
+fn render_event_list(events: &[String]) -> String {
+    if events.is_empty() {
+        "none".to_string()
+    } else {
+        events.join(", ")
+    }
+}
+
+fn missing_events(expected: &[String], actual: &[String]) -> Vec<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for event in actual {
+        *counts.entry(event).or_insert(0) += 1;
+    }
+    let mut missing = Vec::new();
+    for event in expected {
+        match counts.get_mut(event.as_str()) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => missing.push(event.clone()),
+        }
+    }
+    missing
+}
+
+fn resolve_repo_path(paths: &Paths, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        paths.repo_root.join(path)
+    }
 }
 
 fn run_tool_script(

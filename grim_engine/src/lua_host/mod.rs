@@ -113,6 +113,7 @@ pub fn run_boot_sequence(
     let context = Rc::new(RefCell::new(context::EngineContext::new(
         resources,
         verbose,
+        headless,
         lab_collection,
         audio_callback,
         lab_root_path.clone(),

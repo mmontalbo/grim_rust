@@ -35,7 +35,9 @@ cargo run -p grim_engine -- \
 - `--stream-ready-file` writes a marker once streaming starts. This is used by
   orchestration layers to coordinate viewer bring-up.
 - `--headless` skips the GrimStream handshake and prints emitted engine events
-  to stdout instead of waiting for a viewer connection.
+  to stdout instead of waiting for a viewer connection. Fullscreen movies are
+  simulated in this mode so the intro and Manny's office can boot without
+  `grim_viewer`, which is handy when testing instrumentation.
 
 No other flags are recognised. Scripts that still reference `--run-lua`,
 `--timeline-json`, `--movement-demo`, etc. must be updated or removed.

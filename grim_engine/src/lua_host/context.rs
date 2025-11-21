@@ -116,6 +116,7 @@ pub use audio::AudioCallback;
 use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView, MusicState, SfxState};
 use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
+    FullscreenMoviePlayback,
 };
 use geometry::SectorHit;
 use inventory::{InventoryRuntimeAdapter, InventoryRuntimeView, InventoryState};
@@ -590,6 +591,7 @@ impl CoverageTracker {
 
 pub(super) struct EngineContext {
     verbose: bool,
+    headless: bool,
     install_root: PathBuf,
     stream: Option<Rc<StreamServer>>,
     scripts: ScriptRuntime,
@@ -613,6 +615,7 @@ impl EngineContext {
     pub(super) fn new(
         resources: Rc<ResourceGraph>,
         verbose: bool,
+        headless: bool,
         lab_collection: Option<Rc<LabCollection>>,
         audio_callback: Option<Rc<dyn AudioCallback>>,
         install_root: PathBuf,
@@ -622,6 +625,7 @@ impl EngineContext {
         let sets = SetRuntime::new(resources.clone(), verbose, lab_collection);
         EngineContext {
             verbose,
+            headless,
             install_root,
             stream: None,
             scripts: ScriptRuntime::new(),
@@ -753,7 +757,7 @@ impl EngineContext {
             }
         });
         self.events.push(message.clone());
-        if self.verbose && message.starts_with("intro.timeline ") {
+        if is_intro_timeline_log(&message) {
             eprintln!("[grim_engine] {message}");
         }
         if let Some(alias) = interest_alias {
@@ -845,6 +849,17 @@ impl EngineContext {
 
     fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
         let playback = select_playback(self.stream.clone(), &self.install_root, &movie)
+            .or_else(|| {
+                if self.headless {
+                    eprintln!(
+                        "[grim_engine] headless: simulating fullscreen movie {} without viewer",
+                        movie
+                    );
+                    Some(FullscreenMoviePlayback::Countdown)
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| panic!("viewer playback unavailable for fullscreen movie {movie}"));
         self.cutscene_runtime()
             .start_fullscreen_movie(movie, yields, playback)
@@ -1620,6 +1635,10 @@ impl EngineContext {
     }
 }
 
+fn is_intro_timeline_log(message: &str) -> bool {
+    message.contains(r#""label":"intro.timeline""#)
+}
+
 fn vec3_to_array(vec: Vec3) -> [f32; 3] {
     [vec.x, vec.y, vec.z]
 }
@@ -1655,6 +1674,7 @@ mod tests {
     use grim_formats::SetFile as SetFileData;
     use mlua::{Function, Lua, Table, Value};
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::rc::Rc;
 
@@ -1665,6 +1685,15 @@ mod tests {
         assert!(paths.contains(&PathBuf::from("setfallback.lua")));
         assert!(paths.contains(&PathBuf::from("setfallback.decompiled.lua")));
         assert!(paths.contains(&PathBuf::from("Scripts/setfallback.lua")));
+    }
+
+    #[test]
+    fn candidate_paths_handle_windows_style_inputs() {
+        let mut paths = candidate_paths(r"d:\grimFandango\Scripts\mo.lua");
+        paths.sort();
+        assert!(paths.contains(&PathBuf::from("mo.lua")));
+        assert!(paths.contains(&PathBuf::from("mo.decompiled.lua")));
+        assert!(paths.contains(&PathBuf::from("Scripts/mo.lua")));
     }
 
     #[test]
@@ -1762,6 +1791,7 @@ mod tests {
         graph.sets.push(set_metadata);
         EngineContext::new(
             Rc::new(graph),
+            false,
             false,
             None,
             callback,

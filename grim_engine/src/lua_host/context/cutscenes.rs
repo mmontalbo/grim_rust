@@ -39,6 +39,7 @@ pub(super) struct OverrideRecord {
 }
 
 use grim_stream::{MovieAction, MovieControl};
+use serde_json::json;
 
 #[derive(Debug, Clone)]
 pub(super) struct FullscreenMovieState {
@@ -454,7 +455,7 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
     ) -> bool {
         let message = self.runtime.start_fullscreen_movie(movie, yields, playback);
         if let Some(label) = intro_timeline_movie_label_from_message(&message, "start") {
-            self.events.push(format!("intro.timeline {label}"));
+            self.events.push(intro_timeline_json(&label));
         }
         self.events.push(message);
         true
@@ -464,7 +465,7 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
         let (active, maybe_message) = self.runtime.poll_fullscreen_movie();
         if let Some(message) = maybe_message {
             if let Some(label) = intro_timeline_movie_label_from_message(&message, "end") {
-                self.events.push(format!("intro.timeline {label}"));
+                self.events.push(intro_timeline_json(&label));
             }
             self.events.push(message);
         }
@@ -542,4 +543,14 @@ fn intro_timeline_movie_label(movie: &str, phase: &str) -> Option<String> {
         _ => return None,
     };
     Some(format!("{prefix}.{phase}"))
+}
+
+fn intro_timeline_json(event: &str) -> String {
+    json!({
+        "label": "intro.timeline",
+        "data": {
+            "event": event,
+        }
+    })
+    .to_string()
 }

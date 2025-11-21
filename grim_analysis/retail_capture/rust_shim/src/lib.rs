@@ -1,6 +1,7 @@
 mod logging;
 mod lua_api;
 mod symbol_map;
+mod telemetry;
 mod trace;
 
 use libc::c_int;

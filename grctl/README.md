@@ -35,6 +35,12 @@ State files live in `target/grctl/state/*.json` and logs in
 `target/grctl/logs/*.log`. `grctl` clears stale state automatically when it
 detects that a recorded PID has already exited.
 
+## Live parity watch
+
+- `watch intro-timeline [--engine-log <path>] [--retail-events <path>] [--poll-interval-ms <ms>] [--from-end]` tails `target/grctl/logs/grim_engine.log` and `dev-install/mods/telemetry_events.jsonl`, parses `intro.timeline` events, and prints a rolling missing/extra/order summary.
+- Example: `nix-shell --run 'cargo run -p grctl -- watch intro-timeline --poll-interval-ms 500'`.
+- `watch intro-timeline --launch [--with-viewer] [--engine-release]` clears the intro logs, starts grim_engine headless (unless `--with-viewer` is set), launches the retail capture without a timeout, and then begins the watch. Press Ctrl-C to stop the watch and shut down the launched components.
+
 ## Scenario runs
 
 - Use `grctl scenario run intro-to-office-computer` for the intro playback. Add

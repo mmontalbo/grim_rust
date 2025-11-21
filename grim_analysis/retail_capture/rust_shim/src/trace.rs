@@ -2,13 +2,13 @@ use crate::{
     logging::{log_event, log_line, EventBuilder},
     lua_api::{
         call_real_lua_call, call_real_lua_callfunction, call_real_lua_collectgarbage,
-        call_real_lua_dobuffer, call_real_lua_dofile, call_real_lua_dostring,
+        call_real_lua_dobuffer, call_real_lua_dofile, call_real_lua_dostring, call_real_lua_error,
         call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getobjname,
         call_real_lua_getref, call_real_lua_push_c_closure, call_real_lua_ref,
-        call_real_lua_setglobal, call_real_lua_settagmethod, call_real_lua_error, LuaCFunction,
-        LuaObject,
+        call_real_lua_setglobal, call_real_lua_settagmethod, LuaCFunction, LuaObject,
     },
     symbol_map::lookup_symbol_from_map,
+    telemetry,
 };
 use libc::{c_char, c_int, size_t, Dl_info};
 use std::{
@@ -46,6 +46,7 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
 
 pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
     let label = cstr_opt(path).unwrap_or_else(|| "<null>".to_string());
+    telemetry::observe_lua_activity();
     log_event(EventBuilder::new("dofile").kv("path", label));
     forward_int_result("lua_dofile", call_real_lua_dofile(path))
 }
@@ -54,6 +55,7 @@ pub(crate) unsafe fn trace_lua_dostring(chunk: *const c_char) -> c_int {
     let snippet = cstr_opt(chunk)
         .map(|s| truncate_for_log(&s, 80))
         .unwrap_or_else(|| "<null>".to_string());
+    telemetry::observe_lua_activity();
     log_event(EventBuilder::new("dostring").kv("snippet", snippet));
     forward_int_result("lua_dostring", call_real_lua_dostring(chunk))
 }
@@ -64,6 +66,7 @@ pub(crate) unsafe fn trace_lua_dobuffer(
     name: *const c_char,
 ) -> c_int {
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    telemetry::observe_lua_activity();
     log_event(
         EventBuilder::new("dobuffer")
             .kv("name", label)

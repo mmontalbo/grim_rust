@@ -59,26 +59,16 @@ pub fn analyze_intro_timeline(
 
 /// Pull intro timeline labels from the engine log.
 fn collect_engine_intro_timeline(log_path: &Path) -> Result<Vec<String>> {
-    let file = File::open(log_path)
-        .with_context(|| format!("opening engine log {}", log_path.display()))?;
-    let reader = BufReader::new(file);
-    let mut events = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        let Some(idx) = line.find("intro.timeline ") else {
-            continue;
-        };
-        let label = line[idx + "intro.timeline ".len()..].trim();
-        if !label.is_empty() {
-            events.push(label.to_string());
-        }
-    }
-    Ok(events)
+    collect_intro_timeline(log_path, "engine log")
 }
 
 /// Extract intro timeline labels from the retail telemetry JSONL file.
 fn collect_retail_intro_timeline(path: &Path) -> Result<Vec<String>> {
-    let file = File::open(path).with_context(|| format!("opening telemetry {}", path.display()))?;
+    collect_intro_timeline(path, "telemetry")
+}
+
+fn collect_intro_timeline(path: &Path, label: &str) -> Result<Vec<String>> {
+    let file = File::open(path).with_context(|| format!("opening {label} {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut events = Vec::new();
     for line in reader.lines() {
@@ -95,7 +85,8 @@ fn collect_retail_intro_timeline(path: &Path) -> Result<Vec<String>> {
 
 /// Lightweight JSON helper for intro timeline telemetry lines.
 pub fn parse_intro_timeline_event(line: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(line).ok()?;
+    let start = line.find('{')?;
+    let value: Value = serde_json::from_str(&line[start..]).ok()?;
     if value.get("label").and_then(|label| label.as_str()) != Some("intro.timeline") {
         return None;
     }
@@ -169,6 +160,16 @@ mod tests {
         let line = r#"{"label":"other.timeline","data":{"event":"movie.intro.start"}}"#;
         assert!(parse_intro_timeline_event(line).is_none());
         assert!(parse_intro_timeline_event("not json").is_none());
+    }
+
+    #[test]
+    fn parse_intro_timeline_event_ignores_prefixes() {
+        let line =
+            r#"[grim_engine] {"label":"intro.timeline","data":{"event":"movie.logos.start"}}"#;
+        assert_eq!(
+            parse_intro_timeline_event(line).as_deref(),
+            Some("movie.logos.start")
+        );
     }
 
     #[test]

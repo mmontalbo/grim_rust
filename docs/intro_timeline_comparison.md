@@ -6,14 +6,15 @@ movie.
 
 ## Data sources
 
-- `grim_engine` emits plaintext log lines such as `intro.timeline movie.logos.start`
-  whenever it enters or exits one of the fullscreen videos. The scenario harness
-  resets `target/grctl/logs/grim_engine.log` before every run so the log only
-  contains the current session.
+- `grim_engine` emits JSON lines (matching the retail telemetry schema) such as
+  `{"label":"intro.timeline","data":{"event":"movie.logos.start"}}` whenever it
+  enters or exits one of the fullscreen videos. The scenario harness resets
+  `target/grctl/logs/grim_engine.log` before every run so the log only contains
+  the current session.
 - `tools/live_retail_capture` writes a JSONL stream to
-  `dev-install/mods/telemetry_events.jsonl`. Each intro movie event uses the
-  `intro.timeline` label with a nested `data.event` field (for example
-  `movie.intro.end`).
+  `dev-install/mods/telemetry_events.jsonl` with the same shape: `label` set to
+  `intro.timeline` and `data.event` holding the specific marker
+  (for example `movie.intro.end`).
 
 `grim_scenarios` reads both files and builds a structured diff.
 
@@ -35,6 +36,16 @@ movie.
 
 4. Review the full JSON report written to the artifacts directory for deeper
    debugging.
+
+For a quick live view without the full scenario harness, you can also run:
+
+```bash
+nix-shell --run 'cargo run -p grctl -- watch intro-timeline --launch --with-viewer'
+```
+
+This clears the intro sources, starts a headless `grim_engine` (or streams to
+`grim_viewer` when `--with-viewer` is provided), launches the retail capture
+with no timeout, and tails both JSON feeds until you press Ctrl-C.
 
 ## Report schema
 
