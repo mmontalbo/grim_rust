@@ -3,18 +3,13 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::OnceLock;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use crossbeam_channel;
 use crossbeam_channel::{Receiver, Sender};
-use gstreamer as gst;
-use gstreamer::prelude::*;
-use gstreamer_app::{AppSink, AppSinkCallbacks};
-use gstreamer_video::VideoInfo;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder};
 
@@ -37,10 +32,6 @@ pub enum MoviePlaybackEvent {
 
 static FRAME_DUMP_CONFIG: OnceLock<FrameDumpConfig> = OnceLock::new();
 const MOVIE_EVENT_QUEUE_DEPTH: usize = 8;
-// Treat the pipeline as complete if no video frames arrive within this window.
-const VIDEO_IDLE_EOS_THRESHOLD: Duration = Duration::from_millis(250);
-// Fail fast if the pipeline never produces a frame.
-const FIRST_FRAME_DEADLINE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug)]
 struct FrameDumpConfig {
@@ -303,18 +294,10 @@ impl MoviePlayback {
         let (event_tx, event_rx) = crossbeam_channel::bounded(MOVIE_EVENT_QUEUE_DEPTH);
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
-        let handle = if use_ffmpeg_decoder() {
-            thread::Builder::new()
-                .name("grim_movie_ffmpeg".to_string())
-                .spawn(move || run_ffmpeg_pipeline(movie_path, event_tx.clone(), command_rx))
-                .context("failed to spawn ffmpeg movie playback thread")?
-        } else {
-            gst::init().map_err(|err| anyhow!("failed to initialise GStreamer: {err:?}"))?;
-            thread::Builder::new()
-                .name("grim_movie_player".to_string())
-                .spawn(move || run_pipeline(movie_path, event_tx.clone(), command_rx))
-                .context("failed to spawn movie playback thread")?
-        };
+        let handle = thread::Builder::new()
+            .name("grim_movie_ffmpeg".to_string())
+            .spawn(move || run_ffmpeg_pipeline(movie_path, event_tx.clone(), command_rx))
+            .context("failed to spawn ffmpeg movie playback thread")?;
 
         Ok(Self {
             events: event_rx,
@@ -342,27 +325,6 @@ impl Drop for MoviePlayback {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
-    }
-}
-
-fn run_pipeline(
-    path: PathBuf,
-    event_tx: Sender<MoviePlaybackEvent>,
-    command_rx: Receiver<MoviePlayerCommand>,
-) {
-    if let Err(err) = run_pipeline_inner(path, event_tx.clone(), command_rx) {
-        let _ = event_tx.send(MoviePlaybackEvent::Error(err.to_string()));
-    }
-}
-
-fn use_ffmpeg_decoder() -> bool {
-    let value = std::env::var("GRIM_MOVIE_DECODER")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match value.as_str() {
-        "" => true, // Default to ffmpeg when unset.
-        "gstreamer" | "gst" | "0" | "false" => false,
-        _ => true,
     }
 }
 
@@ -556,294 +518,6 @@ fn probe_video_properties(path: &Path) -> Result<(u32, u32, Option<Duration>)> {
     Ok((width, height, frame_interval))
 }
 
-fn run_pipeline_inner(
-    path: PathBuf,
-    event_tx: Sender<MoviePlaybackEvent>,
-    command_rx: Receiver<MoviePlayerCommand>,
-) -> Result<()> {
-    let uri = url::Url::from_file_path(&path)
-        .map_err(|_| anyhow!("failed to convert path {:?} into file URI", path))?;
-
-    let caps = gst::Caps::builder("video/x-raw")
-        .field("format", "RGBA")
-        .build();
-    let appsink = AppSink::builder()
-        .caps(&caps)
-        .drop(false)
-        .max_buffers(8)
-        .sync(false)
-        .build();
-
-    // Shared flag lets the worker thread notice when the video branch signals EOS.
-    let video_eos_flag = Arc::new(AtomicBool::new(false));
-    {
-        let flag = Arc::clone(&video_eos_flag);
-        appsink.set_callbacks(
-            AppSinkCallbacks::builder()
-                .eos(move |_| {
-                    flag.store(true, Ordering::Relaxed);
-                })
-                .build(),
-        );
-    }
-
-    let playbin = gst::ElementFactory::make("playbin")
-        .name("movie_playbin")
-        .property("uri", uri.as_str())
-        .property("video-sink", &appsink)
-        .build()
-        .context("failed to construct playbin")?;
-
-    println!("[grim_viewer] movie pipeline booting {}", path.display());
-
-    let bus = playbin
-        .bus()
-        .ok_or_else(|| anyhow!("playbin missing message bus"))?;
-
-    playbin
-        .set_state(gst::State::Playing)
-        .context("failed to start playback")?;
-
-    let mut finished = false;
-    let sink_pull_timeout = gst::ClockTime::from_mseconds(15);
-    let mut frame_index: u64 = 0;
-    let mut last_sample_wall = Instant::now();
-    let mut no_sample_since: Option<Instant> = None;
-    let mut last_no_sample_log: Option<Instant> = None;
-    let mut reported_finished = false;
-
-    while !finished {
-        match command_rx.try_recv() {
-            Ok(MoviePlayerCommand::Stop(MovieStopReason::Skipped)) => {
-                println!(
-                    "[grim_viewer] movie pipeline skip requested {}",
-                    path.display()
-                );
-                let _ = playbin.set_state(gst::State::Null);
-                let _ = event_tx.send(MoviePlaybackEvent::Skipped);
-                break;
-            }
-            Ok(MoviePlayerCommand::Stop(MovieStopReason::Shutdown)) => {
-                println!("[grim_viewer] movie pipeline shutdown {}", path.display());
-                let _ = playbin.set_state(gst::State::Null);
-                break;
-            }
-            Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                finished = true;
-            }
-            Err(crossbeam_channel::TryRecvError::Empty) => {}
-        }
-
-        if let Some(sample) = appsink.try_pull_sample(sink_pull_timeout) {
-            no_sample_since = None;
-            last_no_sample_log = None;
-            match extract_movie_frame(sample, frame_index) {
-                Ok(frame) => {
-                    let now = Instant::now();
-                    let delta_ms = now
-                        .checked_duration_since(last_sample_wall)
-                        .map(|delta| delta.as_secs_f64() * 1000.0)
-                        .unwrap_or(0.0);
-                    last_sample_wall = now;
-                    let pts_ms = frame
-                        .timestamp
-                        .map(|pts| format!("{:.2}", pts.as_secs_f64() * 1000.0))
-                        .unwrap_or_else(|| "unknown".to_string());
-                    println!(
-                        "[grim_viewer] movie pipeline sample frame_index={} pts_ms={} delta_ms={:.2}",
-                        frame_index, pts_ms, delta_ms
-                    );
-                    maybe_dump_decoded_frame(
-                        "gstreamer",
-                        &path,
-                        frame_index,
-                        frame.width,
-                        frame.height,
-                        frame.stride as usize,
-                        &frame.pixels,
-                    );
-                    if let Err(err) = event_tx.send(MoviePlaybackEvent::Frame(frame)) {
-                        let _ = event_tx.send(MoviePlaybackEvent::Error(err.to_string()));
-                        break;
-                    }
-                    frame_index = frame_index.saturating_add(1);
-                }
-                Err(err) => {
-                    let _ = event_tx.send(MoviePlaybackEvent::Error(err.to_string()));
-                    break;
-                }
-            }
-        } else {
-            let now = Instant::now();
-            let first_miss = no_sample_since.get_or_insert(now);
-            let idle = now.checked_duration_since(*first_miss).unwrap_or_default();
-
-            let video_eos = video_eos_flag.load(Ordering::Relaxed);
-            let idle_ms = idle.as_secs_f64() * 1000.0;
-            if video_eos && frame_index == 0 {
-                let _ = event_tx.send(MoviePlaybackEvent::Error(
-                    "movie pipeline reached EOS before first frame".to_string(),
-                ));
-                finished = true;
-            } else if frame_index == 0 && idle >= FIRST_FRAME_DEADLINE {
-                let _ = event_tx.send(MoviePlaybackEvent::Error(format!(
-                    "no movie frames decoded after {:.2}ms",
-                    idle_ms
-                )));
-                finished = true;
-            } else if video_eos || idle >= VIDEO_IDLE_EOS_THRESHOLD {
-                if !reported_finished {
-                    if video_eos {
-                        println!(
-                            "[grim_viewer] movie pipeline video stream reached end {}",
-                            path.display()
-                        );
-                    } else {
-                        println!(
-                            "[grim_viewer] movie pipeline idle for {:.2}ms, forcing end {}",
-                            idle_ms,
-                            path.display()
-                        );
-                    }
-                    let _ = event_tx.send(MoviePlaybackEvent::Finished);
-                    reported_finished = true;
-                }
-                finished = true;
-            } else {
-                let should_log = last_no_sample_log
-                    .map(|prev| now.duration_since(prev) >= Duration::from_millis(200))
-                    .unwrap_or(true);
-                if should_log && idle_ms >= 100.0 {
-                    println!(
-                        "[grim_viewer] movie pipeline stalled waiting for sample wait_ms={:.2} frames_sent={}",
-                        idle_ms, frame_index
-                    );
-                    last_no_sample_log = Some(now);
-                }
-            }
-        }
-
-        while let Some(message) = bus.pop() {
-            use gstreamer::MessageView;
-            match message.view() {
-                MessageView::Eos(..) => {
-                    if !reported_finished {
-                        println!(
-                            "[grim_viewer] movie pipeline reached end {}",
-                            path.display()
-                        );
-                        let _ = event_tx.send(MoviePlaybackEvent::Finished);
-                        reported_finished = true;
-                    }
-                    finished = true;
-                    break;
-                }
-                MessageView::Error(err) => {
-                    let debug = err.debug().map(|s| s.to_string());
-                    eprintln!(
-                        "[grim_viewer] movie pipeline error {}: {}",
-                        path.display(),
-                        err.error()
-                    );
-                    if let Some(ref dbg) = debug {
-                        eprintln!(
-                            "[grim_viewer] movie pipeline debug details {}: {}",
-                            path.display(),
-                            dbg
-                        );
-                    }
-                    let mut details = err.error().message().to_string();
-                    if let Some(extra) = debug {
-                        details.push_str(&format!(" (debug: {extra})"));
-                    }
-                    let _ = event_tx.send(MoviePlaybackEvent::Error(details));
-                    finished = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    playbin
-        .set_state(gst::State::Null)
-        .context("failed to stop playback cleanly")?;
-    Ok(())
-}
-
-fn extract_movie_frame(sample: gst::Sample, frame_index: u64) -> Result<MovieFrame> {
-    let caps = sample
-        .caps()
-        .ok_or_else(|| anyhow!("sample missing caps"))?;
-    let info =
-        VideoInfo::from_caps(caps).map_err(|err| anyhow!("invalid caps for sample: {err:?}"))?;
-    static LOG_VIDEO_INFO: Once = Once::new();
-    LOG_VIDEO_INFO.call_once(|| {
-        println!(
-            "[grim_viewer] movie sample caps format={:?} size={}x{} stride={:?}",
-            info.format(),
-            info.width(),
-            info.height(),
-            info.stride()
-        );
-    });
-
-    let buffer = sample
-        .buffer()
-        .ok_or_else(|| anyhow!("sample missing buffer"))?;
-    let map = buffer
-        .map_readable()
-        .map_err(|err| anyhow!("failed to map buffer: {err:?}"))?;
-    let slice = map.as_slice();
-
-    let stride = info.stride()[0];
-    if stride <= 0 {
-        return Err(anyhow!("unexpected stride {} for video frame", stride));
-    }
-    let height = info.height() as usize;
-    let stride_usize = stride as usize;
-    let expected = stride_usize
-        .checked_mul(height)
-        .ok_or_else(|| anyhow!("frame dimensions overflow"))?;
-    if slice.len() < expected {
-        return Err(anyhow!(
-            "mapped buffer {} smaller than expected {expected}",
-            slice.len()
-        ));
-    }
-
-    let mut pixels = vec![0u8; expected];
-    pixels.copy_from_slice(&slice[..expected]);
-
-    let pts = buffer
-        .pts()
-        .map(|clock| Duration::from_nanos(clock.nseconds()));
-    let fps_timestamp = frame_duration_from_fps(info.fps());
-    let timestamp =
-        pts.or_else(|| fps_timestamp.map(|interval| interval.mul_f64(frame_index as f64)));
-
-    let frame = MovieFrame {
-        width: info.width(),
-        height: info.height(),
-        stride: stride as u32,
-        pixels,
-        timestamp,
-    };
-    Ok(frame)
-}
-
-fn frame_duration_from_fps(fps: gst::Fraction) -> Option<Duration> {
-    let numer = fps.numer();
-    let denom = fps.denom();
-    if numer <= 0 || denom <= 0 {
-        return None;
-    }
-    let seconds = (denom as f64) / (numer as f64);
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return None;
-    }
-    Some(Duration::from_secs_f64(seconds))
-}
 
 fn parse_avg_frame_rate(raw: &str) -> Option<Duration> {
     let trimmed = raw.trim();

@@ -2,12 +2,6 @@ use crate::logging::log_line;
 use libc::{c_char, c_double, c_int, c_void, size_t};
 use std::{ffi::CStr, sync::OnceLock};
 
-/// Opaque handle matching Lua's lua_State.
-#[repr(C)]
-pub struct lua_State {
-    _private: [u8; 0],
-}
-
 /// Retail Lua 3.2 uses a `void (*)(void)` callback type for C functions.
 pub(crate) type LuaCFunction = unsafe extern "C" fn();
 pub(crate) type LuaObject = u32;

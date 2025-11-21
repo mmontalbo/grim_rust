@@ -12,8 +12,7 @@ has been shelved while we focus on the minimal intro playback loop.
   The stream only carries the intro playback state needed for the viewer UI.
 - The viewer still understands the GrimStream handshake and renders a minimal
   overlay (Manny trail + current position) when the engine connects. Movie
-  playback defaults to the ffmpeg pipeline; set `GRIM_MOVIE_DECODER=gstreamer`
-  to opt out.
+  playback uses the ffmpeg pipeline.
 
 ## What Was Removed
 - No CLI flags remain for timeline dumps, hotspot demos, or coverage exports.

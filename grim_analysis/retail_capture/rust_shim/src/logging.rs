@@ -67,25 +67,6 @@ impl EventBuilder {
         self
     }
 
-    pub(crate) fn kv_opt(mut self, key: &str, value: Option<impl Display>) -> Self {
-        if let Some(value) = value {
-            let mut value = value.to_string();
-            let needs_quotes = value.contains(|c: char| c.is_whitespace());
-            if needs_quotes {
-                value = value.replace('"', "\\\"");
-                self.fields.push(format!("{key}=\"{value}\""));
-            } else {
-                self.fields.push(format!("{key}={value}"));
-            }
-        }
-        self
-    }
-
-    pub(crate) fn raw(mut self, value: impl Into<String>) -> Self {
-        self.fields.push(value.into());
-        self
-    }
-
     fn finish(self) -> Vec<String> {
         self.fields
     }

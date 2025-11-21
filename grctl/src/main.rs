@@ -55,9 +55,6 @@ enum CommandKind {
     /// Manage the retail Grim Fandango binary.
     #[command(subcommand)]
     Retail(RetailCommand),
-    /// Execute test/validation scripts with standard timeouts.
-    #[command(subcommand)]
-    Check(CheckCommand),
     /// Run or manage scenario harness sessions.
     #[command(subcommand)]
     Scenario(ScenarioCommand),
@@ -169,29 +166,11 @@ struct RetailCopy {
 }
 
 #[derive(Subcommand, Debug)]
-enum CheckCommand {
-    /// Ensure Manny's office resumes after the intro cutscene.
-    IntroResume(CheckArgs),
-    /// Run a managed scenario harness.
-    Scenario(ScenarioArgs),
-}
-
-#[derive(Subcommand, Debug)]
 enum ScenarioCommand {
     /// Run a managed scenario harness.
     Run(ScenarioArgs),
     /// Stop any scenario-managed components still running under grctl.
     Stop,
-}
-
-#[derive(Args, Debug)]
-struct CheckArgs {
-    /// Maximum runtime in seconds before grctl aborts the check (0 disables).
-    #[arg(long, default_value_t = 90)]
-    timeout: u64,
-    /// Additional arguments forwarded to the check script after '--'.
-    #[arg(last = true)]
-    extra_args: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -377,7 +356,6 @@ fn main() -> Result<()> {
         CommandKind::Engine(cmd) => handle_engine(cmd, &paths),
         CommandKind::Viewer(cmd) => handle_viewer(cmd, &paths),
         CommandKind::Retail(cmd) => handle_retail(cmd, &paths),
-        CommandKind::Check(cmd) => handle_check(cmd, &paths),
         CommandKind::Scenario(cmd) => handle_scenario(cmd, &paths),
         CommandKind::Watch(cmd) => handle_watch(cmd, &paths),
         CommandKind::Status => {
@@ -434,20 +412,6 @@ fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
             show_logs(paths, ComponentKind::Retail, args.tail, args.follow)
         }
         RetailCommand::Copy(args) => copy_retail(args, paths),
-    }
-}
-
-fn handle_check(cmd: CheckCommand, paths: &Paths) -> Result<()> {
-    match cmd {
-        CheckCommand::IntroResume(args) => run_tool_script(
-            paths,
-            "python3",
-            "tools/check_intro_resume.py",
-            &args.extra_args,
-            args.timeout,
-            "check:intro_resume",
-        ),
-        CheckCommand::Scenario(args) => run_scenario(paths, args),
     }
 }
 
@@ -1433,12 +1397,14 @@ fn watch_intro_timeline(args: WatchIntroArgs, paths: &Paths) -> Result<()> {
         println!("[grctl] press Ctrl-C to stop the watch and shut down launched components");
     }
 
+    let status_paths = if launch { Some(paths) } else { None };
     let result = run_intro_timeline_loop(
         &engine_path,
         &retail_path,
         from_end,
         poll_interval,
         &shutdown,
+        status_paths,
     );
 
     if launch {
@@ -1525,6 +1491,7 @@ fn run_intro_timeline_loop(
     from_end: bool,
     poll_interval: Duration,
     shutdown: &Arc<AtomicBool>,
+    status_paths: Option<&Paths>,
 ) -> Result<()> {
     let mut engine_pos = start_position(engine_path, from_end);
     let mut retail_pos = start_position(retail_path, from_end);
@@ -1534,6 +1501,8 @@ fn run_intro_timeline_loop(
     let mut first_snapshot = true;
     let mut waiting_for_engine = false;
     let mut waiting_for_retail = false;
+    let mut reported_engine_exit = false;
+    let mut reported_retail_exit = false;
 
     while !shutdown.load(Ordering::SeqCst) {
         let mut changed = false;
@@ -1623,7 +1592,63 @@ fn run_intro_timeline_loop(
             first_snapshot = false;
         }
 
+        if let Some(paths) = status_paths {
+            let engine_log = paths.log_path(ComponentKind::Engine);
+            let retail_log = paths.log_path(ComponentKind::Retail);
+            if !reported_engine_exit {
+                if let Some(state) = load_state(ComponentKind::Engine, paths)? {
+                    if !process_alive(state.pid) {
+                        println!(
+                            "[grctl] grim_engine exited (pid {}, session {}); recent log:",
+                            state.pid, state.session_id
+                        );
+                        print_log_tail(&engine_log, 20);
+                        reported_engine_exit = true;
+                    }
+                }
+            }
+            if !reported_retail_exit {
+                if let Some(state) = load_state(ComponentKind::Retail, paths)? {
+                    if !process_alive(state.pid) {
+                        println!(
+                            "[grctl] retail_game exited (pid {}, session {}); recent log:",
+                            state.pid, state.session_id
+                        );
+                        print_log_tail(&retail_log, 20);
+                        reported_retail_exit = true;
+                    }
+                }
+            }
+        }
+
         thread::sleep(poll_interval);
+    }
+
+    if let Some(paths) = status_paths {
+        let engine_log = paths.log_path(ComponentKind::Engine);
+        let retail_log = paths.log_path(ComponentKind::Retail);
+        if !reported_engine_exit {
+            if let Some(state) = load_state(ComponentKind::Engine, paths)? {
+                if !process_alive(state.pid) {
+                    println!(
+                        "[grctl] grim_engine exited (pid {}, session {}); recent log:",
+                        state.pid, state.session_id
+                    );
+                    print_log_tail(&engine_log, 20);
+                }
+            }
+        }
+        if !reported_retail_exit {
+            if let Some(state) = load_state(ComponentKind::Retail, paths)? {
+                if !process_alive(state.pid) {
+                    println!(
+                        "[grctl] retail_game exited (pid {}, session {}); recent log:",
+                        state.pid, state.session_id
+                    );
+                    print_log_tail(&retail_log, 20);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1665,6 +1690,24 @@ fn read_new_lines(
     }
     *position = Some(new_pos);
     Ok((lines, reset))
+}
+
+fn print_log_tail(path: &Path, lines: usize) {
+    if let Ok(file) = File::open(path) {
+        let reader = BufReader::new(file);
+        let mut buffer: Vec<String> = Vec::with_capacity(lines);
+        for line in reader.lines().flatten() {
+            if buffer.len() == lines {
+                buffer.remove(0);
+            }
+            buffer.push(line);
+        }
+        for line in buffer {
+            println!("  {line}");
+        }
+    } else {
+        println!("  (log {} not readable)", path.display());
+    }
 }
 
 fn parse_intro_timeline_line(line: &str) -> Option<String> {
@@ -1725,32 +1768,6 @@ fn resolve_repo_path(paths: &Paths, path: &Path) -> PathBuf {
     } else {
         paths.repo_root.join(path)
     }
-}
-
-fn run_tool_script(
-    paths: &Paths,
-    program: &str,
-    script: &str,
-    extra_args: &[String],
-    timeout_secs: u64,
-    session_label: &str,
-) -> Result<()> {
-    let script_path = paths.repo_root.join(script);
-    if !script_path.exists() {
-        bail!("tool script not found: {}", script_path.display());
-    }
-    let mut command = Command::new(program);
-    command.arg(script);
-    for arg in extra_args {
-        command.arg(arg);
-    }
-    run_managed_command(
-        command,
-        paths,
-        timeout_secs,
-        session_label,
-        &format!("{program} {script}"),
-    )
 }
 
 fn stop_scenario(paths: &Paths) -> Result<()> {

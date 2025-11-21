@@ -29,8 +29,7 @@ cargo run -p grim_viewer -- \
 - `--retail-stream` defaults to `127.0.0.1:17400`.
 - `--engine-stream` is optional; when omitted the right-hand viewport keeps the
   placeholder overlay.
-- Movie playback defaults to the ffmpeg pipeline. Set
-  `GRIM_MOVIE_DECODER=gstreamer` if you need the old gstreamer path.
+- Movie playback uses the ffmpeg pipeline.
 - Window dimensions seed the initial layout; resize interactively as needed.
 
 ## Implementation Notes

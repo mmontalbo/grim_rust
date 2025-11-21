@@ -17,7 +17,6 @@ Common subcommands:
 - `engine`, `viewer`, and `retail` each support `start`, `stop`, `status`, and
   `logs`. Pass `--tail <n>` to control the initial output and `--follow` (or
   `-f`) to stream updates continuously.
-- `check intro-resume` executes the validation script with a default 90s guard.
 - `scenario run <name>` launches an end-to-end harness; see below for usage tips.
 
 All child processes are launched with a generated session id and a consistent
@@ -88,8 +87,8 @@ detects that a recorded PID has already exited.
 
 - Launchers open append-only log files and run a background reaper that removes
   state and records the process exit code.
-- Scenario and check wrappers run under `cargo run` so the shared logging and
-  timeout handling stay consistent across runs.
+- Scenario wrappers run under `cargo run` so the shared logging and timeout
+  handling stay consistent across runs.
 - All orchestration commands accept `--timeout`. Passing `--timeout 0` disables
   the guard when longer sessions are unavoidable.
 
@@ -97,14 +96,12 @@ detects that a recorded PID has already exited.
 
 1. Extend the scenario harness beyond the intro playback while continuing to
    consolidate shared setup so new runs stay lightweight.
-2. Legacy Python helpers still shell out to `tools/run_dev_install.sh`. Port
-   them to the new `grctl retail` helpers so we can retire the script entirely.
-3. Consider teeing component logs to stdout during startup to complement the
+2. Consider teeing component logs to stdout during startup to complement the
    `grctl logs --follow` workflow for quicker feedback.
-4. There is no `resume` tracking for processes restarted outside `grctl`.
+3. There is no `resume` tracking for processes restarted outside `grctl`.
    Downstream tooling could expose hooks that opt-in components call on clean
    shutdown so we can detect intentional exits vs. crashes.
-5. Configuration is hard-coded; exposing a config file (e.g. target ports) will
+4. Configuration is hard-coded; exposing a config file (e.g. target ports) will
    make it easier to coordinate multiple developers or automated runs.
 
 These items can be filed as incremental follow-ups once we stabilise the
