@@ -15,10 +15,7 @@ pub(super) fn select_playback(
     prepare_viewer_playback(stream, install_root, movie)
 }
 
-pub(super) fn viewer_ready(
-    stream: Option<&Rc<StreamServer>>,
-    expected_generation: u64,
-) -> bool {
+pub(super) fn viewer_ready(stream: Option<&Rc<StreamServer>>, expected_generation: u64) -> bool {
     match stream {
         Some(stream) => {
             stream.current_generation() == expected_generation && stream.viewer_gate().is_ready()

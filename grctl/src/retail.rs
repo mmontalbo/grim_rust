@@ -97,9 +97,7 @@ impl RetailLayout {
 
     pub fn instrumentation_status(&self) -> Result<InstrumentationStatus> {
         let shim_available = self.resolved_shim_path().is_some();
-        Ok(InstrumentationStatus {
-            shim_available,
-        })
+        Ok(InstrumentationStatus { shim_available })
     }
 
     pub fn sync_from(&self, source_override: Option<&Path>, force: bool) -> Result<PathBuf> {
@@ -176,7 +174,6 @@ impl RetailLayout {
         }
         None
     }
-
 }
 
 fn detect_steam_install_path() -> Result<PathBuf> {

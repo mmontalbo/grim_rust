@@ -103,8 +103,8 @@ mod geometry;
 mod geometry_export;
 mod inventory;
 mod menus;
-mod movies;
 mod movement;
+mod movies;
 mod objects;
 mod pause;
 mod scripts;
@@ -118,10 +118,10 @@ use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
 };
 use geometry::SectorHit;
-use movies::{select_playback, viewer_ready};
 use inventory::{InventoryRuntimeAdapter, InventoryRuntimeView, InventoryState};
 use menus::{MenuRegistry, MenuRegistryView, MenuState};
 use movement::{MovementRuntimeAdapter, MovementRuntimeView};
+use movies::{select_playback, viewer_ready};
 use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
 use pause::{PauseLabel, PauseRuntimeView, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeView};
