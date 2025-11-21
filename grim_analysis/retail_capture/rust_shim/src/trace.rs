@@ -1,11 +1,12 @@
 use crate::{
-    logging::log_line,
+    logging::{log_event, log_line, EventBuilder},
     lua_api::{
-        call_real_lua_call, call_real_lua_callfunction, call_real_lua_dobuffer,
-        call_real_lua_dofile, call_real_lua_dostring, call_real_lua_getcfunction,
-        call_real_lua_getglobal, call_real_lua_getobjname, call_real_lua_getref,
-        call_real_lua_push_c_closure, call_real_lua_ref, call_real_lua_setglobal,
-        call_real_lua_settagmethod, LuaCFunction, LuaObject,
+        call_real_lua_call, call_real_lua_callfunction, call_real_lua_collectgarbage,
+        call_real_lua_dobuffer, call_real_lua_dofile, call_real_lua_dostring,
+        call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getobjname,
+        call_real_lua_getref, call_real_lua_push_c_closure, call_real_lua_ref,
+        call_real_lua_setglobal, call_real_lua_settagmethod, call_real_lua_error, LuaCFunction,
+        LuaObject,
     },
     symbol_map::lookup_symbol_from_map,
 };
@@ -29,10 +30,13 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
     let sequence = CLOSURE_PUSH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
     let func_addr = func as *const c_void as usize;
     let origin = ClosureOrigin::new(func as *const c_void);
-    let origin_fragment = format_origin_fragment(Some(&origin));
-
-    log_line(&format!(
-        "event=push_cclosure name={label} seq={sequence:06} func=0x{func_addr:08x} upvalues={upvalues}{origin_fragment}"
+    log_event(add_origin_fields(
+        EventBuilder::new("push_cclosure")
+            .kv("name", label)
+            .kv("push_seq", format!("{sequence:06}"))
+            .kv("func", format!("0x{func_addr:08x}"))
+            .kv("upvalues", upvalues),
+        Some(&origin),
     ));
 
     if !call_real_lua_push_c_closure(func, upvalues) {
@@ -42,7 +46,7 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
 
 pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
     let label = cstr_opt(path).unwrap_or_else(|| "<null>".to_string());
-    log_line(&format!("event=dofile path={label}"));
+    log_event(EventBuilder::new("dofile").kv("path", label));
     forward_int_result("lua_dofile", call_real_lua_dofile(path))
 }
 
@@ -50,7 +54,7 @@ pub(crate) unsafe fn trace_lua_dostring(chunk: *const c_char) -> c_int {
     let snippet = cstr_opt(chunk)
         .map(|s| truncate_for_log(&s, 80))
         .unwrap_or_else(|| "<null>".to_string());
-    log_line(&format!("event=dostring snippet=\"{snippet}\""));
+    log_event(EventBuilder::new("dostring").kv("snippet", snippet));
     forward_int_result("lua_dostring", call_real_lua_dostring(chunk))
 }
 
@@ -60,13 +64,17 @@ pub(crate) unsafe fn trace_lua_dobuffer(
     name: *const c_char,
 ) -> c_int {
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
-    log_line(&format!("event=dobuffer name={label} size={size}"));
+    log_event(
+        EventBuilder::new("dobuffer")
+            .kv("name", label)
+            .kv("size", size),
+    );
     forward_int_result("lua_dobuffer", call_real_lua_dobuffer(buffer, size, name))
 }
 
 pub(crate) unsafe fn trace_lua_call(name: *const c_char) -> c_int {
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
-    log_line(&format!("event=call name={label}"));
+    log_event(EventBuilder::new("call").kv("name", label));
     forward_int_result("lua_call", call_real_lua_call(name))
 }
 
@@ -87,9 +95,12 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                 log_line("lua_setglobal tracker mutex poisoned; skipping cache update");
             }
 
-            log_line(&format!(
-                "event=bind_global name={label} handle=0x{handle:08x} label=global:{label}{origin_fragment}",
-                origin_fragment = format_origin_fragment(origin.as_ref())
+            log_event(add_origin_fields(
+                EventBuilder::new("bind_global")
+                    .kv("name", &label)
+                    .kv("handle", format!("0x{handle:08x}"))
+                    .kv("label", format!("global:{label}")),
+                origin.as_ref(),
             ));
         }
     }
@@ -108,9 +119,13 @@ pub(crate) unsafe fn trace_lua_getglobal(name: *const c_char) -> LuaObject {
 
     if let Ok(mut tracker) = global_access_tracker().lock() {
         if let Some(count) = tracker.record(&label) {
-            log_line(&format!(
-                "event=get_global name={label} handle=0x{handle:08x} label=global:{label} count={count}"
-            ));
+            log_event(
+                EventBuilder::new("get_global")
+                    .kv("name", &label)
+                    .kv("handle", format!("0x{handle:08x}"))
+                    .kv("label", format!("global:{label}"))
+                    .kv("count", count),
+            );
         }
     } else {
         log_line("lua_getglobal tracker mutex poisoned; skipping access log");
@@ -136,15 +151,24 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                     } else {
                         log_line("lua_ref tracker mutex poisoned; skipping cache update");
                     }
-                    log_line(&format!(
-                        "event=store_ref lock={lock} ref={reference} handle=0x{handle:08x} label={label}{origin_fragment}",
-                        origin_fragment = format_origin_fragment(origin.as_ref())
+                    log_event(add_origin_fields(
+                        EventBuilder::new("store_ref")
+                            .kv("lock", lock)
+                            .kv("ref", reference)
+                            .kv("handle", format!("0x{handle:08x}"))
+                            .kv("label", label),
+                        origin.as_ref(),
                     ));
                 }
                 None => {
-                    log_line(&format!(
-                        "event=store_ref lock={lock} ref={reference} handle=<unknown> label=ref:{reference} note=lua_getref_missing"
-                    ));
+                    log_event(
+                        EventBuilder::new("store_ref")
+                            .kv("lock", lock)
+                            .kv("ref", reference)
+                            .kv("handle", "<unknown>")
+                            .kv("label", format!("ref:{reference}"))
+                            .kv("note", "lua_getref_missing"),
+                    );
                 }
             }
             reference
@@ -170,16 +194,22 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             } else {
                 log_line("lua_getref tracker mutex poisoned; skipping cache update");
             }
-            log_line(&format!(
-                "event=fetch_ref ref={reference} handle=0x{handle:08x} label={label}{origin_fragment}",
-                origin_fragment = format_origin_fragment(origin.as_ref())
+            log_event(add_origin_fields(
+                EventBuilder::new("fetch_ref")
+                    .kv("ref", reference)
+                    .kv("handle", format!("0x{handle:08x}"))
+                    .kv("label", label),
+                origin.as_ref(),
             ));
             handle
         }
         None => {
-            log_line(&format!(
-                "event=fetch_ref ref={reference} handle=<unknown> note=lua_getref_symbol_missing"
-            ));
+            log_event(
+                EventBuilder::new("fetch_ref")
+                    .kv("ref", reference)
+                    .kv("handle", "<unknown>")
+                    .kv("note", "lua_getref_symbol_missing"),
+            );
             0
         }
     }
@@ -188,9 +218,27 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
 pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
     let event_label = cstr_opt(event).unwrap_or_else(|| "<null>".to_string());
     if call_real_lua_settagmethod(tag, event) {
-        log_line(&format!(
-            "event=set_tagmethod tag={tag} event_name={event_label}"
-        ));
+        log_event(
+            EventBuilder::new("set_tagmethod")
+                .kv("tag", tag)
+                .kv("event_name", event_label),
+        );
+    }
+}
+
+pub(crate) unsafe fn trace_lua_collectgarbage() {
+    if call_real_lua_collectgarbage() {
+        log_event(EventBuilder::new("collect_garbage"));
+    }
+}
+
+pub(crate) unsafe fn trace_lua_error(message: *const c_char) {
+    let text = cstr_opt(message)
+        .map(|s| truncate_for_log(&s, 120))
+        .unwrap_or_else(|| "<null>".to_string());
+    log_event(EventBuilder::new("lua_error").kv("message", text));
+    if !call_real_lua_error(message) {
+        log_line("lua_error symbol missing; unable to propagate error to Lua VM");
     }
 }
 
@@ -200,17 +248,22 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
 
     if let Ok(mut tracker) = callfunction_tracker().lock() {
         if let Some(sample) = tracker.record(handle, &label) {
-            log_line(&format!(
-                "event=call_func handle=0x{handle:08x} label={label} calls={count}{origin}",
-                count = sample.count,
-                origin = format_origin_fragment(sample.origin.as_ref())
+            log_event(add_origin_fields(
+                EventBuilder::new("call_func")
+                    .kv("handle", format!("0x{handle:08x}"))
+                    .kv("label", label.clone())
+                    .kv("calls", sample.count),
+                sample.origin.as_ref(),
             ));
         }
     } else {
         log_line("lua_callfunction tracker mutex poisoned; falling back to minimal log");
-        log_line(&format!(
-            "event=call_func handle=0x{handle:08x} label={label} note=tracker_poisoned"
-        ));
+        log_event(
+            EventBuilder::new("call_func")
+                .kv("handle", format!("0x{handle:08x}"))
+                .kv("label", label)
+                .kv("note", "tracker_poisoned"),
+        );
     }
 
     forward_int_result("lua_callfunction", call_real_lua_callfunction(handle))
@@ -455,17 +508,37 @@ fn global_access_tracker() -> &'static Mutex<GlobalAccessTracker> {
         .get_or_init(|| Mutex::new(GlobalAccessTracker::new(getglobal_verbose_enabled())))
 }
 
-fn format_origin_fragment(origin: Option<&ClosureOrigin>) -> String {
-    origin
-        .map(|origin| {
-            let fields = origin.format_fields();
-            if fields.is_empty() {
-                String::new()
-            } else {
-                format!(" {fields}")
+fn add_origin_fields(mut builder: EventBuilder, origin: Option<&ClosureOrigin>) -> EventBuilder {
+    if let Some(origin) = origin {
+        builder = builder.kv("origin", format!("0x{addr:08x}", addr = origin.func_addr));
+        if let Some(module) = &origin.module {
+            builder = builder.kv("module", module);
+        }
+        let mut has_symbol = false;
+        if let Some(symbol) = &origin.symbol {
+            has_symbol = true;
+            builder = builder.kv("symbol", symbol);
+            if let Some(demangled) = &origin.demangled {
+                builder = builder.kv("demangled", demangled);
             }
-        })
-        .unwrap_or_default()
+        }
+        if let Some(map_symbol) = &origin.map_symbol {
+            if !has_symbol {
+                let mut value = map_symbol.name.clone();
+                if map_symbol.distance > 0 {
+                    value.push_str(&format!("+0x{delta:x}", delta = map_symbol.distance));
+                }
+                builder = builder.kv("symbol", value);
+                builder = builder.kv(
+                    "symbol_source",
+                    map_symbol.source_label.as_deref().unwrap_or("map"),
+                );
+            } else if let Some(source) = &map_symbol.source_label {
+                builder = builder.kv("map_source", source);
+            }
+        }
+    }
+    builder
 }
 
 #[derive(Clone)]
@@ -494,40 +567,6 @@ impl ClosureOrigin {
             demangled: details.demangled,
             map_symbol,
         }
-    }
-
-    fn format_fields(&self) -> String {
-        let mut parts = Vec::new();
-        parts.push(format!("origin=0x{addr:08x}", addr = self.func_addr));
-        if let Some(module) = &self.module {
-            parts.push(format!("module={module}"));
-        }
-        let mut has_symbol = false;
-        if let Some(symbol) = &self.symbol {
-            has_symbol = true;
-            if let Some(demangled) = &self.demangled {
-                parts.push(format!("symbol={symbol} ({demangled})"));
-            } else {
-                parts.push(format!("symbol={symbol}"));
-            }
-        }
-        if let Some(map_symbol) = &self.map_symbol {
-            if !has_symbol {
-                let mut field = format!("symbol={}", map_symbol.name);
-                if map_symbol.distance > 0 {
-                    field.push_str(&format!("+0x{delta:x}", delta = map_symbol.distance));
-                }
-                if let Some(source) = &map_symbol.source_label {
-                    field.push_str(&format!(" symbol_source={source}"));
-                } else {
-                    field.push_str(" symbol_source=map");
-                }
-                parts.push(field);
-            } else if let Some(source) = &map_symbol.source_label {
-                parts.push(format!("map_source={source}"));
-            }
-        }
-        parts.join(" ")
     }
 }
 

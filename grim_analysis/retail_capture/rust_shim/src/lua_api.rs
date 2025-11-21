@@ -23,6 +23,8 @@ type LuaGetCFunctionFn = unsafe extern "C" fn(LuaObject) -> Option<LuaCFunction>
 type LuaRefFn = unsafe extern "C" fn(c_int) -> c_int;
 type LuaGetRefFn = unsafe extern "C" fn(c_int) -> LuaObject;
 type LuaSetTagMethodFn = unsafe extern "C" fn(c_int, *const c_char);
+type LuaCollectGarbageFn = unsafe extern "C" fn();
+type LuaErrorFn = unsafe extern "C" fn(*const c_char);
 
 static LUA_PUSH_CCLOSURE: OnceLock<Option<LuaPushCClosureFn>> = OnceLock::new();
 static LUA_DOSTRING: OnceLock<Option<LuaDoStringFn>> = OnceLock::new();
@@ -37,6 +39,8 @@ static LUA_GETCFUNCTION: OnceLock<Option<LuaGetCFunctionFn>> = OnceLock::new();
 static LUA_REF: OnceLock<Option<LuaRefFn>> = OnceLock::new();
 static LUA_GETREF: OnceLock<Option<LuaGetRefFn>> = OnceLock::new();
 static LUA_SETTAGMETHOD: OnceLock<Option<LuaSetTagMethodFn>> = OnceLock::new();
+static LUA_COLLECTGARBAGE: OnceLock<Option<LuaCollectGarbageFn>> = OnceLock::new();
+static LUA_ERROR: OnceLock<Option<LuaErrorFn>> = OnceLock::new();
 
 pub(crate) fn call_real_lua_push_c_closure(func: LuaCFunction, upvalues: c_int) -> bool {
     unsafe {
@@ -129,6 +133,36 @@ pub(crate) fn call_real_lua_settagmethod(tag: c_int, event: *const c_char) -> bo
             }
             None => {
                 log_line("lua_settagmethod symbol missing; skipping trace");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_collectgarbage() -> bool {
+    unsafe {
+        match lua_collectgarbage_symbol() {
+            Some(symbol) => {
+                symbol();
+                true
+            }
+            None => {
+                log_line("lua_collectgarbage symbol missing; skipping trace");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_error(message: *const c_char) -> bool {
+    unsafe {
+        match lua_error_symbol() {
+            Some(symbol) => {
+                symbol(message);
+                true
+            }
+            None => {
+                log_line("lua_error symbol missing; skipping trace");
                 false
             }
         }
@@ -262,6 +296,26 @@ fn lua_settagmethod_symbol() -> Option<LuaSetTagMethodFn> {
             label: "lua_settagmethod",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetTagMethodFn>(ptr))
+    })
+}
+
+fn lua_collectgarbage_symbol() -> Option<LuaCollectGarbageFn> {
+    *LUA_COLLECTGARBAGE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_collectgarbage\0",
+            label: "lua_collectgarbage",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCollectGarbageFn>(ptr))
+    })
+}
+
+fn lua_error_symbol() -> Option<LuaErrorFn> {
+    *LUA_ERROR.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_error\0",
+            label: "lua_error",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaErrorFn>(ptr))
     })
 }
 

@@ -6,9 +6,9 @@ mod trace;
 use libc::c_int;
 use lua_api::LuaCFunction;
 use trace::{
-    trace_lua_call, trace_lua_callfunction, trace_lua_dobuffer, trace_lua_dofile,
-    trace_lua_dostring, trace_lua_getglobal, trace_lua_getref, trace_lua_push_closure,
-    trace_lua_ref, trace_lua_setglobal, trace_lua_settagmethod,
+    trace_lua_call, trace_lua_callfunction, trace_lua_collectgarbage, trace_lua_dobuffer,
+    trace_lua_dofile, trace_lua_dostring, trace_lua_error, trace_lua_getglobal, trace_lua_getref,
+    trace_lua_push_closure, trace_lua_ref, trace_lua_setglobal, trace_lua_settagmethod,
 };
 
 #[no_mangle]
@@ -68,6 +68,16 @@ pub unsafe extern "C" fn lua_getref(reference: c_int) -> lua_api::LuaObject {
 #[no_mangle]
 pub unsafe extern "C" fn lua_settagmethod(tag: c_int, event: *const libc::c_char) {
     trace_lua_settagmethod(tag, event)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lua_collectgarbage() {
+    trace_lua_collectgarbage();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lua_error(message: *const libc::c_char) {
+    trace_lua_error(message);
 }
 
 // Retail liblua only exports the capital-C variant; keep a note to avoid re-adding lua_pushcclosure.

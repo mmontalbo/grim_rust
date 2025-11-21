@@ -7,6 +7,26 @@ engine makes to `lua_pushCclosure`, `lua_setglobal`, and the `lua_do*` /
 helper the engine installs into the Lua VM and track which scripts are loaded
 without modifying the game's assets.
 
+## Trace schema (shared across retail + Rust engines)
+- Every line is `engine=retail vm_id=lua32 seq=<counter> event=<name> ...` with
+  key/value pairs; values containing whitespace are quoted and escaped. A
+  monotonic `ts=<millis>` is included for temporal alignment.
+- Common fields: `handle=0x...`, `label=<callable label>`, `origin=0x...`,
+  `module=<shared object>`, `symbol=<mangled>`, `demangled=<pretty C++ signature>`,
+  `symbol_source=map` / `map_source=<filename>` when a provided symbol map
+  resolved the name; per-event extras like `push_seq`, `calls`, `ref`, `lock`
+  track local counters.
+- The retail shim always emits `engine=retail` and `vm_id=lua32`; instrument the
+  Rust engine side to emit `engine=rust` and reuse the same field names so
+  traces align 1:1.
+- Verbosity toggles: `GRIM_SHIM_GETGLOBAL_VERBOSE=1` logs every `lua_getglobal`;
+  `GRIM_SHIM_CALLFUNCTION_VERBOSE=1` logs every `lua_callfunction` instead of
+  milestone counts only. `GRIM_SHIM_LOG=/path` redirects output to a file.
+- A quick diff helper lives at `tools/trace_diff.py`:
+  `./tools/trace_diff.py retail.log rust.log [--ignore field] [--context N]`
+  reports the first mismatch and prints ±N lines of context (defaults ignore
+  `seq`/`ts` since they diverge across runs).
+
 ## How It Works
 - Build a `cdylib` that exports the same symbols as libLua (`lua_pushCclosure`
   plus the main `lua_do*`/`lua_call*` entry points).
