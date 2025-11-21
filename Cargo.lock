@@ -1077,6 +1077,7 @@ dependencies = [
  "grim_analysis",
  "grim_formats",
  "grim_stream",
+ "libc",
  "mlua",
  "regex",
  "serde",

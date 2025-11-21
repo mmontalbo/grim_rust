@@ -1,5 +1,6 @@
 mod context;
 mod state_update;
+mod telemetry;
 mod types;
 
 pub use context::AudioCallback;

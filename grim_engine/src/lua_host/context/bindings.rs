@@ -25,6 +25,7 @@ pub(crate) fn install_globals(
     install_actor_scaffold(lua, context.clone(), system_key.clone()).map_err(|err| anyhow!(err))?;
     let dofile_context = context.clone();
     let wrapped_dofile = lua.create_function(move |lua_ctx, path: String| -> LuaResult<Value> {
+        log_event(EventBuilder::new("dofile").kv("path", &path));
         if let Some(value) =
             handle_special_dofile(lua_ctx, &path, dofile_context.clone(), system_key.clone())?
         {
@@ -585,6 +586,11 @@ fn execute_script<'lua>(lua: &'lua Lua, path: &Path) -> LuaResult<Option<Value<'
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("script");
+    log_event(
+        EventBuilder::new("dobuffer")
+            .kv("name", chunk_name)
+            .kv("size", bytes.len()),
+    );
     let eval_result = if path.to_string_lossy().ends_with(".decompiled.lua") {
         let source = String::from_utf8_lossy(&bytes);
         let script = normalize_legacy_lua(&source);
@@ -4606,6 +4612,7 @@ use std::rc::Rc;
 
 use anyhow::{anyhow, Context, Result};
 use grim_analysis::resources::normalize_legacy_lua;
+use crate::lua_host::telemetry::{log_event, EventBuilder};
 use mlua::{
     Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Thread,
     ThreadStatus, Value, Variadic,
