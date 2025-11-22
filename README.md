@@ -27,16 +27,12 @@ flow and prototype modern tooling around it.
     and links to historical runtime demo notes.
   - `docs/live_streaming_pipeline.md` records the current live-preview stack and
     the pieces that were intentionally removed.
-- `tools/` – repo-level utilities such as `tools/wip_summary.py` for the current
-  project plan and `tools/sync_assets.sh` for asset preparation.
+- `tools/` – repo-level utilities such as `tools/sync_assets.sh` for asset
+  preparation and commit helpers.
 
 ## Development
 - Run workspace checks from inside `nix-shell`: `cargo fmt` and `cargo test` (or
   crate-specific commands) keep the tree tidy.
-- Run `tools/wip_summary.py` to review the current project focus before diving
-  into a new task. When priorities shift, update the milestone sections in
-  `tools/wip_summary.py` so the next contributor sees the Manny office goal
-  without chasing context in the commit log.
 - Run `tools/install_git_hooks.sh` once to install the shared `commit-msg` hook;
   it calls `tools/lint_commit.py` so commits without Why/What bullets are
   rejected instead of slipping into history.
