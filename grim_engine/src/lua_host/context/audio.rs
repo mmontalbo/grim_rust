@@ -1,30 +1,11 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::rc::Rc;
 
 use anyhow::Result;
 use mlua::{Lua, Table, Value, Variadic};
 
-use crate::geometry_snapshot::{
-    LuaMusicCueSnapshot, LuaMusicSnapshot, LuaSfxInstanceSnapshot, LuaSfxSnapshot,
-};
-
 use super::{describe_value, split_self, value_to_f32, value_to_string, EngineContext};
-
-/// Minimal adapter for routing audio events to interested observers.
-pub trait AudioCallback {
-    fn music_play(&self, _cue: &str, _params: &[String]) {}
-    fn music_stop(&self, _mode: Option<&str>) {}
-    fn sfx_play(&self, _cue: &str, _params: &[String], _handle: &str) {}
-    fn sfx_stop(&self, _target: Option<&str>) {}
-}
-
-impl fmt::Debug for dyn AudioCallback {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AudioCallback")
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(super) struct MusicCueSnapshot {
@@ -476,15 +457,13 @@ pub(super) fn format_music_detail(action: &str, cue: &str, params: &[String]) ->
 
 #[derive(Debug)]
 pub(super) struct AudioRuntime {
-    callback: Option<Rc<dyn AudioCallback>>,
     music: MusicState,
     sfx: SfxState,
 }
 
 impl AudioRuntime {
-    pub(super) fn new(callback: Option<Rc<dyn AudioCallback>>) -> Self {
+    pub(super) fn new() -> Self {
         Self {
-            callback,
             music: MusicState::default(),
             sfx: SfxState::default(),
         }
@@ -510,9 +489,6 @@ impl AudioRuntime {
         self.music.current = Some(snapshot);
         let detail = format_music_detail("play", &track, &params);
         self.music.history.push(detail);
-        if let Some(callback) = self.callback.as_ref() {
-            callback.music_play(&track, &params);
-        }
         format!("music.play {}", track)
     }
 
@@ -535,9 +511,6 @@ impl AudioRuntime {
             _ => "stop".to_string(),
         };
         self.music.history.push(history_entry.clone());
-        if let Some(callback) = self.callback.as_ref() {
-            callback.music_stop(mode.as_deref());
-        }
         match mode.as_deref() {
             Some(value) if !value.is_empty() => format!("music.stop {}", value),
             _ => "music.stop".to_string(),
@@ -665,14 +638,10 @@ impl AudioRuntime {
             format!("sfx.play {} [{}] -> {}", cue, params.join(", "), handle)
         };
         self.sfx.history.push(detail);
-        if let Some(callback) = self.callback.as_ref() {
-            callback.sfx_play(&cue, &params, &handle);
-        }
         (handle, format!("sfx.play {}", cue))
     }
 
     pub(super) fn stop_sound_effect(&mut self, target: Option<String>) -> String {
-        let requested = target.clone();
         let mut label = String::from("sfx.stop");
         if let Some(spec) = target {
             if let Some(instance) = self.sfx.active.remove(&spec) {
@@ -697,9 +666,6 @@ impl AudioRuntime {
             label.push_str(" all");
         }
         self.sfx.history.push(label.clone());
-        if let Some(callback) = self.callback.as_ref() {
-            callback.sfx_stop(requested.as_deref());
-        }
         label
     }
 
@@ -769,7 +735,7 @@ impl AudioRuntime {
 
 impl Default for AudioRuntime {
     fn default() -> Self {
-        Self::new(None)
+        Self::new()
     }
 }
 
@@ -942,28 +908,6 @@ pub(super) fn install_music_scaffold(lua: &Lua, context: Rc<RefCell<EngineContex
     Ok(())
 }
 
-impl MusicState {
-    pub(super) fn to_snapshot(&self) -> LuaMusicSnapshot {
-        let current = self.current.as_ref().map(|cue| cue.to_snapshot());
-        let queued = self
-            .queued
-            .iter()
-            .map(|cue| cue.to_snapshot())
-            .collect::<Vec<_>>();
-        let muted_groups = self.muted_groups.iter().cloned().collect::<Vec<_>>();
-        LuaMusicSnapshot {
-            current,
-            queued,
-            current_state: self.current_state.clone(),
-            state_stack: self.state_stack.clone(),
-            paused: self.paused,
-            muted_groups,
-            volume: self.volume,
-            history: self.history.clone(),
-        }
-    }
-}
-
 /// Couples the audio runtime with the engine event log so call sites stay lean.
 pub(super) struct AudioRuntimeAdapter<'a> {
     runtime: &'a mut AudioRuntime,
@@ -1077,38 +1021,5 @@ impl<'a> AudioRuntimeAdapter<'a> {
 
     pub(super) fn sfx_mut(&mut self) -> &mut SfxState {
         self.runtime.sfx_mut()
-    }
-}
-
-impl MusicCueSnapshot {
-    fn to_snapshot(&self) -> LuaMusicCueSnapshot {
-        LuaMusicCueSnapshot {
-            name: self.name.clone(),
-            parameters: self.parameters.clone(),
-        }
-    }
-}
-
-impl SfxState {
-    pub(super) fn to_snapshot(&self) -> LuaSfxSnapshot {
-        let active = self
-            .active
-            .values()
-            .map(|instance| instance.to_snapshot())
-            .collect::<Vec<_>>();
-        LuaSfxSnapshot {
-            active,
-            history: self.history.clone(),
-        }
-    }
-}
-
-impl SfxInstance {
-    fn to_snapshot(&self) -> LuaSfxInstanceSnapshot {
-        LuaSfxInstanceSnapshot {
-            handle: self.handle.clone(),
-            cue: self.cue.clone(),
-            parameters: self.parameters.clone(),
-        }
     }
 }

@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use crossbeam_channel;
 use crossbeam_channel::{Receiver, Sender};
 use image::codecs::png::PngEncoder;
@@ -517,7 +517,6 @@ fn probe_video_properties(path: &Path) -> Result<(u32, u32, Option<Duration>)> {
 
     Ok((width, height, frame_interval))
 }
-
 
 fn parse_avg_frame_rate(raw: &str) -> Option<Duration> {
     let trimmed = raw.trim();

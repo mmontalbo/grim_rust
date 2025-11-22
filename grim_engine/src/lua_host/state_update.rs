@@ -1,9 +1,8 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use anyhow::Result;
-use grim_stream::{CommentaryState, CoverageCounter, StateUpdate, TubeState};
+use grim_stream::{CommentaryState, StateUpdate, TubeState};
 
 use super::context::{EngineContext, EngineContextHandle, TubeStateSnapshot};
 
@@ -11,7 +10,6 @@ use super::context::{EngineContext, EngineContextHandle, TubeStateSnapshot};
 pub struct StateUpdateBuilder {
     context_handle: EngineContextHandle,
     event_cursor: usize,
-    prev_coverage: BTreeMap<String, u64>,
     last_position: Option<[f32; 3]>,
     last_yaw: Option<f32>,
     last_setup: Option<String>,
@@ -25,15 +23,10 @@ pub struct StateUpdateBuilder {
 }
 
 impl StateUpdateBuilder {
-    pub fn new(
-        context_handle: EngineContextHandle,
-        initial_event_cursor: usize,
-        initial_coverage: BTreeMap<String, u64>,
-    ) -> Self {
+    pub fn new(context_handle: EngineContextHandle, initial_event_cursor: usize) -> Self {
         Self {
             context_handle,
             event_cursor: initial_event_cursor,
-            prev_coverage: initial_coverage,
             last_position: None,
             last_yaw: None,
             last_setup: None,
@@ -63,7 +56,6 @@ impl StateUpdateBuilder {
             tube_state,
             events_len,
             mut new_events,
-            coverage_samples,
             active_movie_opt,
         ) = {
             let ctx = context.borrow();
@@ -93,12 +85,6 @@ impl StateUpdateBuilder {
                 Vec::new()
             };
 
-            let coverage_samples: Vec<(String, u64)> = ctx
-                .coverage_counts()
-                .iter()
-                .map(|(key, value)| (key.clone(), *value))
-                .collect();
-
             let active_movie_opt = ctx.active_fullscreen_movie();
             let commentary_state = ctx.commentary_snapshot().map(|snapshot| CommentaryState {
                 label: snapshot.label,
@@ -121,20 +107,11 @@ impl StateUpdateBuilder {
                 tube_state,
                 events_len,
                 new_events,
-                coverage_samples,
                 active_movie_opt,
             )
         };
 
         self.event_cursor = events_len;
-
-        let mut coverage_updates = Vec::new();
-        for (key, value) in coverage_samples {
-            let previous = self.prev_coverage.insert(key.clone(), value);
-            if !self.sent_initial || previous != Some(value) {
-                coverage_updates.push(CoverageCounter { key, value });
-            }
-        }
 
         let mut changed = !self.sent_initial;
 
@@ -165,10 +142,6 @@ impl StateUpdateBuilder {
 
         if self.last_hotspot.as_deref() != active_hotspot_opt.as_deref() {
             self.last_hotspot = active_hotspot_opt.clone();
-            changed = true;
-        }
-
-        if !coverage_updates.is_empty() {
             changed = true;
         }
 
@@ -217,7 +190,6 @@ impl StateUpdateBuilder {
             active_hotspot: self.last_hotspot.clone(),
             commentary: self.last_commentary.clone(),
             tube: self.last_tube_state.clone(),
-            coverage: coverage_updates,
             events: new_events,
             active_movie: self.last_movie.clone(),
         };

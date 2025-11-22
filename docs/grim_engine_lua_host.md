@@ -13,7 +13,7 @@ this note as a quick map of what remains relevant.
   through `StateUpdateBuilder`, and either publishes them over the bound stream
   or prints fresh events when running headless.
 - `EngineContextHandle` now only exposes the tiny set of helpers needed by
-  `StateUpdateBuilder` (actor lookup, hotspot state, coverage counters).
+  `StateUpdateBuilder` (actor lookup and hotspot state).
 
 ## Module Layout
 - `context/` holds the gameplay state and binding glue. Many modules remain
@@ -26,8 +26,8 @@ this note as a quick map of what remains relevant.
 
 ## Out of Scope
 - JSON exporters (`timeline`, `movement`, `geometry`, …) are no longer wired
-  up. Leave the stale helpers in place only if they keep the intro boot alive;
-  rip the rest out when warnings point at them.
+  up; pull them from history if they become relevant again instead of reviving
+  the old entry points.
 - Hotspot and movement demos are gone from the CLI. If you need them back, pull
   from history and reintroduce them as focused modules rather than reviving
   broad entry points.

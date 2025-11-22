@@ -37,8 +37,6 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         lab_root.as_deref(),
         verbose,
         headless,
-        None,
-        None,
         stream,
         stream_ready_file,
     )?;

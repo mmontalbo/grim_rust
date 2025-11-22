@@ -502,10 +502,6 @@ impl<'a> CutsceneRuntimeView<'a> {
         self.runtime.commentary()
     }
 
-    pub(super) fn cut_scene_stack(&self) -> &[CutSceneRecord] {
-        self.runtime.cut_scene_stack()
-    }
-
     pub(super) fn fullscreen_movie_name(&self) -> Option<&str> {
         self.runtime
             .fullscreen_movie

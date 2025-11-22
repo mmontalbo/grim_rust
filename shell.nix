@@ -76,14 +76,6 @@ let
     '';
   };
 
-  gstPackages = [
-    pkgs.gst_all_1.gstreamer
-    pkgs.gst_all_1.gst-plugins-base
-    pkgs.gst_all_1.gst-plugins-good
-    pkgs.gst_all_1.gst-plugins-bad
-    pkgs.gst_all_1.gst-libav
-  ];
-
   pythonWithImaging = pkgs.python3.withPackages (ps: with ps; [
     pillow
     numpy
@@ -135,7 +127,6 @@ in pkgs.mkShell {
     imagemagick
     tesseract4
     ]
-    ++ gstPackages
   );
 
   shellHook = ''
@@ -154,16 +145,7 @@ in pkgs.mkShell {
       pkgs.xorg.libXinerama
       pkgs.xorg.libXxf86vm
       pkgs.xorg.libXtst
-      (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
-      (pkgs.lib.getLib pkgs.gst_all_1.gst-plugins-base)
-      (pkgs.lib.getLib pkgs.gst_all_1.gst-plugins-good)
-      (pkgs.lib.getLib pkgs.gst_all_1.gst-plugins-bad)
-      (pkgs.lib.getLib pkgs.gst_all_1.gst-libav)
     ]}:$LD_LIBRARY_PATH"
-
-    export GST_PLUGIN_SYSTEM_PATH_1_0="${pkgs.lib.concatStringsSep ":" (map (pkg: "${pkgs.lib.getLib pkg}/lib/gstreamer-1.0") gstPackages)}"
-    export GST_PLUGIN_PATH="$GST_PLUGIN_SYSTEM_PATH_1_0"
-    export GST_PLUGIN_SCANNER="${pkgs.gst_all_1.gstreamer}/libexec/gstreamer-1.0/gst-plugin-scanner"
 
     if command -v git >/dev/null 2>&1; then
       REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"

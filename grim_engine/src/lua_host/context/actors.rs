@@ -238,14 +238,6 @@ impl ActorStore {
     pub(super) fn is_actor_moving(&self, handle: u32) -> bool {
         self.moving_actors.contains(&handle)
     }
-
-    pub(super) fn clone_map(&self) -> BTreeMap<String, ActorSnapshot> {
-        self.actors.clone()
-    }
-
-    pub(super) fn clone_handles(&self) -> BTreeMap<u32, String> {
-        self.handles.clone()
-    }
 }
 
 fn canonicalize_actor_label(label: &str) -> String {

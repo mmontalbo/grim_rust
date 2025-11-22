@@ -125,20 +125,6 @@ impl<'a> SetRuntimeView<'a> {
     pub(super) fn setup_label_for(&self, set_file: &str, index: i32) -> Option<String> {
         self.runtime.setup_label_for(set_file, index)
     }
-
-    pub(super) fn snapshot(&self) -> SetRuntimeSnapshot {
-        self.runtime.snapshot()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SetRuntimeSnapshot {
-    pub(crate) current_set: Option<SetSnapshot>,
-    pub(crate) loaded_sets: BTreeSet<String>,
-    pub(crate) current_setups: BTreeMap<String, i32>,
-    pub(crate) available_sets: BTreeMap<String, SetDescriptor>,
-    pub(crate) set_geometry: BTreeMap<String, ParsedSetGeometry>,
-    pub(crate) sector_states: BTreeMap<String, BTreeMap<String, bool>>,
 }
 
 #[derive(Debug)]
@@ -329,17 +315,6 @@ impl SetRuntime {
 
     pub(crate) fn set_geometry(&self) -> &BTreeMap<String, ParsedSetGeometry> {
         &self.set_geometry
-    }
-
-    pub(crate) fn snapshot(&self) -> SetRuntimeSnapshot {
-        SetRuntimeSnapshot {
-            current_set: self.current_set.clone(),
-            loaded_sets: self.loaded_sets.clone(),
-            current_setups: self.current_setups.clone(),
-            available_sets: self.available_sets.clone(),
-            set_geometry: self.set_geometry.clone(),
-            sector_states: self.sector_states.clone(),
-        }
     }
 
     pub(crate) fn point_in_active_walk(&self, set_file: &str, point: (f32, f32)) -> bool {

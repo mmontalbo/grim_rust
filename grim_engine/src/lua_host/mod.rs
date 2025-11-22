@@ -3,11 +3,9 @@ mod state_update;
 mod telemetry;
 mod types;
 
-pub use context::AudioCallback;
-
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -72,8 +70,6 @@ pub fn run_boot_sequence(
     lab_root: Option<&Path>,
     verbose: bool,
     headless: bool,
-    geometry_json: Option<&Path>,
-    audio_callback: Option<Rc<dyn AudioCallback>>,
     stream: Option<Rc<StreamServer>>,
     stream_ready: Option<PathBuf>,
 ) -> Result<Option<EngineRuntime>> {
@@ -115,7 +111,6 @@ pub fn run_boot_sequence(
         verbose,
         headless,
         lab_collection,
-        audio_callback,
         lab_root_path.clone(),
         tube_pose_aliases.clone(),
     )));
@@ -151,15 +146,6 @@ pub fn run_boot_sequence(
     let snapshot = context.borrow();
     context::dump_runtime_summary(&snapshot);
     let initial_event_cursor = snapshot.events().len();
-    let initial_coverage = snapshot.coverage_counts().clone();
-    if let Some(path) = geometry_json {
-        let snapshot_data = snapshot.geometry_snapshot();
-        let json = serde_json::to_string_pretty(&snapshot_data)
-            .context("serializing Lua geometry snapshot to JSON")?;
-        fs::write(path, &json)
-            .with_context(|| format!("writing Lua geometry snapshot to {}", path.display()))?;
-        println!("Saved Lua geometry snapshot to {}", path.display());
-    }
     drop(snapshot);
 
     let runtime_needed = headless || stream.is_some();
@@ -177,7 +163,6 @@ pub fn run_boot_sequence(
             stream.clone(),
             headless,
             initial_event_cursor,
-            initial_coverage.clone(),
             start_gate,
             defer_intro_playback,
             tube_pose_aliases.clone(),
@@ -216,7 +201,6 @@ impl EngineRuntime {
         stream: Option<Rc<StreamServer>>,
         headless: bool,
         initial_event_cursor: usize,
-        initial_coverage: BTreeMap<String, u64>,
         start_gate: Option<StreamReadyGate>,
         defer_intro_cutscene: bool,
         tube_pose_aliases: TubePoseAliasCache,
@@ -244,11 +228,7 @@ impl EngineRuntime {
             stream,
             headless,
             frame: 0,
-            state_builder: StateUpdateBuilder::new(
-                context_handle,
-                initial_event_cursor,
-                initial_coverage,
-            ),
+            state_builder: StateUpdateBuilder::new(context_handle, initial_event_cursor),
             start_gate,
             viewer_gate,
             movie_controls,

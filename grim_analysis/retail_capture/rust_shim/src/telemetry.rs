@@ -1,8 +1,8 @@
 use crate::{
     logging::log_line,
     lua_api::{
-        call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getparam,
-        call_real_lua_getnumber, call_real_lua_getstring, call_real_lua_isnil,
+        call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getnumber,
+        call_real_lua_getparam, call_real_lua_getstring, call_real_lua_isnil,
         call_real_lua_isnumber, call_real_lua_isstring, call_real_lua_push_c_closure,
         call_real_lua_setglobal, LuaCFunction,
     },

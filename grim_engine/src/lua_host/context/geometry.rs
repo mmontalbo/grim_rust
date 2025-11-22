@@ -263,12 +263,3 @@ impl SectorHit {
         }
     }
 }
-
-pub(super) fn sector_kind_label(kind: SetSectorKind) -> &'static str {
-    match kind {
-        SetSectorKind::Walk => "walk",
-        SetSectorKind::Camera => "camera",
-        SetSectorKind::Special => "special",
-        SetSectorKind::Other => "other",
-    }
-}

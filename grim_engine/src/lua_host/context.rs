@@ -1,6 +1,6 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 pub(super) type TubePoseAliasCache = Rc<RefCell<Option<BTreeMap<String, String>>>>;
@@ -100,7 +100,6 @@ mod audio;
 mod bindings;
 mod cutscenes;
 mod geometry;
-mod geometry_export;
 mod inventory;
 mod menus;
 mod movement;
@@ -112,21 +111,20 @@ mod sets;
 
 use achievements::{AchievementRuntime, AchievementRuntimeAdapter, AchievementRuntimeView};
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
-pub use audio::AudioCallback;
-use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView, MusicState, SfxState};
+use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView};
 use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
     FullscreenMoviePlayback,
 };
 use geometry::SectorHit;
-use inventory::{InventoryRuntimeAdapter, InventoryRuntimeView, InventoryState};
+use inventory::{InventoryRuntimeAdapter, InventoryState};
 use menus::{MenuRegistry, MenuRegistryView, MenuState};
 use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 use movies::{select_playback, viewer_ready};
 use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
 use pause::{PauseLabel, PauseRuntimeView, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeView};
-use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeSnapshot, SetRuntimeView};
+use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeView};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene,
@@ -135,10 +133,9 @@ pub(super) use bindings::{
 };
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
-use crate::geometry_snapshot::LuaGeometrySnapshot;
 use crate::lab_collection::LabCollection;
 use crate::stream::StreamServer;
-use grim_analysis::resources::{ResourceGraph, SetMetadata};
+use grim_analysis::resources::ResourceGraph;
 use grim_stream::{MovieAction, MovieControl};
 use mlua::RegistryKey;
 
@@ -165,96 +162,6 @@ impl EngineContextHandle {
     }
 }
 
-#[derive(Debug, Default)]
-struct CoverageTracker {
-    counts: BTreeMap<String, u64>,
-    script_lookup: HashMap<String, String>,
-    actor_lookup: HashMap<String, String>,
-    set_aliases: HashMap<String, String>,
-    set_registry: HashMap<String, SetCoverageEntry>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct SetCoverageEntry {
-    base_key: String,
-    hook_keys: HashMap<String, String>,
-    setup_by_index: HashMap<i32, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SetHookDescriptor {
-    pub lookup_key: String,
-    pub category: HookCategory,
-}
-
-impl SetHookDescriptor {
-    fn coverage_key(&self, canonical_set: &str) -> String {
-        match &self.category {
-            HookCategory::Enter => format!("set:{canonical_set}:hook:enter"),
-            HookCategory::Exit => format!("set:{canonical_set}:hook:exit"),
-            HookCategory::CameraChange => format!("set:{canonical_set}:hook:camera_change"),
-            HookCategory::Setup { name } => {
-                format!("set:{canonical_set}:hook:setup:{name}")
-            }
-            HookCategory::Other { name } => {
-                format!("set:{canonical_set}:hook:other:{name}")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum HookCategory {
-    Enter,
-    Exit,
-    CameraChange,
-    Setup { name: String },
-    Other { name: String },
-}
-
-/// Normalize a set hook method name and map it into a coverage category.
-///
-/// The helper trims whitespace, lowercases characters, and ignores underscores
-/// so variants like `CameraChange`, `camera_change`, or `cameraChange` all land
-/// in the same bucket. Hook keys keep the original trimmed name where we need to
-/// surface user-facing labels (e.g. `setup:SetupActors` retains its casing).
-pub(super) fn describe_set_hook(method_name: &str) -> Option<SetHookDescriptor> {
-    let normalized = grim_analysis::normalize_hook_name(method_name)?;
-
-    if normalized.simplified == "enter" {
-        Some(SetHookDescriptor {
-            lookup_key: "enter".to_string(),
-            category: HookCategory::Enter,
-        })
-    } else if normalized.simplified == "exit" {
-        Some(SetHookDescriptor {
-            lookup_key: "exit".to_string(),
-            category: HookCategory::Exit,
-        })
-    } else if normalized.simplified == "camerachange" {
-        Some(SetHookDescriptor {
-            lookup_key: "camera_change".to_string(),
-            category: HookCategory::CameraChange,
-        })
-    } else if normalized.normalized.starts_with("set_up")
-        || normalized.normalized.starts_with("setup")
-    {
-        Some(SetHookDescriptor {
-            lookup_key: format!("setup:{}", normalized.normalized),
-            category: HookCategory::Setup {
-                name: normalized.trimmed,
-            },
-        })
-    } else {
-        Some(SetHookDescriptor {
-            lookup_key: format!("other:{}", normalized.normalized),
-            category: HookCategory::Other {
-                name: normalized.trimmed,
-            },
-        })
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub(super) struct CommentarySnapshot {
     pub label: Option<String>,
@@ -276,22 +183,8 @@ struct MannyOfficeState {
 
 #[cfg(test)]
 mod hook_tests {
-    use super::{describe_set_hook, normalize_tube_event, HookCategory};
+    use super::normalize_tube_event;
     use std::collections::BTreeMap;
-
-    #[test]
-    fn classify_enter_case_insensitive() {
-        let descriptor = describe_set_hook(" Enter ").expect("descriptor");
-        assert_eq!(descriptor.lookup_key, "enter");
-        assert_eq!(descriptor.category, HookCategory::Enter);
-    }
-
-    #[test]
-    fn classify_exit_when_uppercase() {
-        let descriptor = describe_set_hook("EXIT").expect("descriptor");
-        assert_eq!(descriptor.lookup_key, "exit");
-        assert_eq!(descriptor.category, HookCategory::Exit);
-    }
 
     #[test]
     fn normalize_tube_event_translates_numeric_chore() {
@@ -304,289 +197,6 @@ mod hook_tests {
             "actor.motx083tube.complete_chore mo_tube_set_closed_w_can mo_tube.cos"
         );
     }
-
-    #[test]
-    fn classify_camera_change_with_underscore() {
-        let descriptor = describe_set_hook("camera_change").expect("descriptor");
-        assert_eq!(descriptor.lookup_key, "camera_change");
-        assert_eq!(descriptor.category, HookCategory::CameraChange);
-    }
-
-    #[test]
-    fn classify_setup_prefix_variants() {
-        let with_underscore = describe_set_hook("set_up_meche").expect("descriptor");
-        assert_eq!(with_underscore.lookup_key, "setup:set_up_meche");
-        assert_eq!(
-            with_underscore.category,
-            HookCategory::Setup {
-                name: "set_up_meche".to_string()
-            }
-        );
-
-        let compact = describe_set_hook("setup_actors").expect("descriptor");
-        assert_eq!(compact.lookup_key, "setup:setup_actors");
-        assert_eq!(
-            compact.category,
-            HookCategory::Setup {
-                name: "setup_actors".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn classify_other_names() {
-        let descriptor = describe_set_hook("watch_manny").expect("descriptor");
-        assert_eq!(descriptor.lookup_key, "other:watch_manny");
-        assert_eq!(
-            descriptor.category,
-            HookCategory::Other {
-                name: "watch_manny".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn ignore_blank_names() {
-        assert!(describe_set_hook("   ").is_none());
-    }
-}
-
-impl CoverageTracker {
-    fn from_resources(resources: &ResourceGraph) -> Self {
-        let mut tracker = CoverageTracker::default();
-        for script in &resources.year_scripts {
-            tracker.register_script(script, format!("script:year:{script}"));
-        }
-        for script in &resources.menu_scripts {
-            tracker.register_script(script, format!("script:menu:{script}"));
-        }
-        for script in &resources.room_scripts {
-            tracker.register_script(script, format!("script:room:{script}"));
-        }
-        for actor in &resources.actors {
-            tracker.register_actor(&actor.variable_name, &actor.label);
-        }
-        for set in &resources.sets {
-            tracker.register_set(set);
-        }
-        tracker
-    }
-
-    fn counts(&self) -> &BTreeMap<String, u64> {
-        &self.counts
-    }
-
-    fn mark_script_name(&mut self, script: &str) {
-        let normalized = Self::normalize_script_identifier(script);
-        self.mark_script_candidates(&normalized);
-    }
-
-    fn mark_script_path(&mut self, path: &Path) {
-        let normalized = path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
-        self.mark_script_candidates(&normalized);
-    }
-
-    fn mark_actor(&mut self, identifier: &str, label: &str) {
-        let mut candidates = Vec::new();
-        Self::push_unique(&mut candidates, identifier.to_ascii_lowercase());
-        Self::push_unique(&mut candidates, label.to_ascii_lowercase());
-        Self::push_unique(&mut candidates, Self::normalize_actor_label(label));
-        for candidate in candidates {
-            if let Some(key) = self.actor_lookup.get(&candidate).cloned() {
-                self.increment(&key);
-                break;
-            }
-        }
-    }
-
-    fn mark_set(&mut self, set_identifier: &str) {
-        if let Some(key) = self
-            .resolve_set_entry(set_identifier)
-            .map(|entry| entry.base_key.clone())
-        {
-            self.increment(&key);
-        }
-    }
-
-    fn mark_set_setup(&mut self, set_identifier: &str, setup: i32) {
-        if let Some(key) = self
-            .resolve_set_entry(set_identifier)
-            .and_then(|entry| entry.setup_by_index.get(&setup).cloned())
-        {
-            self.increment(&key);
-        }
-    }
-
-    fn mark_set_hook(&mut self, set_identifier: &str, lookup_key: &str) {
-        if let Some(key) = self
-            .resolve_set_entry(set_identifier)
-            .and_then(|entry| entry.hook_keys.get(lookup_key).cloned())
-        {
-            self.increment(&key);
-        }
-    }
-
-    fn register_script(&mut self, script: &str, key: String) {
-        let normalized = Self::normalize_script_identifier(script);
-        self.script_lookup.insert(normalized.clone(), key.clone());
-        if let Some(stem) = normalized.strip_suffix(".lua") {
-            self.script_lookup
-                .insert(format!("{stem}.decompiled.lua"), key.clone());
-        }
-        if let Some(base) = normalized.rsplit('/').next() {
-            self.script_lookup.insert(base.to_string(), key.clone());
-            if let Some(stem) = base.strip_suffix(".lua") {
-                self.script_lookup
-                    .insert(format!("{stem}.decompiled.lua"), key.clone());
-            }
-        }
-        if !normalized.starts_with("scripts/") {
-            self.script_lookup
-                .insert(format!("scripts/{}", normalized), key.clone());
-            if let Some(stem) = normalized.strip_suffix(".lua") {
-                self.script_lookup
-                    .insert(format!("scripts/{stem}.decompiled.lua"), key.clone());
-            }
-        }
-    }
-
-    fn register_actor(&mut self, variable_name: &str, label: &str) {
-        let key = format!("actor:{}", variable_name.to_ascii_lowercase());
-        self.actor_lookup
-            .insert(variable_name.to_ascii_lowercase(), key.clone());
-        self.actor_lookup
-            .insert(variable_name.to_string(), key.clone());
-        self.actor_lookup
-            .insert(label.to_ascii_lowercase(), key.clone());
-        self.actor_lookup
-            .insert(Self::normalize_actor_label(label), key);
-    }
-
-    fn register_set(&mut self, metadata: &SetMetadata) {
-        let canonical = metadata.variable_name.to_ascii_lowercase();
-        let base_key = format!("set:{canonical}");
-
-        let mut entry = SetCoverageEntry {
-            base_key,
-            hook_keys: HashMap::new(),
-            setup_by_index: HashMap::new(),
-        };
-
-        for slot in &metadata.setup_slots {
-            let coverage_key = format!("set:{canonical}:setup_slot:{}", slot.label);
-            entry.setup_by_index.insert(slot.index as i32, coverage_key);
-        }
-
-        for method in &metadata.methods {
-            if let Some(descriptor) = describe_set_hook(&method.name) {
-                let coverage_key = descriptor.coverage_key(&canonical);
-                entry
-                    .hook_keys
-                    .entry(descriptor.lookup_key.clone())
-                    .or_insert(coverage_key);
-            }
-        }
-
-        self.set_registry.insert(canonical.clone(), entry);
-        self.insert_set_alias(&canonical, &metadata.variable_name);
-        self.insert_set_alias(&canonical, &metadata.set_file);
-        if let Some(stripped) = metadata.set_file.strip_suffix(".set") {
-            self.insert_set_alias(&canonical, stripped);
-        }
-    }
-
-    fn insert_set_alias(&mut self, canonical: &str, alias: &str) {
-        let trimmed = alias.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let normalized = trimmed.to_ascii_lowercase();
-        self.set_aliases
-            .entry(normalized)
-            .or_insert_with(|| canonical.to_string());
-    }
-
-    fn resolve_set_entry(&self, identifier: &str) -> Option<&SetCoverageEntry> {
-        let trimmed = identifier.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        let normalized = trimmed.to_ascii_lowercase();
-        let canonical = self.set_aliases.get(&normalized)?;
-        self.set_registry.get(canonical)
-    }
-
-    fn mark_script_candidates(&mut self, normalized: &str) {
-        let mut candidates = Vec::new();
-        let cleaned = normalized.trim_start_matches("./");
-        Self::push_unique(&mut candidates, cleaned.to_string());
-        if let Some(stripped) = cleaned.strip_suffix(".decompiled.lua") {
-            Self::push_unique(&mut candidates, format!("{stripped}.lua"));
-        }
-        if let Some(base) = cleaned.rsplit('/').next() {
-            Self::push_unique(&mut candidates, base.to_string());
-            if let Some(stripped) = base.strip_suffix(".decompiled.lua") {
-                Self::push_unique(&mut candidates, format!("{stripped}.lua"));
-            }
-        }
-        for candidate in candidates {
-            if let Some(key) = self.script_lookup.get(&candidate).cloned() {
-                self.increment(&key);
-                break;
-            }
-        }
-    }
-
-    fn increment(&mut self, key: &str) {
-        let entry = self.counts.entry(key.to_string()).or_insert(0);
-        *entry = entry.saturating_add(1);
-    }
-
-    fn normalize_script_identifier(input: &str) -> String {
-        input
-            .trim()
-            .trim_matches(|c| c == '"' || c == '\'')
-            .replace('\\', "/")
-            .to_ascii_lowercase()
-    }
-
-    fn normalize_actor_label(label: &str) -> String {
-        let mut id = String::new();
-        for ch in label.chars() {
-            if ch.is_ascii_alphanumeric() {
-                id.push(ch.to_ascii_lowercase());
-            } else if ch.is_ascii_whitespace() || matches!(ch, '.' | '-' | '_' | ':') {
-                if !id.ends_with('_') {
-                    id.push('_');
-                }
-            }
-        }
-        while id.ends_with('_') {
-            id.pop();
-        }
-        if id.is_empty() {
-            let fallback = label.to_ascii_lowercase();
-            let trimmed = fallback.trim();
-            if trimmed.is_empty() {
-                id.push_str("actor");
-            } else {
-                id.push_str(trimmed);
-            }
-        }
-        id
-    }
-
-    fn push_unique(target: &mut Vec<String>, value: String) {
-        if value.is_empty() {
-            return;
-        }
-        if !target.iter().any(|existing| existing == &value) {
-            target.push(value);
-        }
-    }
 }
 
 pub(super) struct EngineContext {
@@ -596,7 +206,6 @@ pub(super) struct EngineContext {
     stream: Option<Rc<StreamServer>>,
     scripts: ScriptRuntime,
     events: Vec<String>,
-    coverage: CoverageTracker,
     sets: SetRuntime,
     actors: ActorStore,
     inventory: InventoryState,
@@ -617,11 +226,9 @@ impl EngineContext {
         verbose: bool,
         headless: bool,
         lab_collection: Option<Rc<LabCollection>>,
-        audio_callback: Option<Rc<dyn AudioCallback>>,
         install_root: PathBuf,
         tube_pose_aliases: TubePoseAliasCache,
     ) -> Self {
-        let coverage = CoverageTracker::from_resources(&resources);
         let sets = SetRuntime::new(resources.clone(), verbose, lab_collection);
         EngineContext {
             verbose,
@@ -630,7 +237,6 @@ impl EngineContext {
             stream: None,
             scripts: ScriptRuntime::new(),
             events: Vec::new(),
-            coverage,
             sets,
             actors: ActorStore::new(1100),
             inventory: InventoryState::new(),
@@ -640,7 +246,7 @@ impl EngineContext {
             achievements: AchievementRuntime::new(),
             cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
-            audio: AudioRuntime::new(audio_callback),
+            audio: AudioRuntime::new(),
             manny_office: MannyOfficeState::default(),
             tube_pose_aliases,
         }
@@ -718,10 +324,6 @@ impl EngineContext {
         InventoryRuntimeAdapter::new(&mut self.inventory, &mut self.events)
     }
 
-    fn inventory_view(&self) -> InventoryRuntimeView<'_> {
-        InventoryRuntimeView::new(&self.inventory)
-    }
-
     fn achievement_runtime(&mut self) -> AchievementRuntimeAdapter<'_> {
         AchievementRuntimeAdapter::new(&mut self.achievements, &mut self.events)
     }
@@ -777,18 +379,6 @@ impl EngineContext {
                 *event = updated;
             }
         }
-    }
-
-    pub(super) fn record_script_name(&mut self, script: &str) {
-        self.coverage.mark_script_name(script);
-    }
-
-    pub(super) fn record_script_path(&mut self, path: &Path) {
-        self.coverage.mark_script_path(path);
-    }
-
-    pub(super) fn coverage_counts(&self) -> &BTreeMap<String, u64> {
-        self.coverage.counts()
     }
 
     fn pause_view(&self) -> PauseRuntimeView<'_> {
@@ -1130,17 +720,8 @@ impl EngineContext {
     }
 
     fn mark_set_loaded(&mut self, set_file: &str) {
-        let newly_loaded = {
-            let mut runtime = self.set_runtime();
-            runtime.mark_set_loaded(set_file)
-        };
-        if newly_loaded {
-            self.coverage.mark_set(set_file);
-        }
-    }
-
-    fn mark_set_hook(&mut self, set_identifier: &str, lookup_key: &str) {
-        self.coverage.mark_set_hook(set_identifier, lookup_key);
+        let mut runtime = self.set_runtime();
+        runtime.mark_set_loaded(set_file);
     }
 
     #[cfg(test)]
@@ -1174,7 +755,6 @@ impl EngineContext {
     }
 
     fn record_current_setup(&mut self, set_file: &str, setup: i32) {
-        self.coverage.mark_set_setup(set_file, setup);
         self.set_runtime().record_current_setup(set_file, setup);
     }
 
@@ -1369,7 +949,6 @@ impl EngineContext {
             .register_actor_with_handle(label, preferred_handle);
         if newly_assigned {
             self.log_event(format!("actor.register {} (#{handle})", label));
-            self.coverage.mark_actor(&id, label);
         }
         (id, handle)
     }
@@ -1594,53 +1173,10 @@ impl EngineContext {
     pub(super) fn events(&self) -> &[String] {
         &self.events
     }
-
-    pub(super) fn geometry_snapshot(&self) -> LuaGeometrySnapshot {
-        geometry_export::build_snapshot(self.snapshot_state())
-    }
-
-    fn snapshot_state(&self) -> geometry_export::SnapshotState {
-        let SetRuntimeSnapshot {
-            current_set,
-            loaded_sets,
-            current_setups,
-            available_sets,
-            set_geometry,
-            sector_states,
-        } = self.set_view().snapshot();
-        let music = self.audio_view().music().clone();
-        let sfx = self.audio_view().sfx().clone();
-        geometry_export::SnapshotState {
-            current_set,
-            selected_actor: self.actors.selected_actor_id().map(|id| id.to_string()),
-            voice_effect: self.voice_effect.clone(),
-            loaded_sets,
-            current_setups,
-            available_sets,
-            set_geometry,
-            sector_states,
-            actors: self.actors.clone_map(),
-            objects: self.objects.clone_records(),
-            actor_handles: self.actors.clone_handles(),
-            visible_objects: self.objects.visible_objects().to_vec(),
-            hotlist_handles: self.objects.hotlist_handles().to_vec(),
-            inventory: self.inventory_view().clone_items(),
-            inventory_rooms: self.inventory_view().clone_rooms(),
-            commentary: self.cutscene_view().commentary().cloned(),
-            cut_scene_stack: self.cutscene_view().cut_scene_stack().to_vec(),
-            music,
-            sfx,
-            events: self.events.clone(),
-        }
-    }
 }
 
 fn is_intro_timeline_log(message: &str) -> bool {
     message.contains(r#""label":"intro.timeline""#)
-}
-
-fn vec3_to_array(vec: Vec3) -> [f32; 3] {
-    [vec.x, vec.y, vec.z]
 }
 
 pub(crate) fn heading_between(from: Vec3, to: Vec3) -> f64 {
@@ -1669,7 +1205,7 @@ mod tests {
     use super::menus::install_menu_common;
     use super::objects::ObjectSnapshot;
     use super::pause::{install_game_pauser, PauseEvent, PauseLabel};
-    use super::{AudioCallback, EngineContext, EngineContextHandle};
+    use super::{EngineContext, EngineContextHandle};
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
     use mlua::{Function, Lua, Table, Value};
@@ -1738,10 +1274,6 @@ mod tests {
     }
 
     fn make_context() -> EngineContext {
-        make_context_with_callback(None)
-    }
-
-    fn make_context_with_callback(callback: Option<Rc<dyn AudioCallback>>) -> EngineContext {
         let set_metadata = SetMetadata {
             lua_file: "mo.lua".to_string(),
             variable_name: "mo".to_string(),
@@ -1794,7 +1326,6 @@ mod tests {
             false,
             false,
             None,
-            callback,
             PathBuf::from("dev-install"),
             Rc::new(RefCell::new(None::<BTreeMap<String, String>>)),
         )
@@ -1927,54 +1458,6 @@ mod tests {
             .events
             .iter()
             .any(|event| event == "actor.manny.collision_scale 0.350"));
-
-        let snapshot = ctx.geometry_snapshot();
-        let manny = snapshot
-            .actors
-            .get("manny")
-            .expect("geometry snapshot actor");
-        assert_eq!(manny.scale, Some(1.25));
-        assert_eq!(manny.collision_scale, Some(0.35));
-    }
-
-    #[derive(Default)]
-    struct RecordingCallback {
-        events: RefCell<Vec<String>>,
-    }
-
-    impl RecordingCallback {
-        fn events(&self) -> Vec<String> {
-            self.events.borrow().clone()
-        }
-    }
-
-    impl AudioCallback for RecordingCallback {
-        fn music_play(&self, cue: &str, params: &[String]) {
-            let detail = if params.is_empty() {
-                format!("music.play:{cue}")
-            } else {
-                format!("music.play:{cue}[{}]", params.join(","))
-            };
-            self.events.borrow_mut().push(detail);
-        }
-
-        fn music_stop(&self, mode: Option<&str>) {
-            let label = mode.unwrap_or("<none>");
-            self.events.borrow_mut().push(format!("music.stop:{label}"));
-        }
-
-        fn sfx_play(&self, cue: &str, params: &[String], handle: &str) {
-            let mut detail = format!("sfx.play:{cue}->{handle}");
-            if !params.is_empty() {
-                detail.push_str(&format!("[{}]", params.join(",")));
-            }
-            self.events.borrow_mut().push(detail);
-        }
-
-        fn sfx_stop(&self, target: Option<&str>) {
-            let label = target.unwrap_or("<none>");
-            self.events.borrow_mut().push(format!("sfx.stop:{label}"));
-        }
     }
 
     fn manny_geometry_set() -> SetFileData {
@@ -2031,67 +1514,6 @@ mod tests {
         assert_eq!(window_hit.name, "mo_winws");
     }
 
-    #[test]
-    fn audio_callbacks_receive_music_and_sfx_events() {
-        let callback = Rc::new(RecordingCallback::default());
-        let callback_handle: Rc<dyn AudioCallback> = callback.clone();
-        let mut ctx = make_context_with_callback(Some(callback_handle));
-
-        ctx.play_music("intro".to_string(), vec!["loop=true".to_string()]);
-        assert_eq!(
-            ctx.audio_view()
-                .music()
-                .current
-                .as_ref()
-                .map(|cue| cue.name.as_str()),
-            Some("intro")
-        );
-
-        ctx.stop_music(Some("immediate".to_string()));
-        assert!(ctx.audio_view().music().current.is_none());
-
-        let handle = ctx.play_sound_effect("doorbell".to_string(), Vec::new());
-        assert!(ctx.audio_view().sfx().active.contains_key(&handle));
-
-        ctx.stop_sound_effect(Some(handle.clone()));
-        assert!(!ctx.audio_view().sfx().active.contains_key(&handle));
-
-        let events = callback.events();
-        assert_eq!(
-            events,
-            vec![
-                "music.play:intro[loop=true]".to_string(),
-                "music.stop:immediate".to_string(),
-                format!("sfx.play:doorbell->{handle}"),
-                format!("sfx.stop:{handle}"),
-            ]
-        );
-
-        assert!(ctx
-            .audio_view()
-            .music()
-            .history
-            .iter()
-            .any(|entry| entry.starts_with("play intro")));
-        assert!(ctx
-            .audio_view()
-            .music()
-            .history
-            .iter()
-            .any(|entry| entry == "stop immediate"));
-        assert!(ctx
-            .audio_view()
-            .sfx()
-            .history
-            .iter()
-            .any(|entry| entry.starts_with("sfx.play doorbell")));
-        assert!(ctx
-            .audio_view()
-            .sfx()
-            .history
-            .iter()
-            .any(|entry| entry.starts_with("sfx.stop")));
-    }
     fn sample_geometry_set() -> SetFileData {
         let raw = "section: setups\n\tnumsetups\t1\n\tsetup\tcam_a\n\tposition\t0.0\t0.0\t0.0\n\tinterest\t0.3\t0.3\t0.0\n\troll\t\t0.0\n\tfov\t\t45.0\n\tnclip\t\t0.1\n\tfclip\t\t100.0\n\nsection: sectors\n\tsector\t\tdesk_walk\n\tID\t\t10\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t0.0\t0.0\t0.0\n\t         \t\t1.0\t0.0\t0.0\n\t         \t\t1.0\t1.0\t0.0\n\t         \t\t0.0\t1.0\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n";
         SetFileData::parse(raw.as_bytes()).expect("parse sample set")
@@ -2429,47 +1851,5 @@ mod tests {
                 .expect("cut scene")
                 .suppressed
         );
-    }
-
-    #[test]
-    fn geometry_snapshot_reflects_sector_state() {
-        let mut ctx = make_context();
-        ctx.sets.insert_geometry_for_tests(
-            "mo.set",
-            ParsedSetGeometry::from_set_file(sample_geometry_set()),
-        );
-        ctx.switch_to_set("mo.set");
-        let snapshot = ctx.geometry_snapshot();
-        let set = snapshot
-            .sets
-            .iter()
-            .find(|set| set.set_file == "mo.set")
-            .expect("mo.set snapshot");
-        let desk_sector = set
-            .sectors
-            .iter()
-            .find(|sector| sector.name == "desk_walk")
-            .expect("desk_walk sector");
-        assert!(desk_sector.active, "desk_walk should start active");
-
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
-        let snapshot = ctx.geometry_snapshot();
-        let set = snapshot
-            .sets
-            .iter()
-            .find(|set| set.set_file == "mo.set")
-            .expect("mo.set snapshot");
-        let desk_sector = set
-            .sectors
-            .iter()
-            .find(|sector| sector.name == "desk_walk")
-            .expect("desk_walk sector");
-        assert!(
-            !desk_sector.active,
-            "desk_walk should reflect toggled state in snapshot"
-        );
-
-        let current = snapshot.current_set.expect("current set snapshot");
-        assert_eq!(current.set_file, "mo.set");
     }
 }

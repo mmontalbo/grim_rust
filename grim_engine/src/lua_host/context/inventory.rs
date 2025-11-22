@@ -12,11 +12,6 @@ pub(super) struct InventoryRuntimeAdapter<'a> {
     events: &'a mut Vec<String>,
 }
 
-/// Provides read-only helpers for inventory queries.
-pub(super) struct InventoryRuntimeView<'a> {
-    state: &'a InventoryState,
-}
-
 impl InventoryState {
     pub(super) fn new() -> Self {
         Self::default()
@@ -36,14 +31,6 @@ impl InventoryState {
 
     pub(super) fn rooms(&self) -> &BTreeSet<String> {
         &self.rooms
-    }
-
-    pub(super) fn clone_items(&self) -> BTreeSet<String> {
-        self.items.clone()
-    }
-
-    pub(super) fn clone_rooms(&self) -> BTreeSet<String> {
-        self.rooms.clone()
     }
 }
 
@@ -66,19 +53,5 @@ impl<'a> InventoryRuntimeAdapter<'a> {
             self.events.push(format!("inventory.room {name}"));
         }
         registered
-    }
-}
-
-impl<'a> InventoryRuntimeView<'a> {
-    pub(super) fn new(state: &'a InventoryState) -> Self {
-        Self { state }
-    }
-
-    pub(super) fn clone_items(&self) -> BTreeSet<String> {
-        self.state.clone_items()
-    }
-
-    pub(super) fn clone_rooms(&self) -> BTreeSet<String> {
-        self.state.clone_rooms()
     }
 }

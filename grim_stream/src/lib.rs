@@ -181,13 +181,6 @@ pub struct TimelineMark {
     pub data: Value,
 }
 
-/// Coverage counter delta or snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoverageCounter {
-    pub key: String,
-    pub value: u64,
-}
-
 /// Current state of the in-scene commentary prompt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommentaryState {
@@ -261,8 +254,6 @@ pub struct StateUpdate {
     pub commentary: Option<CommentaryState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tube: Option<TubeState>,
-    #[serde(skip_serializing_if = "vec_is_empty", default)]
-    pub coverage: Vec<CoverageCounter>,
     #[serde(skip_serializing_if = "vec_is_empty", default)]
     pub events: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

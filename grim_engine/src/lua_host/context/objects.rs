@@ -301,10 +301,6 @@ impl ObjectRuntime {
     pub(super) fn hotlist_handles(&self) -> &[i64] {
         &self.hotlist_handles
     }
-
-    pub(super) fn clone_records(&self) -> BTreeMap<i64, ObjectSnapshot> {
-        self.records.clone()
-    }
 }
 
 /// Provides high-level object runtime operations coupled with engine event logging.
