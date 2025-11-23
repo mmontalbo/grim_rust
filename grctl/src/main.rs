@@ -30,7 +30,6 @@ use retail::{extend_env_var, warn_if_shaders_missing, HookMode, RetailLayout};
 const RETAIL_STEAM_APP_ID: &str = "345350";
 const RETAIL_LUA_PATH: &str = "./?.lua;./?.LUA;./mods/?.lua";
 const RUST_SHIM_TARGET: &str = "i686-unknown-linux-gnu";
-const DEFAULT_ENGINE_STREAM: &str = "127.0.0.1:17500";
 #[derive(Parser, Debug)]
 #[command(
     name = "grctl",
@@ -88,9 +87,6 @@ struct EngineStart {
     /// Enable verbose Lua logging.
     #[arg(long)]
     verbose: bool,
-    /// Address grim_engine should bind for the viewer handshake.
-    #[arg(long, default_value = "127.0.0.1:17500")]
-    stream_bind: String,
     /// Additional arguments forwarded directly to grim_engine after '--'.
     #[arg(last = true)]
     extra_args: Vec<String>,
@@ -110,8 +106,8 @@ struct ViewerStart {
     #[arg(long)]
     release: bool,
     /// Address grim_viewer connects to for engine state updates.
-    #[arg(long, default_value = "127.0.0.1:17500")]
-    engine_stream: String,
+    #[arg(long)]
+    engine_stream: Option<String>,
     /// Start grim_viewer without expecting a retail capture feed.
     #[arg(long)]
     no_retail: bool,
@@ -179,12 +175,8 @@ struct ScenarioArgs {
     #[arg(value_enum)]
     scenario: ScenarioKind,
     /// Maximum runtime in seconds before grctl aborts the scenario (0 disables).
-    /// Defaults to 120s headless, 60s with --with-viewer.
     #[arg(long)]
     timeout: Option<u64>,
-    /// Launch grim_viewer alongside the engine when running the scenario.
-    #[arg(long)]
-    with_viewer: bool,
     /// Extra hold time in seconds after the scenario markers appear.
     #[arg(long, default_value_t = 0.0)]
     hold_seconds: f64,
@@ -194,12 +186,6 @@ struct ScenarioArgs {
     /// Optional directory for scenario artifacts (forwarded to grim_scenarios).
     #[arg(long)]
     artifacts_dir: Option<PathBuf>,
-    /// Launch the retail capture build so the viewer shows the side-by-side cinematic.
-    #[arg(long)]
-    with_retail: bool,
-    /// Skip the Rust engine launch and only run the retail capture build.
-    #[arg(long)]
-    retail_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -243,9 +229,6 @@ struct WatchIntroArgs {
     /// Launch grim_engine and the retail capture before watching.
     #[arg(long)]
     launch: bool,
-    /// Also start grim_viewer alongside the intro watch (implies non-headless engine).
-    #[arg(long, requires = "launch")]
-    with_viewer: bool,
     /// Run grim_engine/grim_viewer with --release when launching the session.
     #[arg(long, requires = "launch")]
     engine_release: bool,
@@ -445,10 +428,6 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<()> {
     command_line.push("-p".to_string());
     command_line.push("grim_engine".to_string());
     command_line.push("--".to_string());
-    command.arg("--stream-bind");
-    command.arg(&args.stream_bind);
-    command_line.push("--stream-bind".to_string());
-    command_line.push(args.stream_bind.clone());
     if args.headless {
         command.arg("--headless");
         command_line.push("--headless".to_string());
@@ -489,10 +468,12 @@ fn start_viewer(args: ViewerStart, paths: &Paths) -> Result<()> {
     command_line.push("-p".to_string());
     command_line.push("grim_viewer".to_string());
     command_line.push("--".to_string());
-    command.arg("--engine-stream");
-    command.arg(&args.engine_stream);
-    command_line.push("--engine-stream".to_string());
-    command_line.push(args.engine_stream.clone());
+    if let Some(stream) = &args.engine_stream {
+        command.arg("--engine-stream");
+        command.arg(stream);
+        command_line.push("--engine-stream".to_string());
+        command_line.push(stream.clone());
+    }
     command.arg("--window-width");
     command.arg(args.window_width.to_string());
     command_line.push("--window-width".to_string());
@@ -1337,35 +1318,21 @@ fn watch_intro_timeline(args: WatchIntroArgs, paths: &Paths) -> Result<()> {
         poll_interval_ms,
         from_end,
         launch,
-        with_viewer,
         engine_release,
     } = args;
-
-    if with_viewer && !launch {
-        bail!("--with-viewer requires --launch");
-    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     install_watch_shutdown_handler(shutdown.clone())?;
 
     let poll_interval = Duration::from_millis(poll_interval_ms);
     let mut guard = LaunchGuard::default();
-    let headless_engine = !with_viewer;
+    let headless_engine = true;
 
     let (engine_path, retail_path) = if launch {
         ensure_component_available(ComponentKind::Engine, paths)?;
         ensure_component_available(ComponentKind::Retail, paths)?;
-        if with_viewer {
-            ensure_component_available(ComponentKind::Viewer, paths)?;
-        }
         prepare_intro_watch_sources(paths)?;
-        start_intro_watch_components(
-            paths,
-            &mut guard,
-            headless_engine,
-            engine_release,
-            with_viewer,
-        )?;
+        start_intro_watch_components(paths, &mut guard, headless_engine, engine_release)?;
         (
             paths.log_path(ComponentKind::Engine),
             paths.retail_telemetry_path(),
@@ -1385,15 +1352,7 @@ fn watch_intro_timeline(args: WatchIntroArgs, paths: &Paths) -> Result<()> {
         println!("  starting from end of both files");
     }
     if launch {
-        println!(
-            "  launched: grim_engine{} and retail capture{}",
-            if headless_engine {
-                " (headless, --verbose)"
-            } else {
-                " (--verbose)"
-            },
-            if with_viewer { ", grim_viewer" } else { "" }
-        );
+        println!("  launched: grim_engine (headless, --verbose) and retail capture");
         println!("[grctl] press Ctrl-C to stop the watch and shut down launched components");
     }
 
@@ -1427,30 +1386,15 @@ fn start_intro_watch_components(
     guard: &mut LaunchGuard,
     headless_engine: bool,
     engine_release: bool,
-    with_viewer: bool,
 ) -> Result<()> {
     let engine_args = EngineStart {
         release: engine_release,
         headless: headless_engine,
         verbose: true,
-        stream_bind: DEFAULT_ENGINE_STREAM.to_string(),
         extra_args: Vec::new(),
     };
     start_engine(engine_args, paths)?;
     guard.push(ComponentKind::Engine);
-
-    if with_viewer {
-        let viewer_args = ViewerStart {
-            release: engine_release,
-            engine_stream: DEFAULT_ENGINE_STREAM.to_string(),
-            no_retail: false,
-            window_width: 1280,
-            window_height: 720,
-            extra_args: Vec::new(),
-        };
-        start_viewer(viewer_args, paths)?;
-        guard.push(ComponentKind::Viewer);
-    }
 
     let retail_args = RetailStart {
         timeout: "0".to_string(),
@@ -1777,22 +1721,7 @@ fn stop_scenario(paths: &Paths) -> Result<()> {
 
 fn run_scenario(paths: &Paths, args: ScenarioArgs) -> Result<()> {
     const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
-    const DEFAULT_VIEWER_TIMEOUT_SECONDS: u64 = 60;
-
-    if args.retail_only && args.with_viewer {
-        bail!("--retail-only cannot be combined with --with-viewer");
-    }
-
-    let with_retail = args.with_retail || args.retail_only;
-    if with_retail && !args.with_viewer && !args.retail_only {
-        bail!("--with-retail requires --with-viewer (or use --retail-only)");
-    }
-
-    let scenario_timeout = if args.with_viewer && !args.detach {
-        args.timeout.unwrap_or(DEFAULT_VIEWER_TIMEOUT_SECONDS)
-    } else {
-        args.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS)
-    };
+    let scenario_timeout = args.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
 
     let mut command = Command::new("cargo");
     command.arg("run");
@@ -1803,15 +1732,6 @@ fn run_scenario(paths: &Paths, args: ScenarioArgs) -> Result<()> {
     command.arg(args.scenario.as_cli());
     command.arg("--timeout");
     command.arg(scenario_timeout.to_string());
-    if args.with_viewer {
-        command.arg("--with-viewer");
-    }
-    if with_retail {
-        command.arg("--with-retail");
-    }
-    if args.retail_only {
-        command.arg("--retail-only");
-    }
     if args.hold_seconds > 0.0 {
         command.arg("--hold-seconds");
         command.arg(args.hold_seconds.to_string());

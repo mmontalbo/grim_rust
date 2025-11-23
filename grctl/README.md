@@ -38,39 +38,25 @@ detects that a recorded PID has already exited.
 
 - `watch intro-timeline [--engine-log <path>] [--retail-events <path>] [--poll-interval-ms <ms>] [--from-end]` tails `target/grctl/logs/grim_engine.log` and `dev-install/mods/telemetry_events.jsonl`, parses `intro.timeline` events, and prints a rolling missing/extra/order summary.
 - Example: `nix-shell --run 'cargo run -p grctl -- watch intro-timeline --poll-interval-ms 500'`.
-- `watch intro-timeline --launch [--with-viewer] [--engine-release]` clears the intro logs, starts grim_engine headless (unless `--with-viewer` is set), launches the retail capture without a timeout, and then begins the watch. Press Ctrl-C to stop the watch and shut down the launched components.
+- `watch intro-timeline --launch [--engine-release]` clears the intro logs, starts grim_engine headless with verbose logging, launches the retail capture without a timeout, and then begins the watch. Press Ctrl-C to stop the watch and shut down the launched components.
 
 ## Scenario runs
 
-- Use `grctl scenario run intro-to-office-computer` for the intro playback. Add
-  `--with-viewer` when you need to watch the stream; the timeout defaults to 60s
-  in this mode to catch hangs, so pass `--timeout <seconds>` (or `--timeout 0`)
-  if you need longer coverage.
-- Pass both `--with-viewer --with-retail` to launch the retail capture build so
-  the viewer shows the side-by-side cinematic (retail on the left, Rust overlay
-  on the right).
-- When `--with-retail` is supplied, `grctl` clears
-  `dev-install/mods/telemetry_events.jsonl`, compares the retail `intro.timeline`
-  telemetry against the grim_engine `intro.timeline` log entries, prints a brief
-  summary, and records the full diff in the scenario report (use
-  `--artifacts-dir <path>` to persist the JSON output).
-- The JSON report exposes the raw engine/retail event lists under
-  `intro_timeline`. Point `--artifacts-dir target/grctl/scenario_reports` (or a
-  similar path) to capture those files and see
-  `docs/intro_timeline_comparison.md` for the schema plus troubleshooting tips.
-- `grctl scenario run intro-to-office-tube` extends the same run and ensures the
-  tube choreography emits the `mo_tube_set_closed_w_can` markers (verifying the
-  note delivery handshake) before completing.
-- `--hold-seconds <seconds>` keeps the engine alive briefly after all markers
-  land, which is handy for capturing extra telemetry without restarting.
-- `--retail-only` skips the Rust engine entirely, starts just the retail capture
-  build, and waits for the intro movie telemetry (`movie.logos.*` /
-  `movie.intro.*`) to confirm the cinematic plays without being skipped. Pass
-  `--detach` if you simply want `grctl` to launch retail and exit immediately.
-- `--detach` leaves grim_engine (and optionally grim_viewer) running under grctl.
-  Remember to stop them later with either `grctl scenario stop` or the explicit
-  `grctl viewer stop` / `grctl engine stop` commands once you are done inspecting
+- Use `grctl scenario run intro-to-office-computer` (or `intro-to-office-tube`)
+  for the intro playback. The harness now runs grim_engine headless with verbose
+  logging and waits for the `movie.logos.*` / `movie.intro.*` timeline markers
+  the engine emits as it simulates fullscreen playback.
+- `--hold-seconds <seconds>` keeps tailing the log briefly after all markers
+  land. The engine exits once the intro cutscene completes, so the extra wait is
+  primarily for log collection.
+- `--detach` leaves grim_engine running under grctl supervision. Stop it later
+  with `grctl scenario stop` or `grctl engine stop` once you are done inspecting
   the session.
+- `--artifacts-dir <path>` writes the scenario JSON report to a directory of your
+  choosing. The `intro_timeline` field is currently empty because the live
+  streaming pipeline was removed; only the observed markers are recorded.
+- GrimStream exposure and the viewer handshake were trimmed from grim_engine, so
+  streaming overlays are no longer available during scenario runs.
 - `grctl retail start --vanilla` skips the Lua hook/LD_PRELOAD shim so you can
   compare a clean retail run against the instrumented build. Leave the flag off
   (default) to keep telemetry events flowing into the scenario harness.

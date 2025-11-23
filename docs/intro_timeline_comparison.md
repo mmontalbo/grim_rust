@@ -8,48 +8,50 @@ movie.
 
 - `grim_engine` emits JSON lines (matching the retail telemetry schema) such as
   `{"label":"intro.timeline","data":{"event":"movie.logos.start"}}` whenever it
-  enters or exits one of the fullscreen videos. The scenario harness resets
-  `target/grctl/logs/grim_engine.log` before every run so the log only contains
-  the current session.
+  enters or exits one of the fullscreen videos. `grctl watch intro-timeline`
+  clears `target/grctl/logs/grim_engine.log` before every launched session so
+  the log only contains fresh data.
 - `tools/live_retail_capture` writes a JSONL stream to
   `dev-install/mods/telemetry_events.jsonl` with the same shape: `label` set to
   `intro.timeline` and `data.event` holding the specific marker
   (for example `movie.intro.end`).
 
-`grim_scenarios` reads both files and builds a structured diff.
+`grctl watch intro-timeline` tails both files and builds a structured diff.
 
 ## Running the comparison
 
 1. Build `grctl` (`cargo build -p grctl`).
-2. Launch the intro scenario with retail capture enabled:
+2. Launch the intro timeline watch with managed components:
 
    ```bash
-   nix-shell --run "cargo run -p grctl -- scenario run intro-to-office-computer \
-     --with-viewer --with-retail --artifacts-dir target/grctl/scenario_reports"
+   nix-shell --run "cargo run -p grctl -- watch intro-timeline --launch"
    ```
 
-   The helper clears the telemetry file, runs the intro playback on both
-   binaries, and stops once the required markers land (or the timeout expires).
+   The helper clears prior intro logs, starts a headless `grim_engine` with
+   verbose logging plus the retail capture, and tails both sources until you
+   press Ctrl-C.
 
-3. Inspect the summary printed at the end of the run. Matching timelines produce
-   a one-line success message (`intro timeline matches across engine and retail`).
+3. Inspect the rolling summary printed during the watch. Matching timelines
+   produce `intro timeline matches across engine and retail` once all markers
+   land.
 
-4. Review the full JSON report written to the artifacts directory for deeper
-   debugging.
+4. If you already have intro logs captured, point the watch at them instead:
 
-For a quick live view without the full scenario harness, you can also run:
+   ```bash
+   nix-shell --run 'cargo run -p grctl -- watch intro-timeline \
+     --engine-log <path/to/grim_engine.log> \
+     --retail-events dev-install/mods/telemetry_events.jsonl'
+   ```
 
-```bash
-nix-shell --run 'cargo run -p grctl -- watch intro-timeline --launch --with-viewer'
-```
-
-This clears the intro sources, starts a headless `grim_engine` (or streams to
-`grim_viewer` when `--with-viewer` is provided), launches the retail capture
-with no timeout, and tails both JSON feeds until you press Ctrl-C.
+   Use `--from-end` if you want the watch to start from the existing tail of
+   each file instead of processing everything from the beginning.
 
 ## Report schema
 
-Each scenario report stores the diff under the `intro_timeline` key:
+The intro watch prints a summary for every poll and keeps the latest diff in
+memory. When you need a structured dump for debugging, the helpers in
+`grctl/grim_scenarios/src/timeline.rs` still expose a serialisable report
+shape:
 
 ```json
 "intro_timeline": {
@@ -74,11 +76,9 @@ spot capture/logging regressions.
 
 ## Extending the comparison
 
-- Update `INTRO_RETAIL_REQUIRED_EVENTS` in
-  `grctl/grim_scenarios/src/main.rs` if new intro events must be enforced before
-  the scenario completes.
-- The comparison helpers live in `grctl/grim_scenarios/src/timeline.rs`. Keep
-  additional validations there (for example timestamp deltas) so the main
-  scenario logic stays focused on orchestration.
-- Add new scenario variants by extending `ScenarioKind` and pointing them at the
-  shared helpers to reuse the existing artifact and summary flow.
+- The watch loop lives in `grctl/src/main.rs` under `run_intro_timeline_loop`.
+  Extend it if you need additional validations (for example timestamp deltas or
+  stricter sequencing).
+- The structured helpers in `grctl/grim_scenarios/src/timeline.rs` are still
+  available if you want to persist comparison reports alongside other scenario
+  artifacts in the future.
