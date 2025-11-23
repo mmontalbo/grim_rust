@@ -77,66 +77,66 @@ fn handle_special_dofile<'lua>(
     if let Some(filename) = Path::new(path).file_name().and_then(|name| name.to_str()) {
         let lower = filename.to_ascii_lowercase();
         match lower.as_str() {
-            "setfallback.lua" => return Ok(Some(Value::Nil)),
+            "setfallback.lua" => return Ok(Some(Value::Boolean(true))),
             "_colors.lua" | "_colors.decompiled.lua" => {
                 install_color_constants(lua)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_sfx.lua" | "_sfx.decompiled.lua" => {
                 install_sfx_scaffold(lua, context.clone())?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_controls.lua" | "_controls.decompiled.lua" => {
                 install_controls_scaffold(lua, context, system_key.clone())?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_dialog.lua" | "_dialog.decompiled.lua" => {
                 install_dialog_scaffold(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_music.lua" | "_music.decompiled.lua" => {
                 install_music_scaffold(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_mouse.lua" | "_mouse.decompiled.lua" => {
                 install_mouse_scaffold(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_ui.lua" | "_ui.decompiled.lua" => {
                 install_ui_scaffold(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_achievement.lua" | "_achievement.decompiled.lua" => {
                 install_achievement_scaffold(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "_actors.lua" | "_actors.decompiled.lua" => {
                 install_actor_scaffold(lua, context, system_key.clone())?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "menu_loading.lua" | "menu_loading.decompiled.lua" => {
                 install_loading_menu(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "menu_boot_warning.lua" | "menu_boot_warning.decompiled.lua" => {
                 install_boot_warning_menu(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "menu_dialog.lua" | "menu_dialog.decompiled.lua" => {
                 install_menu_dialog(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "menu_common.lua" | "menu_common.decompiled.lua" => {
                 install_menu_common(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "menu_remap_keys.lua" | "menu_remap_keys.decompiled.lua" => {
                 install_menu_remap(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             "menu_prefs.lua" | "menu_prefs.decompiled.lua" => {
                 install_menu_prefs(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
             _ => {}
         }
@@ -148,12 +148,12 @@ fn handle_special_dofile<'lua>(
             if base.ends_with("_inv") {
                 install_inventory_variant_stub(lua, context.clone(), base)
                     .map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
 
             if base == "mn_scythe" {
                 install_manny_scythe_stub(lua, context.clone()).map_err(LuaError::external)?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Boolean(true)));
             }
         }
     }
@@ -729,6 +729,7 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         "get_generic_control_state",
         lua.create_function(|_, _: Variadic<Value>| Ok(false))?,
     )?;
+    globals.set("ResetMarioControls", noop.clone())?;
     globals.set(
         "AreAchievementsInstalled",
         lua.create_function(|_, ()| Ok(1))?,
@@ -1538,6 +1539,16 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
     )?;
     globals.set("Inventory", inventory)?;
 
+    if matches!(globals.get::<_, Value>("cutscene_menu"), Ok(Value::Nil)) {
+        let cutscene_menu = lua.create_table()?;
+        let noop_fn = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+        cutscene_menu.set("enable_cutscene", noop_fn.clone())?;
+        cutscene_menu.set("enable_all", noop_fn.clone())?;
+        cutscene_menu.set("show", noop_fn.clone())?;
+        cutscene_menu.set("cleanup", noop_fn)?;
+        globals.set("cutscene_menu", cutscene_menu)?;
+    }
+
     Ok(())
 }
 
@@ -1612,6 +1623,36 @@ fn install_parent_object_hook(lua: &Lua, context: Rc<RefCell<EngineContext>>) ->
     parent_meta.set("__newindex", parent_handler)?;
     parent_table.set_metatable(Some(parent_meta));
     globals.set("parent_object", parent_table)?;
+
+    // Wrap Object:create so fresh instances always inherit the object prototype and stubs
+    // even if the parent_object hook fails to trigger.
+    if let Ok(object_proto) = globals.get::<_, Table>("Object") {
+        if let Ok(original_create) = object_proto.get::<_, Function>("create") {
+            let create_key = lua.create_registry_value(original_create)?;
+            let create_context = context.clone();
+            let wrapped = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+                let original: Function = lua_ctx.registry_value(&create_key)?;
+                let forwarded: MultiValue = args.into_iter().collect();
+                let result = original.call::<_, Value>(forwarded)?;
+                if let Value::Table(object_table) = &result {
+                    let handle = object_table
+                        .get::<_, Value>("interest_actor")
+                        .ok()
+                        .and_then(|actor| match actor {
+                            Value::Table(table) => table.get::<_, Option<i64>>("hActor").ok(),
+                            _ => None,
+                        })
+                        .flatten()
+                        .unwrap_or(-1);
+                    ensure_object_metatable(lua_ctx, object_table, create_context.clone(), handle)?;
+                    inject_object_controls(lua_ctx, object_table, create_context.clone(), handle)?;
+                }
+                Ok(result)
+            })?;
+            object_proto.set("create", wrapped)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -3242,8 +3283,10 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
         let globals = lua_ctx.globals();
         if let Ok(load_room_code) = globals.get::<_, Function>("load_room_code") {
             let _: Value = load_room_code.call("mo.lua")?;
+            let _ = load_room_code.call::<_, Value>("year_1.lua");
         } else if let Ok(dofile) = globals.get::<_, Function>("dofile") {
             let _: Value = dofile.call("mo.lua")?;
+            let _ = dofile.call::<_, Value>("year_1.lua");
         }
         source_context.borrow_mut().mark_set_loaded("mo.set");
         Ok(())
@@ -3421,6 +3464,69 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
         "IsFullscreenMoviePlaying",
         lua.create_function(move |_, _: Variadic<Value>| {
             let mut ctx = movie_state_context.borrow_mut();
+            let playing = ctx.poll_fullscreen_movie();
+            if playing {
+                ctx.log_event("cut_scene.fullscreen.poll".to_string());
+            }
+            Ok(playing)
+        })?,
+    )?;
+
+    let run_fullscreen_context = context.clone();
+    globals.set(
+        "RunFullscreenMovie",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            fn parse_yields(value: &Value) -> Option<u32> {
+                match value {
+                    Value::Integer(i) if *i >= 0 => Some(*i as u32),
+                    Value::Number(n) if *n >= 0.0 => Some(n.trunc() as u32),
+                    Value::String(text) => text.to_str().ok()?.trim().parse().ok(),
+                    _ => None,
+                }
+            }
+            let movie = args
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let yields_override = args.get(1).and_then(parse_yields);
+            let playing = run_fullscreen_context
+                .borrow_mut()
+                .start_fullscreen_movie(movie, yields_override);
+            Ok(playing)
+        })?,
+    )?;
+
+    let legacy_movie_context = context.clone();
+    globals.set(
+        "StartMovie",
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let movie = args
+                .get(0)
+                .and_then(value_to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let playing = legacy_movie_context
+                .borrow_mut()
+                .start_fullscreen_movie(movie, None);
+            Ok(playing)
+        })?,
+    )?;
+
+    let stop_movie_context = context.clone();
+    globals.set(
+        "StopMovie",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            let mut ctx = stop_movie_context.borrow_mut();
+            while ctx.poll_fullscreen_movie() {}
+            ctx.log_event("cut_scene.fullscreen.stop".to_string());
+            Ok(())
+        })?,
+    )?;
+
+    let movie_poll_context = context.clone();
+    globals.set(
+        "IsMoviePlaying",
+        lua.create_function(move |_, _: Variadic<Value>| {
+            let mut ctx = movie_poll_context.borrow_mut();
             let playing = ctx.poll_fullscreen_movie();
             if playing {
                 ctx.log_event("cut_scene.fullscreen.poll".to_string());

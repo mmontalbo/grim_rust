@@ -1,78 +1,26 @@
 mod context;
-mod state_update;
 mod telemetry;
 mod types;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use grim_analysis::resources::ResourceGraph;
-use grim_stream::{MovieAction, MovieControl};
-use mlua::{Function, Lua, LuaOptions, StdLib, Value};
+use mlua::{Lua, LuaOptions, StdLib};
 
 use crate::lab_collection::LabCollection;
-use crate::stream::{MovieControlEvents, StreamServer, StreamViewerGate};
-use context::{EngineContextHandle, TubePoseAliasCache};
-use crossbeam_channel::TryRecvError;
-use state_update::StateUpdateBuilder;
-
-const MO_TUBE_CHORE_LABELS: &[&str] = &[
-    "mo_tube_set_closed_w_can",
-    "mo_tube_open_wo_can",
-    "mo_tube_close_wo_can",
-    "mo_tube_open_w_can",
-    "mo_tube_close_can_exit",
-    "mo_tube_balloon_open_waiting",
-];
-
-fn load_tube_pose_aliases(lua: &Lua) -> Result<BTreeMap<String, String>> {
-    let globals = lua.globals();
-    let mut map = BTreeMap::new();
-    for &name in MO_TUBE_CHORE_LABELS {
-        match globals.get::<_, Value>(name) {
-            Ok(Value::Integer(value)) => {
-                map.insert(value.to_string(), name.to_string());
-            }
-            Ok(Value::Number(value)) => {
-                let label = if value.fract() == 0.0 {
-                    (value as i64).to_string()
-                } else {
-                    value.to_string()
-                };
-                map.insert(label, name.to_string());
-            }
-            Ok(Value::String(text)) => {
-                if let Ok(value) = text.to_str() {
-                    map.insert(value.to_string(), name.to_string());
-                }
-            }
-            Ok(Value::Table(table)) => {
-                if let Ok(Some(id)) = table.get::<_, Option<i64>>("id") {
-                    map.insert(id.to_string(), name.to_string());
-                }
-            }
-            Ok(_) => {}
-            Err(_) => {}
-        }
-    }
-    Ok(map)
-}
+use context::TubePoseAliasCache;
 
 pub fn run_boot_sequence(
     data_root: &Path,
     lab_root: Option<&Path>,
     verbose: bool,
     headless: bool,
-    stream: Option<Rc<StreamServer>>,
-    stream_ready: Option<PathBuf>,
-) -> Result<Option<EngineRuntime>> {
+) -> Result<EngineRuntime> {
     let resources = Rc::new(
         ResourceGraph::from_data_root(data_root)
             .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
@@ -114,11 +62,6 @@ pub fn run_boot_sequence(
         lab_root_path.clone(),
         tube_pose_aliases.clone(),
     )));
-    {
-        let mut ctx = context.borrow_mut();
-        ctx.set_stream(stream.clone());
-    }
-    let context_handle = context::EngineContextHandle::new(context.clone());
 
     context::install_package_path(&lua, data_root)?;
     context::install_globals(&lua, data_root, context.clone())?;
@@ -126,21 +69,8 @@ pub fn run_boot_sequence(
     context::override_boot_stubs(&lua, context.clone())?;
     context::call_boot(&lua, context.clone())?;
     context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
-    let defer_intro_playback = !headless && stream.is_some();
-    if !defer_intro_playback
-        && context::ensure_intro_cutscene(&lua, context.clone(), defer_intro_playback)?
-    {
+    if context::ensure_intro_cutscene(&lua, context.clone(), false)? {
         context::drive_active_scripts(&lua, context.clone(), 16, 64)?;
-    }
-
-    match load_tube_pose_aliases(&lua) {
-        Ok(map) => {
-            *tube_pose_aliases.borrow_mut() = Some(map);
-        }
-        Err(err) if verbose => {
-            eprintln!("[grim_engine] warning: failed to preload tube chore aliases: {err:?}");
-        }
-        Err(_) => {}
     }
 
     let snapshot = context.borrow();
@@ -148,67 +78,33 @@ pub fn run_boot_sequence(
     let initial_event_cursor = snapshot.events().len();
     drop(snapshot);
 
-    let runtime_needed = headless || stream.is_some();
-    let start_gate = if headless {
-        None
-    } else {
-        stream_ready.map(StreamReadyGate::new)
-    };
-    let runtime = if runtime_needed {
-        // The EngineRuntime owns the Lua VM when we are actively streaming state.
-        Some(EngineRuntime::new(
-            lua,
-            context,
-            context_handle,
-            stream.clone(),
-            headless,
-            initial_event_cursor,
-            start_gate,
-            defer_intro_playback,
-            tube_pose_aliases.clone(),
-        ))
-    } else {
-        None
-    };
-
-    Ok(runtime)
+    Ok(EngineRuntime::new(
+        lua,
+        context,
+        headless,
+        initial_event_cursor,
+    ))
 }
 
-/// Drives the embedded Lua runtime and publishes live state over GrimStream.
+/// Drives the embedded Lua runtime until the intro movie finishes.
 pub struct EngineRuntime {
     lua: Lua,
     context: Rc<RefCell<context::EngineContext>>,
-    stream: Option<Rc<StreamServer>>,
     headless: bool,
     frame: u32,
-    /// Keeps track of deltas so state updates stay compact.
-    state_builder: StateUpdateBuilder,
-    start_gate: Option<StreamReadyGate>,
-    viewer_gate: Option<StreamViewerGate>,
-    movie_controls: Option<MovieControlEvents>,
-    log_file: Option<File>,
-    defer_intro_cutscene: bool,
+    intro_started: bool,
+    event_cursor: usize,
     intro_movie_active: bool,
-    manny_office_booted: bool,
-    tube_pose_aliases: TubePoseAliasCache,
+    intro_finished: bool,
 }
 
 impl EngineRuntime {
     fn new(
         lua: Lua,
         context: Rc<RefCell<context::EngineContext>>,
-        context_handle: EngineContextHandle,
-        stream: Option<Rc<StreamServer>>,
         headless: bool,
         initial_event_cursor: usize,
-        start_gate: Option<StreamReadyGate>,
-        defer_intro_cutscene: bool,
-        tube_pose_aliases: TubePoseAliasCache,
     ) -> Self {
-        {
-            let mut ctx = context.borrow_mut();
-            ctx.set_stream(stream.clone());
-        }
         let intro_movie_active = {
             let ctx = context.borrow();
             ctx.active_fullscreen_movie()
@@ -216,77 +112,30 @@ impl EngineRuntime {
                 .map(|name| name.eq_ignore_ascii_case("intro"))
                 .unwrap_or(false)
         };
-        let viewer_gate = if headless {
-            None
-        } else {
-            stream.as_ref().map(|s| s.viewer_gate())
-        };
-        let movie_controls = stream.as_ref().map(|s| s.movie_controls());
         Self {
             lua,
             context,
-            stream,
             headless,
             frame: 0,
-            state_builder: StateUpdateBuilder::new(context_handle, initial_event_cursor),
-            start_gate,
-            viewer_gate,
-            movie_controls,
-            log_file: open_live_preview_log(),
-            defer_intro_cutscene,
+            intro_started: intro_movie_active,
             intro_movie_active,
-            manny_office_booted: false,
-            tube_pose_aliases,
+            intro_finished: false,
+            event_cursor: initial_event_cursor,
         }
     }
 
     pub fn run(mut self) -> Result<()> {
         const FRAME_DURATION: Duration = Duration::from_millis(33);
 
-        self.await_live_preview_handshake()?;
-
-        if self.defer_intro_cutscene {
-            if context::ensure_intro_cutscene(&self.lua, self.context.clone(), false)? {
-                context::drive_active_scripts(&self.lua, self.context.clone(), 16, 64)?;
-            }
-            self.defer_intro_cutscene = false;
-        }
-
-        self.observe_intro_movie_completion()?;
-        self.refresh_manny_office_state()?;
-
-        if self.headless {
-            self.force_active_movie_completion(MovieAction::Finished)?;
-        }
-
         loop {
             let tick_start = Instant::now();
             context::drive_active_scripts(&self.lua, self.context.clone(), 8, 32)?;
             self.frame = self.frame.wrapping_add(1);
-            self.poll_movie_controls();
-            self.observe_intro_movie_completion()?;
-            self.refresh_manny_office_state()?;
-            if self.headless {
-                self.force_active_movie_completion(MovieAction::Finished)?;
-            }
+            self.progress_movies();
+            self.flush_new_events();
 
-            if let Some(update) = self
-                .state_builder
-                .build(self.frame, &self.context)
-                .context("building state update")?
-            {
-                if self.headless && !update.events.is_empty() {
-                    for event in &update.events {
-                        println!("[grim_engine][headless] {event}");
-                    }
-                }
-                if let Some(stream) = self.stream.as_ref() {
-                    if let Err(err) = stream.send_state_update(update) {
-                        eprintln!(
-                            "[grim_engine] failed to publish state update: {err:?}; continuing"
-                        );
-                    }
-                }
+            if self.intro_finished {
+                break;
             }
 
             let elapsed = tick_start.elapsed();
@@ -294,385 +143,57 @@ impl EngineRuntime {
                 thread::sleep(FRAME_DURATION - elapsed);
             }
         }
-    }
-
-    fn poll_movie_controls(&mut self) {
-        let current_generation = match self.stream.as_ref() {
-            Some(stream) => stream.current_generation(),
-            None => return,
-        };
-        let receiver = match self.movie_controls.as_ref() {
-            Some(events) => events.receiver(),
-            None => return,
-        };
-        loop {
-            match receiver.try_recv() {
-                Ok(event) => {
-                    if event.generation != current_generation {
-                        continue;
-                    }
-                    let control = event.control.clone();
-                    {
-                        let mut ctx = self.context.borrow_mut();
-                        ctx.handle_movie_control(control.clone(), event.generation);
-                    }
-                    if matches!(
-                        control.action,
-                        MovieAction::Finished | MovieAction::Skipped | MovieAction::Error
-                    ) {
-                        let mut ctx = self.context.borrow_mut();
-                        let mut still_active = ctx.poll_fullscreen_movie();
-                        while still_active {
-                            still_active = ctx.poll_fullscreen_movie();
-                        }
-                    }
-                    if let Err(err) = self.process_movie_control(&control) {
-                        eprintln!(
-                            "[grim_engine] failed to apply movie control side effects: {err:?}"
-                        );
-                    }
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
-        }
-    }
-
-    /// Wait for the viewer and optional capture processes before entering the main loop.
-    fn await_live_preview_handshake(&mut self) -> Result<()> {
-        if self.headless {
-            return Ok(());
-        }
-
-        if let Some(gate) = self.viewer_gate.clone() {
-            if !gate.is_ready() {
-                self.log_gate_event("viewer_ready.wait");
-            }
-            gate.wait_for_ready();
-            self.log_gate_event("viewer_ready.open");
-        }
-
-        if let Some(gate) = self.start_gate.take() {
-            self.log_gate_event("capture_ready.wait");
-            gate.wait()?;
-            self.log_gate_event("capture_ready.open");
-        }
-
         Ok(())
     }
 
-    fn log_gate_event(&mut self, message: &str) {
-        eprintln!("[grim_engine] {message}");
-        if let Some(file) = self.log_file.as_mut() {
-            if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                let secs = now.as_secs();
-                let nanos = now.subsec_nanos();
-                let _ = writeln!(file, "[{secs}.{nanos:09}] {message}");
-            } else {
-                let _ = writeln!(file, "[0.000000000] {message}");
-            }
-            let _ = file.flush();
-        }
-    }
-
-    fn process_movie_control(&mut self, control: &MovieControl) -> Result<()> {
-        if control.name.eq_ignore_ascii_case("intro") {
-            match control.action {
-                MovieAction::Finished | MovieAction::Skipped | MovieAction::Error => {
-                    self.ensure_manny_office_booted()?;
-                    self.intro_movie_active = false;
-                }
-                MovieAction::Ack => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn observe_intro_movie_completion(&mut self) -> Result<()> {
-        let active = {
+    fn progress_movies(&mut self) {
+        let (was_intro, had_any_before) = {
             let ctx = self.context.borrow();
-            ctx.active_fullscreen_movie()
+            let active = ctx.active_fullscreen_movie();
+            let intro_active = active
                 .as_deref()
                 .map(|name| name.eq_ignore_ascii_case("intro"))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            (intro_active, active.is_some())
         };
-        if self.intro_movie_active && !active {
-            self.ensure_manny_office_booted()?;
+        self.intro_started |= was_intro;
+        let had_any_after = {
+            let mut ctx = self.context.borrow_mut();
+            let _ = ctx.poll_fullscreen_movie();
+            let active = ctx.active_fullscreen_movie();
+            self.intro_movie_active = active
+                .as_deref()
+                .map(|name| name.eq_ignore_ascii_case("intro"))
+                .unwrap_or(false);
+            active.is_some()
+        };
+
+        if was_intro && !self.intro_movie_active {
+            self.intro_finished = true;
+        } else if (self.intro_started || had_any_before) && !had_any_after {
+            self.intro_finished = true;
         }
-        self.intro_movie_active = active;
-        Ok(())
     }
 
-    fn force_active_movie_completion(&mut self, reason: MovieAction) -> Result<()> {
-        let active_movie = {
+    fn flush_new_events(&mut self) {
+        let (new_events, new_cursor) = {
             let ctx = self.context.borrow();
-            ctx.active_fullscreen_movie()
-        };
-        if let Some(name) = active_movie {
-            let mut ctx = self.context.borrow_mut();
-            let mut completion_logged = false;
-
-            if ctx.force_movie_completion(reason.clone()) {
-                ctx.log_event(format!(
-                    "cut_scene.fullscreen.force_complete {} {:?}",
-                    name, reason
-                ));
-                completion_logged = true;
-            }
-
-            let mut still_playing = true;
-            while still_playing {
-                still_playing = ctx.poll_fullscreen_movie();
-                if !still_playing && !completion_logged {
-                    ctx.log_event(format!(
-                        "cut_scene.fullscreen.force_complete {} {:?}",
-                        name, reason
-                    ));
-                    completion_logged = true;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn ensure_manny_office_booted(&mut self) -> Result<()> {
-        if self.manny_office_booted {
-            return Ok(());
-        }
-
-        {
-            let mut ctx = self.context.borrow_mut();
-            ctx.log_event("manny_office.resume");
-        }
-
-        let handle: u32 = {
-            let globals = self.lua.globals();
-            let start_script: Function = globals
-                .get("start_script")
-                .context("start_script missing while resuming Manny's office")?;
-            let mo_value: Value = globals
-                .get("mo")
-                .context("mo table missing while resuming Manny's office")?;
-            let mo_table = match mo_value {
-                Value::Table(table) => table,
-                _ => {
-                    return Err(anyhow!(
-                        "mo global is not a table while resuming Manny's office"
-                    ));
-                }
-            };
-            let enter: Function = mo_table
-                .get("enter")
-                .context("mo.enter missing while resuming Manny's office")?;
-
-            start_script
-                .call((enter, mo_table))
-                .context("scheduling mo.enter after intro movie")?
-        };
-        {
-            let mut ctx = self.context.borrow_mut();
-            ctx.log_event(format!("manny_office.resume.script #{handle}"));
-        }
-
-        self.manny_office_booted = true;
-        self.refresh_manny_office_state()?;
-        Ok(())
-    }
-
-    fn refresh_manny_office_state(&mut self) -> Result<()> {
-        if !self.manny_office_booted {
-            return Ok(());
-        }
-        let contains = self.read_tube_contains_label()?;
-        let pose = self.read_tube_pose_label()?;
-        {
-            let mut ctx = self.context.borrow_mut();
-            ctx.update_tube_contains(contains);
-            ctx.update_tube_pose(pose);
-            ctx.normalize_tube_events();
-        }
-        Ok(())
-    }
-
-    fn read_tube_contains_label(&self) -> Result<Option<String>> {
-        let globals = self.lua.globals();
-        let Some(mo_value) = globals.get::<_, Option<Value>>("mo")? else {
-            return Ok(None);
-        };
-        let Value::Table(mo_table) = mo_value else {
-            return Ok(None);
-        };
-        let Some(tube_value) = mo_table.get::<_, Option<Value>>("tube")? else {
-            return Ok(None);
-        };
-        let Value::Table(tube_table) = tube_value else {
-            return Ok(None);
-        };
-        match tube_table.get::<_, Option<Value>>("contains")? {
-            Some(Value::Table(table)) => {
-                let label = table
-                    .get::<_, Option<String>>("string_name")?
-                    .or(table.get::<_, Option<String>>("name")?);
-                Ok(label)
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn read_tube_pose_label(&self) -> Result<Option<String>> {
-        if let Some(pose) = {
-            let ctx = self.context.borrow();
-            if let Some(chore) = ctx.actor_current_chore("mo.tube") {
-                if !chore.is_empty() {
-                    Some(chore.to_string())
-                } else {
-                    None
-                }
-            } else if let Some(chore) = ctx.actor_current_chore("mo.tube.interest_actor") {
-                if !chore.is_empty() {
-                    Some(chore.to_string())
-                } else {
-                    None
-                }
+            let events = ctx.events();
+            let new_cursor = events.len();
+            let slice = if self.event_cursor < events.len() {
+                events[self.event_cursor..].to_vec()
             } else {
-                None
-            }
-        } {
-            return Ok(Some(self.normalize_tube_pose_label(pose)?));
-        }
-
-        let globals = self.lua.globals();
-        let Some(mo_value) = globals.get::<_, Option<Value>>("mo")? else {
-            return Ok(None);
+                Vec::new()
+            };
+            (slice, new_cursor)
         };
-        let Value::Table(mo_table) = mo_value else {
-            return Ok(None);
-        };
-        let Some(tube_value) = mo_table.get::<_, Option<Value>>("tube")? else {
-            return Ok(None);
-        };
-        let Value::Table(tube_table) = tube_value else {
-            return Ok(None);
-        };
-        if let Some(value) = tube_table.get::<_, Option<Value>>("current_chore")? {
-            match value {
-                Value::String(text) => {
-                    let label = text.to_str()?.to_string();
-                    if !label.is_empty() {
-                        return Ok(Some(self.normalize_tube_pose_label(label)?));
-                    }
-                }
-                Value::Integer(value) => {
-                    return Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
-                }
-                Value::Number(value) => {
-                    return Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
-                }
-                Value::Boolean(value) => {
-                    return Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
-                }
-                _ => {}
-            }
-        }
-        let Some(actor_value) = tube_table.get::<_, Option<Value>>("interest_actor")? else {
-            return Ok(None);
-        };
-        let Value::Table(actor_table) = actor_value else {
-            return Ok(None);
-        };
-        match actor_table.get::<_, Option<Value>>("current_chore")? {
-            Some(Value::String(text)) => {
-                let label = text.to_str()?.to_string();
-                Ok(Some(self.normalize_tube_pose_label(label)?))
-            }
-            Some(Value::Integer(value)) => {
-                Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
-            }
-            Some(Value::Number(value)) => {
-                Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
-            }
-            Some(Value::Boolean(value)) => {
-                Ok(Some(self.normalize_tube_pose_label(value.to_string())?))
-            }
-            _ => Ok(None),
-        }
-    }
 
-    fn normalize_tube_pose_label(&self, raw: String) -> Result<String> {
-        if let Some(alias) = self.lookup_tube_pose_alias(&raw)? {
-            Ok(alias)
-        } else {
-            Ok(raw)
-        }
-    }
+        self.event_cursor = new_cursor;
 
-    fn lookup_tube_pose_alias(&self, raw: &str) -> Result<Option<String>> {
-        if raw.is_empty() || !raw.chars().all(|c| c.is_ascii_digit()) {
-            return Ok(None);
-        }
-        if let Some(alias) = {
-            let cache = self.tube_pose_aliases.borrow();
-            cache.as_ref().and_then(|map| map.get(raw).cloned())
-        } {
-            return Ok(Some(alias));
-        }
-        let map = load_tube_pose_aliases(&self.lua)?;
-        let alias = map.get(raw).cloned();
-        *self.tube_pose_aliases.borrow_mut() = Some(map);
-        Ok(alias)
-    }
-}
-
-struct StreamReadyGate {
-    path: PathBuf,
-}
-
-impl StreamReadyGate {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    fn wait(self) -> Result<()> {
-        if self.path.exists() {
-            eprintln!(
-                "[grim_engine] live stream ready marker already present at {}",
-                self.path.display()
-            );
-            return Ok(());
-        }
-
-        let mut last_log = Instant::now();
-        let log_interval = Duration::from_secs(5);
-        loop {
-            if self.path.exists() {
-                eprintln!(
-                    "[grim_engine] live stream ready marker observed at {}",
-                    self.path.display()
-                );
-                return Ok(());
+        if self.headless {
+            for event in new_events {
+                println!("[grim_engine][headless] {event}");
             }
-            if last_log.elapsed() >= log_interval {
-                eprintln!(
-                    "[grim_engine] waiting for retail capture to signal readiness via {}",
-                    self.path.display()
-                );
-                last_log = Instant::now();
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-fn open_live_preview_log() -> Option<File> {
-    match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/live_preview.log")
-    {
-        Ok(file) => Some(file),
-        Err(err) => {
-            eprintln!("[grim_engine] warning: failed to open /tmp/live_preview.log: {err:?}");
-            None
         }
     }
 }

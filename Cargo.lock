@@ -944,16 +944,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "crossbeam-channel",
  "grim_analysis",
  "grim_formats",
- "grim_stream",
  "libc",
  "mlua",
- "regex",
- "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]

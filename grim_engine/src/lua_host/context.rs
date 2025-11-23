@@ -114,13 +114,12 @@ use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView};
 use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
-    FullscreenMoviePlayback,
 };
 use geometry::SectorHit;
 use inventory::{InventoryRuntimeAdapter, InventoryState};
 use menus::{MenuRegistry, MenuRegistryView, MenuState};
 use movement::{MovementRuntimeAdapter, MovementRuntimeView};
-use movies::{select_playback, viewer_ready};
+use movies::select_playback;
 use objects::{ObjectRuntime, ObjectRuntimeAdapter, ObjectSnapshot};
 use pause::{PauseLabel, PauseRuntimeView, PauseState};
 use scripts::{ScriptCleanup, ScriptRuntime, ScriptRuntimeAdapter, ScriptRuntimeView};
@@ -134,52 +133,8 @@ pub(super) use bindings::{
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
 use crate::lab_collection::LabCollection;
-use crate::stream::StreamServer;
 use grim_analysis::resources::ResourceGraph;
-use grim_stream::{MovieAction, MovieControl};
 use mlua::RegistryKey;
-
-#[derive(Clone)]
-pub struct EngineContextHandle {
-    inner: Rc<RefCell<EngineContext>>,
-}
-
-impl EngineContextHandle {
-    pub fn new(inner: Rc<RefCell<EngineContext>>) -> Self {
-        Self { inner }
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn log_event(&self, event: impl Into<String>) {
-        self.inner.borrow_mut().log_event(event);
-    }
-
-    pub fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
-        self.inner
-            .borrow()
-            .resolve_actor_handle(candidates)
-            .map(|(handle, id)| (handle, id.clone()))
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct CommentarySnapshot {
-    pub label: Option<String>,
-    pub active: bool,
-    pub suppressed_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct TubeStateSnapshot {
-    pub pose: Option<String>,
-    pub contains: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct MannyOfficeState {
-    tube_pose: Option<String>,
-    tube_contains: Option<String>,
-}
 
 #[cfg(test)]
 mod hook_tests {
@@ -203,7 +158,6 @@ pub(super) struct EngineContext {
     verbose: bool,
     headless: bool,
     install_root: PathBuf,
-    stream: Option<Rc<StreamServer>>,
     scripts: ScriptRuntime,
     events: Vec<String>,
     sets: SetRuntime,
@@ -216,7 +170,6 @@ pub(super) struct EngineContext {
     cutscenes: CutsceneRuntime,
     pause: PauseState,
     audio: AudioRuntime,
-    manny_office: MannyOfficeState,
     tube_pose_aliases: TubePoseAliasCache,
 }
 
@@ -234,7 +187,6 @@ impl EngineContext {
             verbose,
             headless,
             install_root,
-            stream: None,
             scripts: ScriptRuntime::new(),
             events: Vec::new(),
             sets,
@@ -247,7 +199,6 @@ impl EngineContext {
             cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
             audio: AudioRuntime::new(),
-            manny_office: MannyOfficeState::default(),
             tube_pose_aliases,
         }
     }
@@ -369,18 +320,6 @@ impl EngineContext {
         }
     }
 
-    pub(super) fn normalize_tube_events(&mut self) {
-        let cache = self.tube_pose_aliases.borrow();
-        let Some(map) = cache.as_ref() else {
-            return;
-        };
-        for event in &mut self.events {
-            if let Some(updated) = normalize_tube_event(map, event) {
-                *event = updated;
-            }
-        }
-    }
-
     fn pause_view(&self) -> PauseRuntimeView<'_> {
         PauseRuntimeView::new(&self.pause)
     }
@@ -425,68 +364,14 @@ impl EngineContext {
         self.cutscene_runtime().clear_overrides();
     }
 
-    pub(super) fn set_stream(&mut self, stream: Option<Rc<StreamServer>>) {
-        if stream.is_none()
-            && self
-                .cutscene_view()
-                .fullscreen_movie_viewer_generation()
-                .is_some()
-        {
-            panic!("stream dropped while fullscreen movie is in progress");
-        }
-        self.stream = stream;
-    }
-
     fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
-        let playback = select_playback(self.stream.clone(), &self.install_root, &movie)
-            .or_else(|| {
-                if self.headless {
-                    eprintln!(
-                        "[grim_engine] headless: simulating fullscreen movie {} without viewer",
-                        movie
-                    );
-                    Some(FullscreenMoviePlayback::Countdown)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| panic!("viewer playback unavailable for fullscreen movie {movie}"));
+        select_playback(&self.install_root, &movie, self.headless);
         self.cutscene_runtime()
-            .start_fullscreen_movie(movie, yields, playback)
+            .start_fullscreen_movie(movie, yields)
     }
 
     pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
-        if let Some(expected_generation) = self.cutscene_view().fullscreen_movie_viewer_generation()
-        {
-            if !viewer_ready(self.stream.as_ref(), expected_generation) {
-                let actual_generation = self
-                    .stream
-                    .as_ref()
-                    .map(|stream| stream.current_generation());
-                panic!(
-                    "viewer not ready for fullscreen movie: expected generation {expected_generation}, stream generation {actual_generation:?}"
-                );
-            }
-        }
         self.cutscene_runtime().poll_fullscreen_movie()
-    }
-
-    pub(super) fn force_movie_completion(&mut self, reason: MovieAction) -> bool {
-        self.cutscene_runtime().force_movie_completion(reason)
-    }
-
-    pub(super) fn handle_movie_control(&mut self, control: MovieControl, generation: u64) {
-        let expected_generation = self.cutscene_view().fullscreen_movie_viewer_generation();
-        if expected_generation != Some(generation) {
-            return;
-        }
-        let mut runtime = self.cutscene_runtime();
-        if runtime.apply_movie_control(&control) {
-            self.log_event(format!(
-                "cut_scene.fullscreen.control {} {:?}",
-                control.name, control.action
-            ));
-        }
     }
 
     fn begin_dialog_line(&mut self, id: &str, label: &str, line: &str) {
@@ -762,14 +647,6 @@ impl EngineContext {
         self.set_view().current_setup_for(set_file)
     }
 
-    pub(super) fn active_setup_label(&self) -> Option<String> {
-        let view = self.set_view();
-        let current = view.current_set()?;
-        let set_file = current.set_file.as_str();
-        let index = view.current_setup_for(set_file)?;
-        view.setup_label_for(set_file, index)
-    }
-
     fn set_actor_costume(&mut self, id: &str, label: &str, costume: Option<String>) {
         self.actor_runtime().set_actor_costume(id, label, costume);
     }
@@ -1016,39 +893,6 @@ impl EngineContext {
         self.movement_runtime().refresh_commentary_visibility();
     }
 
-    pub(super) fn commentary_snapshot(&self) -> Option<CommentarySnapshot> {
-        let view = self.cutscene_view();
-        let record = view.commentary()?;
-        Some(CommentarySnapshot {
-            label: record.label.clone(),
-            active: record.active,
-            suppressed_reason: record.suppressed_reason.clone(),
-        })
-    }
-
-    pub(super) fn tube_state_snapshot(&self) -> TubeStateSnapshot {
-        TubeStateSnapshot {
-            pose: self.manny_office.tube_pose.clone(),
-            contains: self.manny_office.tube_contains.clone(),
-        }
-    }
-
-    pub(super) fn update_tube_pose(&mut self, pose: Option<String>) {
-        if self.manny_office.tube_pose != pose {
-            if let Some(label) = pose.as_ref() {
-                self.log_event(format!(
-                    "actor.mo.tube.interest_actor.complete_chore {}",
-                    label
-                ));
-            }
-            self.manny_office.tube_pose = pose;
-        }
-    }
-
-    pub(super) fn update_tube_contains(&mut self, contains: Option<String>) {
-        self.manny_office.tube_contains = contains;
-    }
-
     fn set_commentary_active(&mut self, enabled: bool, label: Option<String>) {
         if !enabled {
             self.cutscene_runtime().disable_commentary();
@@ -1090,10 +934,6 @@ impl EngineContext {
 
     pub(super) fn actor_current_chore(&self, id: &str) -> Option<String> {
         self.actors.actor_current_chore(id).map(str::to_string)
-    }
-
-    pub(super) fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
-        self.actors.resolve_actor_handle(candidates)
     }
 
     fn actor_identity_by_handle(&self, handle: u32) -> Option<(String, String)> {
@@ -1148,11 +988,6 @@ impl EngineContext {
         self.movement_view().geometry_sector_hit(actor_id, raw_kind)
     }
 
-    pub(super) fn geometry_sector_name(&self, actor_id: &str, raw_kind: &str) -> Option<String> {
-        self.movement_view()
-            .geometry_sector_name(actor_id, raw_kind)
-    }
-
     fn set_actor_visibility(&mut self, actor_id: &str, label: &str, visible: bool) {
         let state = if visible { "visible" } else { "hidden" };
         self.log_event(format!("actor.visibility {} {state}", label));
@@ -1205,7 +1040,7 @@ mod tests {
     use super::menus::install_menu_common;
     use super::objects::ObjectSnapshot;
     use super::pause::{install_game_pauser, PauseEvent, PauseLabel};
-    use super::{EngineContext, EngineContextHandle};
+    use super::EngineContext;
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
     use grim_formats::SetFile as SetFileData;
     use mlua::{Function, Lua, Table, Value};
@@ -1239,27 +1074,6 @@ mod tests {
         assert!((vec.x - 1.0).abs() < f32::EPSILON);
         assert!((vec.y - 2.0).abs() < f32::EPSILON);
         assert!((vec.z - 3.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn handle_resolves_actor_and_logs_events() {
-        let context = Rc::new(RefCell::new(make_context()));
-        let handle = EngineContextHandle::new(context.clone());
-        let actor_handle = {
-            let mut ctx = context.borrow_mut();
-            let (actor_id, handle_id) = ctx.register_actor_with_handle("Manny", Some(1400));
-            ctx.put_actor_in_set(&actor_id, "Manny", "mo.set");
-            ctx.switch_to_set("mo.set");
-            handle_id
-        };
-        let resolved = handle
-            .resolve_actor_handle(&["Manny", "manny"])
-            .expect("actor handle");
-        assert_eq!(resolved.0, actor_handle);
-        handle.log_event("handle.test".to_string());
-        let guard = context.borrow();
-        let events = guard.events();
-        assert!(events.iter().any(|event| event == "handle.test"));
     }
 
     #[test]
@@ -1750,61 +1564,6 @@ mod tests {
             commentary.active,
             "commentary should resume once the sector is reactivated"
         );
-    }
-
-    #[test]
-    fn tube_state_snapshot_reflects_updates() {
-        let mut ctx = make_context();
-        let initial = ctx.tube_state_snapshot();
-        assert!(initial.pose.is_none());
-        assert!(initial.contains.is_none());
-
-        ctx.update_tube_pose(Some("mo_tube_set_closed_w_can".to_string()));
-        ctx.update_tube_contains(Some("memo".to_string()));
-        let snapshot = ctx.tube_state_snapshot();
-        assert_eq!(snapshot.pose.as_deref(), Some("mo_tube_set_closed_w_can"));
-        assert_eq!(snapshot.contains.as_deref(), Some("memo"));
-
-        ctx.update_tube_pose(None);
-        ctx.update_tube_contains(None);
-        let cleared = ctx.tube_state_snapshot();
-        assert!(cleared.pose.is_none());
-        assert!(cleared.contains.is_none());
-    }
-
-    #[test]
-    fn commentary_snapshot_reflects_runtime_state() {
-        let mut ctx = make_context();
-        {
-            let mut runtime = ctx.cutscene_runtime();
-            runtime.set_commentary(cutscenes::CommentaryRecord {
-                label: Some("Year1MannysOfficeDesign".to_string()),
-                object_handle: Some(3300),
-                active: true,
-                suppressed_reason: None,
-            });
-        }
-        let snapshot = ctx
-            .commentary_snapshot()
-            .expect("expected commentary snapshot");
-        assert_eq!(snapshot.label.as_deref(), Some("Year1MannysOfficeDesign"));
-        assert!(snapshot.active);
-        assert!(snapshot.suppressed_reason.is_none());
-
-        {
-            let mut runtime = ctx.cutscene_runtime();
-            runtime.set_commentary(cutscenes::CommentaryRecord {
-                label: Some("Year1MannysOfficeDesign".to_string()),
-                object_handle: Some(3300),
-                active: false,
-                suppressed_reason: Some("not_visible".to_string()),
-            });
-        }
-        let snapshot = ctx
-            .commentary_snapshot()
-            .expect("expected commentary snapshot");
-        assert!(!snapshot.active);
-        assert_eq!(snapshot.suppressed_reason.as_deref(), Some("not_visible"));
     }
 
     #[test]

@@ -240,11 +240,6 @@ impl<'a> MovementRuntimeView<'a> {
         self.sets.geometry_sector_hit(raw_kind, point)
     }
 
-    pub(super) fn geometry_sector_name(&self, actor_id: &str, raw_kind: &str) -> Option<String> {
-        self.geometry_sector_hit(actor_id, raw_kind)
-            .map(|hit| hit.name)
-    }
-
     pub(super) fn resolve_sector_hit(&self, actor_id: &str, kind: &str) -> Option<SectorHit> {
         let normalized_kind = if kind.is_empty() { "walk" } else { kind };
         let request = match normalized_kind {

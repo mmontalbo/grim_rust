@@ -1,26 +1,23 @@
 # Grim Engine Lua Host Overview
 
 The Lua host still carries the full boot pipeline for Manny's intro, but the
-exposed surface was tightened to support the minimal viewer stream only. Use
-this note as a quick map of what remains relevant.
+exposed surface was trimmed to a headless-only intro runner. The GrimStream
+socket and viewer handshakes were removed alongside the old streaming
+experiment. Use this note as a quick map of what remains relevant.
 
 ## Control Flow
 - `run_boot_sequence` (`lua_host/mod.rs`) loads assets, initialises Lua, and
--  drives the boot scripts until we reach the intro playback loop. It now
-  yields an `EngineRuntime` when either streaming is enabled or headless mode
-  is requested.
-- `EngineRuntime::run` advances the Lua scheduler at ~30 Hz, pipes deltas
-  through `StateUpdateBuilder`, and either publishes them over the bound stream
-  or prints fresh events when running headless.
-- `EngineContextHandle` now only exposes the tiny set of helpers needed by
-  `StateUpdateBuilder` (actor lookup and hotspot state).
+  drives the boot scripts until we reach the intro playback loop. It always
+  yields an `EngineRuntime` because we now keep the Lua VM alive long enough to
+  finish the intro movie before exiting.
+- `EngineRuntime::run` advances the Lua scheduler at ~30 Hz, polls fullscreen
+  movie completion, and prints fresh events when running headless. There is no
+  stream publishing path anymore.
 
 ## Module Layout
 - `context/` holds the gameplay state and binding glue. Many modules remain
   (actors, sets, script runtime, etc.), but they are currently exercised solely
   by the intro boot path.
-- `state_update.rs` owns the translation from context state into the
-  serialisable `StateUpdate` payloads used by the viewer.
 - `types.rs` groups lightweight data structures (`Vec3`, seed transforms, etc.)
   shared between the host and the streaming layer.
 

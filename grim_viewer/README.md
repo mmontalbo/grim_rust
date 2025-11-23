@@ -8,7 +8,9 @@ the manifest/timeline/movement tooling has been removed to keep iteration fast.
 ## Current Scope
 - Connects to a retail GrimStream endpoint and displays incoming frames.
 - Connects to the engine GrimStream endpoint (when provided) and renders a
-  lightweight 2D overlay showing Manny's recent path and current position.
+  lightweight 2D overlay showing Manny's recent path and current position. The
+  trimmed `grim_engine` no longer exposes this stream, so expect the placeholder
+  overlay unless you revive the old streaming server from history.
 - Exposes the same keyboard controls as before:
   - `Space` toggles pause/resume of the retail stream.
   - `.` / `>` steps one frame while paused.

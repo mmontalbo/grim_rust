@@ -1,56 +1,19 @@
 use std::path::Path;
-use std::rc::Rc;
 
-use crate::stream::StreamServer;
-use grim_stream::MovieStart;
-
-use super::cutscenes::FullscreenMoviePlayback;
-
-pub(super) fn select_playback(
-    stream: Option<Rc<StreamServer>>,
-    install_root: &Path,
-    movie: &str,
-) -> Option<FullscreenMoviePlayback> {
-    let stream = stream?;
-    prepare_viewer_playback(stream, install_root, movie)
-}
-
-pub(super) fn viewer_ready(stream: Option<&Rc<StreamServer>>, expected_generation: u64) -> bool {
-    match stream {
-        Some(stream) => {
-            stream.current_generation() == expected_generation && stream.viewer_gate().is_ready()
-        }
-        None => false,
-    }
-}
-
-fn prepare_viewer_playback(
-    stream: Rc<StreamServer>,
-    install_root: &Path,
-    movie: &str,
-) -> Option<FullscreenMoviePlayback> {
-    if !stream.viewer_gate().is_ready() {
-        eprintln!("[grim_engine] viewer gate not ready for movie {movie}");
-        return None;
-    }
-    let relative_path = resolve_remastered_movie(install_root, movie).or_else(|| {
+pub(super) fn select_playback(install_root: &Path, movie: &str, headless: bool) {
+    if resolve_remastered_movie(install_root, movie).is_none() && !headless {
         eprintln!(
-            "[grim_engine] remastered movie asset missing for {movie} under {}",
+            "[grim_engine] remastered movie asset missing for {movie} under {}; simulating playback",
             install_root.display()
         );
-        None
-    })?;
-    let generation = stream.current_generation();
-    let start = MovieStart {
-        name: movie.to_string(),
-        relative_path: Some(relative_path.clone()),
-    };
-    if let Err(err) = stream.send_movie_start(start) {
-        eprintln!("[grim_engine] failed to send MovieStart for {movie}: {err:?}");
-        return None;
     }
-    // TODO: add explicit MovieReady/Error handshake so viewer-side failures are visible sooner.
-    Some(FullscreenMoviePlayback::Viewer { generation })
+
+    if headless {
+        eprintln!(
+            "[grim_engine] headless: simulating fullscreen movie {} without viewer",
+            movie
+        );
+    }
 }
 
 fn resolve_remastered_movie(install_root: &Path, movie: &str) -> Option<String> {

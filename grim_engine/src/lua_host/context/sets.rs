@@ -121,10 +121,6 @@ impl<'a> SetRuntimeView<'a> {
     pub(super) fn current_setup_for(&self, set_file: &str) -> Option<i32> {
         self.runtime.current_setup_for(set_file)
     }
-
-    pub(super) fn setup_label_for(&self, set_file: &str, index: i32) -> Option<String> {
-        self.runtime.setup_label_for(set_file, index)
-    }
 }
 
 #[derive(Debug)]
@@ -300,13 +296,6 @@ impl SetRuntime {
 
     pub(crate) fn current_setup_for(&self, set_file: &str) -> Option<i32> {
         self.current_setups.get(set_file).copied()
-    }
-
-    pub(crate) fn setup_label_for(&self, set_file: &str, index: i32) -> Option<String> {
-        self.available_sets
-            .get(set_file)
-            .and_then(|descriptor| descriptor.setup_label_for_index(index))
-            .map(|label| label.to_string())
     }
 
     pub(crate) fn available_sets(&self) -> &BTreeMap<String, SetDescriptor> {

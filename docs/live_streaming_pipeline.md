@@ -1,47 +1,18 @@
 # Live Stream Pipeline (Current State)
 
-We previously explored a large streaming stack that exposed timeline diffs,
-coverage tracking, and retail telemetry alongside the viewer. That experiment
-has been shelved while we focus on the minimal intro playback loop.
+The GrimStream experiment was removed while `grim_engine` was trimmed to a minimal intro runner. The engine no longer binds a stream socket, waits for viewer handshakes, or emits live state updates. It simply plays the intro cutscene, logs `intro.timeline` markers, and exits.
 
-## What Still Exists
-- `grctl scenario run intro-to-office-computer` is the canonical intro playback
-  harness. Add `--with-viewer` to watch the stream and `--with-retail` if you
-  also need the retail capture pane.
-- `grim_engine` exposes a GrimStream socket when invoked with `--stream-bind`.
-  The stream only carries the intro playback state needed for the viewer UI.
-- The viewer still understands the GrimStream handshake and renders a minimal
-  overlay (Manny trail + current position) when the engine connects. Movie
-  playback uses the ffmpeg pipeline.
+## Recommended flow
 
-## What Was Removed
-- No CLI flags remain for timeline dumps, hotspot demos, or coverage exports.
-- Control messages (`pause`, `seek`, etc.) are not implemented. The viewer
-  renders whatever the engine publishes and that is sufficient for the current
-  milestone.
+- `grctl scenario run intro-to-office-computer` (or `intro-to-office-tube`) runs the headless engine with verbose logging and waits for `movie.logos.*` / `movie.intro.*` markers.
+- `grctl watch intro-timeline --launch` clears prior logs, starts the headless engine and retail capture, and tails the engine log plus retail telemetry to show intro timeline parity.
+- If you need the old viewer/stream overlays, recover them from Git history and reintroduce them as a dedicated follow-up rather than threading compatibility code through the minimal binary.
 
-## Recommended Flow
+## What was removed
 
-```
-grctl scenario run intro-to-office-computer --with-viewer
-```
+- GrimStream serving in `grim_engine` and all `--stream-bind`/`--engine-stream` flags.
+- Viewer handshakes (`viewer_ready.*`) and stream-ready gates.
+- Live movie control messages and incremental state updates (`StateUpdateBuilder`).
+- Scenario harness requirements that gated retail capture behind the viewer.
 
-The scenario harness launches the engine and viewer under `grctl` supervision,
-waits for the `viewer_ready` handshake, applies a default timeout, and tails
-logs in `target/grctl/logs/`. Pass `--with-retail` to include the retail capture
-pane or `--detach` when you only need a managed launch.
-
-```
-cargo run -p grim_engine -- --stream-bind 127.0.0.1:17500
-```
-
-Use the raw engine command above only when debugging the stream endpoint
-directly; otherwise prefer the `grctl` wrapper so logs and timeouts stay
-consistent.
-
-## Looking Ahead
-
-When the project needs richer streaming again, pull the old design notes from
-Git history instead of layering compatibility branches onto the trimmed stack.
-Reintroduce capture/telemetry as dedicated milestones so we can keep the intro
-playback loop simple in the meantime.
+Retail capture and intro telemetry are still available through the `grctl retail` commands, but they no longer integrate with a live engine stream.

@@ -153,23 +153,6 @@ impl ActorStore {
         self.actors_installed
     }
 
-    pub(super) fn resolve_actor_handle(&self, candidates: &[&str]) -> Option<(u32, String)> {
-        for candidate in candidates {
-            if let Some(actor) = self.actors.get(*candidate) {
-                if actor.handle == 0 {
-                    return None;
-                }
-                let id = self
-                    .handles
-                    .get(&actor.handle)
-                    .cloned()
-                    .unwrap_or_else(|| actor.name.to_ascii_lowercase());
-                return Some((actor.handle, id));
-            }
-        }
-        None
-    }
-
     pub(super) fn actor_identity_by_handle(&self, handle: u32) -> Option<(String, String)> {
         let id = self.handles.get(&handle)?.clone();
         let label = self
