@@ -197,22 +197,26 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             } else {
                 log_line("lua_getref tracker mutex poisoned; skipping cache update");
             }
-            log_event(add_origin_fields(
-                EventBuilder::new("fetch_ref")
-                    .kv("ref", reference)
-                    .kv("handle", format!("0x{handle:08x}"))
-                    .kv("label", label),
-                origin.as_ref(),
-            ));
+            if getref_verbose_enabled() {
+                log_event(add_origin_fields(
+                    EventBuilder::new("fetch_ref")
+                        .kv("ref", reference)
+                        .kv("handle", format!("0x{handle:08x}"))
+                        .kv("label", label),
+                    origin.as_ref(),
+                ));
+            }
             handle
         }
         None => {
-            log_event(
-                EventBuilder::new("fetch_ref")
-                    .kv("ref", reference)
-                    .kv("handle", "<unknown>")
-                    .kv("note", "lua_getref_symbol_missing"),
-            );
+            if getref_verbose_enabled() {
+                log_event(
+                    EventBuilder::new("fetch_ref")
+                        .kv("ref", reference)
+                        .kv("handle", "<unknown>")
+                        .kv("note", "lua_getref_symbol_missing"),
+                );
+            }
             0
         }
     }
@@ -477,6 +481,11 @@ impl GlobalAccessTracker {
 fn getglobal_verbose_enabled() -> bool {
     static VERBOSE: OnceLock<bool> = OnceLock::new();
     *VERBOSE.get_or_init(|| env::var("GRIM_SHIM_GETGLOBAL_VERBOSE").is_ok())
+}
+
+fn getref_verbose_enabled() -> bool {
+    static VERBOSE: OnceLock<bool> = OnceLock::new();
+    *VERBOSE.get_or_init(|| env::var("GRIM_SHIM_GETREF_VERBOSE").is_ok())
 }
 
 fn resolve_lua_function_label(handle: LuaObject) -> String {

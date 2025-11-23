@@ -16,7 +16,9 @@ type LuaSetGlobalFn = unsafe extern "C" fn(*const c_char);
 type LuaGetGlobalFn = unsafe extern "C" fn(*const c_char) -> LuaObject;
 type LuaGetCFunctionFn = unsafe extern "C" fn(LuaObject) -> Option<LuaCFunction>;
 type LuaLua2CFn = unsafe extern "C" fn(c_int) -> LuaObject;
+type LuaIsNumberFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaIsStringFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaGetNumberFn = unsafe extern "C" fn(LuaObject) -> c_double;
 type LuaGetStringFn = unsafe extern "C" fn(LuaObject) -> *const c_char;
 type LuaPushNumberFn = unsafe extern "C" fn(c_double);
 type LuaPushNilFn = unsafe extern "C" fn();
@@ -37,7 +39,9 @@ static LUA_SETGLOBAL: OnceLock<Option<LuaSetGlobalFn>> = OnceLock::new();
 static LUA_GETGLOBAL: OnceLock<Option<LuaGetGlobalFn>> = OnceLock::new();
 static LUA_GETCFUNCTION: OnceLock<Option<LuaGetCFunctionFn>> = OnceLock::new();
 static LUA_LUA2C: OnceLock<Option<LuaLua2CFn>> = OnceLock::new();
+static LUA_ISNUMBER: OnceLock<Option<LuaIsNumberFn>> = OnceLock::new();
 static LUA_ISSTRING: OnceLock<Option<LuaIsStringFn>> = OnceLock::new();
+static LUA_GETNUMBER: OnceLock<Option<LuaGetNumberFn>> = OnceLock::new();
 static LUA_GETSTRING: OnceLock<Option<LuaGetStringFn>> = OnceLock::new();
 static LUA_PUSHNUMBER: OnceLock<Option<LuaPushNumberFn>> = OnceLock::new();
 static LUA_PUSHNIL: OnceLock<Option<LuaPushNilFn>> = OnceLock::new();
@@ -129,11 +133,28 @@ pub(crate) fn call_real_lua_getparam(index: c_int) -> Option<LuaObject> {
     }
 }
 
+pub(crate) fn call_real_lua_isnumber(object: LuaObject) -> bool {
+    unsafe {
+        lua_isnumber_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
 pub(crate) fn call_real_lua_isstring(object: LuaObject) -> bool {
     unsafe {
         lua_isstring_symbol()
             .map(|symbol| symbol(object) != 0)
             .unwrap_or(false)
+    }
+}
+
+pub(crate) fn call_real_lua_getnumber(object: LuaObject) -> Option<c_double> {
+    unsafe {
+        lua_getnumber_symbol().and_then(|symbol| {
+            let value = symbol(object);
+            Some(value)
+        })
     }
 }
 
@@ -343,6 +364,16 @@ fn lua_lua2c_symbol() -> Option<LuaLua2CFn> {
     })
 }
 
+fn lua_isnumber_symbol() -> Option<LuaIsNumberFn> {
+    *LUA_ISNUMBER.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_isnumber\0",
+            label: "lua_isnumber",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsNumberFn>(ptr))
+    })
+}
+
 fn lua_isstring_symbol() -> Option<LuaIsStringFn> {
     *LUA_ISSTRING.get_or_init(|| unsafe {
         resolve_symbol_with_variants(&[SymbolVariant {
@@ -350,6 +381,16 @@ fn lua_isstring_symbol() -> Option<LuaIsStringFn> {
             label: "lua_isstring",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsStringFn>(ptr))
+    })
+}
+
+fn lua_getnumber_symbol() -> Option<LuaGetNumberFn> {
+    *LUA_GETNUMBER.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_getnumber\0",
+            label: "lua_getnumber",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetNumberFn>(ptr))
     })
 }
 
