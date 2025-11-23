@@ -81,4 +81,16 @@ pub unsafe extern "C" fn lua_error(message: *const libc::c_char) {
     trace_lua_error(message);
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn lua_pushnumber(value: libc::c_double) {
+    telemetry::record_pushed_number(value);
+    lua_api::call_real_lua_pushnumber(value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lua_pushnil() {
+    telemetry::record_pushed_nil();
+    lua_api::call_real_lua_pushnil();
+}
+
 // Retail liblua only exports the capital-C variant; keep a note to avoid re-adding lua_pushcclosure.

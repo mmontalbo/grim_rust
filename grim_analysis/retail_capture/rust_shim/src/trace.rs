@@ -264,12 +264,14 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
         log_event(
             EventBuilder::new("call_func")
                 .kv("handle", format!("0x{handle:08x}"))
-                .kv("label", label)
+                .kv("label", label.clone())
                 .kv("note", "tracker_poisoned"),
         );
     }
 
-    forward_int_result("lua_callfunction", call_real_lua_callfunction(handle))
+    let result = forward_int_result("lua_callfunction", call_real_lua_callfunction(handle));
+
+    result
 }
 
 fn forward_int_result(label: &str, result: Option<c_int>) -> c_int {
