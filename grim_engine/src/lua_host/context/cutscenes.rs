@@ -33,20 +33,55 @@ impl CommentaryRecord {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct OverrideRecord {
-    pub(super) description: String,
-}
-
+use crate::lua_host::telemetry::{log_event, EventBuilder};
+use grim_telemetry_common::{
+    default_fullscreen_duration_ms, normalized_movie_label, DEFAULT_POLL_STEP_MS,
+};
 use serde_json::json;
+use std::fmt::Display;
 
 #[derive(Debug, Clone)]
 pub(super) struct FullscreenMovieState {
-    pub(super) name: String,
-    pub(super) yields_remaining: u32,
+    name: String,
+    label: Option<String>,
+    polls: u64,
+    elapsed_ms: u128,
+    duration_ms: u128,
+    skip_requested: bool,
 }
 
-const DEFAULT_FULLSCREEN_YIELDS: u32 = 6;
+#[derive(Debug, Clone, Copy)]
+enum PlayingState {
+    Known(bool),
+    Unknown,
+}
+
+impl PlayingState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            PlayingState::Known(true) => "true",
+            PlayingState::Known(false) => "false",
+            PlayingState::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CutsceneEndReason {
+    Poll,
+    StopMovie,
+    Replaced,
+}
+
+impl CutsceneEndReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            CutsceneEndReason::Poll => "poll",
+            CutsceneEndReason::StopMovie => "stop_movie",
+            CutsceneEndReason::Replaced => "replaced",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct DialogState {
@@ -58,7 +93,6 @@ pub(super) struct DialogState {
 #[derive(Debug, Default, Clone)]
 pub(super) struct CutsceneRuntime {
     cut_scene_stack: Vec<CutSceneRecord>,
-    override_stack: Vec<OverrideRecord>,
     commentary: Option<CommentaryRecord>,
     active_dialog: Option<DialogState>,
     speaking_actor: Option<String>,
@@ -78,29 +112,7 @@ impl CutsceneRuntime {
         set_file: Option<String>,
         sector: Option<String>,
         suppressed: bool,
-    ) -> String {
-        let display = label
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .unwrap_or("<unnamed>")
-            .to_string();
-        let flag_list = if flags.is_empty() {
-            None
-        } else {
-            Some(flags.join(", "))
-        };
-        let mut message = if let Some(flags) = flag_list.as_ref() {
-            format!("cut_scene.start {} [{}]", display, flags)
-        } else {
-            format!("cut_scene.start {}", display)
-        };
-        if suppressed {
-            let sector_name = sector
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .unwrap_or("<unknown>");
-            message.push_str(&format!(" (sector {} inactive)", sector_name));
-        }
+    ) {
         self.cut_scene_stack.push(CutSceneRecord {
             label,
             flags,
@@ -108,27 +120,13 @@ impl CutsceneRuntime {
             sector,
             suppressed,
         });
-        message
     }
 
-    pub(super) fn pop_cut_scene(&mut self) -> Option<String> {
-        let record = self.cut_scene_stack.pop()?;
-        let display = record.display_label().to_string();
-        let message = if record.suppressed {
-            format!("cut_scene.end {} (suppressed)", display)
-        } else {
-            format!("cut_scene.end {}", display)
-        };
-        Some(message)
+    pub(super) fn pop_cut_scene(&mut self) -> bool {
+        self.cut_scene_stack.pop().is_some()
     }
 
-    pub(super) fn handle_sector_activation(
-        &mut self,
-        set_file: &str,
-        sector: &str,
-        active: bool,
-    ) -> Vec<String> {
-        let mut messages = Vec::new();
+    pub(super) fn handle_sector_activation(&mut self, set_file: &str, sector: &str, active: bool) {
         for record in &mut self.cut_scene_stack {
             let matches_set = record
                 .set_file
@@ -142,35 +140,12 @@ impl CutsceneRuntime {
                 if record_sector.eq_ignore_ascii_case(sector) {
                     if active && record.suppressed {
                         record.suppressed = false;
-                        messages.push(format!("cut_scene.unblock {}", record.display_label()));
                     } else if !active && !record.suppressed {
                         record.suppressed = true;
-                        messages.push(format!("cut_scene.block {}", record.display_label()));
                     }
                 }
             }
         }
-        messages
-    }
-
-    pub(super) fn push_override(&mut self, description: String) -> String {
-        self.override_stack.push(OverrideRecord {
-            description: description.clone(),
-        });
-        format!("cut_scene.override.push {}", description)
-    }
-
-    pub(super) fn pop_override(&mut self) -> Option<String> {
-        let record = self.override_stack.pop()?;
-        Some(format!("cut_scene.override.pop {}", record.description))
-    }
-
-    pub(super) fn take_all_overrides(&mut self) -> Vec<String> {
-        let mut messages = Vec::new();
-        while let Some(record) = self.override_stack.pop() {
-            messages.push(format!("cut_scene.override.pop {}", record.description));
-        }
-        messages
     }
 
     pub(super) fn set_commentary(&mut self, record: CommentaryRecord) -> Option<String> {
@@ -261,28 +236,165 @@ impl CutsceneRuntime {
         self.speaking_actor.as_deref()
     }
 
-    pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> String {
-        let play_yields = yields.unwrap_or(DEFAULT_FULLSCREEN_YIELDS).max(1);
+    pub(super) fn start_fullscreen_movie(
+        &mut self,
+        events: &mut Vec<String>,
+        movie: String,
+        yields: Option<u32>,
+    ) -> bool {
+        if let Some(state) = self.fullscreen_movie.take() {
+            self.finish_fullscreen_movie(
+                events,
+                state,
+                PlayingState::Known(false),
+                Some(CutsceneEndReason::Replaced),
+            );
+        }
+
+        let duration_ms = simulated_duration_ms(&movie, yields);
+        let label = normalized_movie_label(&movie).map(|value| value.to_string());
+        if let Some(label) = label.as_deref() {
+            events.push(intro_timeline_json(&format!("{label}.start")));
+        }
+
+        log_cutscene_event(
+            events,
+            CutsceneEventFields {
+                phase: "start",
+                movie: &movie,
+                movie_label: label.as_deref(),
+                playing: PlayingState::Known(true),
+                elapsed_ms: Some(0),
+                polls: Some(0),
+                result: None,
+            },
+        );
+
         self.fullscreen_movie = Some(FullscreenMovieState {
-            name: movie.clone(),
-            yields_remaining: play_yields,
+            name: movie,
+            label,
+            polls: 0,
+            elapsed_ms: 0,
+            duration_ms,
+            skip_requested: false,
         });
-        format!("cut_scene.fullscreen.start {movie}")
+        true
     }
 
-    pub(super) fn poll_fullscreen_movie(&mut self) -> (bool, Option<String>) {
-        let Some(state) = self.fullscreen_movie.as_mut() else {
-            return (false, None);
+    pub(super) fn poll_fullscreen_movie(&mut self, events: &mut Vec<String>) -> bool {
+        let Some(mut state) = self.fullscreen_movie.take() else {
+            log_cutscene_event(
+                events,
+                CutsceneEventFields {
+                    phase: "poll",
+                    movie: "<none>",
+                    movie_label: None,
+                    playing: PlayingState::Unknown,
+                    elapsed_ms: None,
+                    polls: None,
+                    result: None,
+                },
+            );
+            return false;
         };
 
-        if state.yields_remaining > 1 {
-            state.yields_remaining -= 1;
-            (true, None)
+        state.polls = state.polls.saturating_add(1);
+        state.elapsed_ms = state.elapsed_ms.saturating_add(DEFAULT_POLL_STEP_MS);
+        let playing = if state.elapsed_ms < state.duration_ms {
+            PlayingState::Known(true)
         } else {
-            let movie = state.name.clone();
-            self.fullscreen_movie = None;
-            (false, Some(format!("cut_scene.fullscreen.end {movie}")))
+            PlayingState::Known(false)
+        };
+
+        log_cutscene_event(
+            events,
+            CutsceneEventFields {
+                phase: "poll",
+                movie: &state.name,
+                movie_label: state.label.as_deref(),
+                playing,
+                elapsed_ms: Some(state.elapsed_ms),
+                polls: Some(state.polls),
+                result: None,
+            },
+        );
+
+        if matches!(playing, PlayingState::Known(true)) {
+            self.fullscreen_movie = Some(state);
+            true
+        } else {
+            let reason = if state.skip_requested {
+                CutsceneEndReason::StopMovie
+            } else {
+                CutsceneEndReason::Poll
+            };
+            self.finish_fullscreen_movie(events, state, playing, Some(reason));
+            false
         }
+    }
+
+    pub(super) fn request_cutscene_skip(&mut self, events: &mut Vec<String>) {
+        let Some(state) = self.fullscreen_movie.as_mut() else {
+            return;
+        };
+        if state.skip_requested {
+            return;
+        }
+        state.skip_requested = true;
+        log_cutscene_skip_event(
+            events,
+            "request",
+            state.label.as_deref(),
+            &state.name,
+            Some(state.elapsed_ms),
+            Some(state.polls),
+        );
+    }
+
+    pub(super) fn stop_fullscreen_movie(&mut self, events: &mut Vec<String>) {
+        let Some(state) = self.fullscreen_movie.take() else {
+            return;
+        };
+        self.finish_fullscreen_movie(
+            events,
+            state,
+            PlayingState::Known(false),
+            Some(CutsceneEndReason::StopMovie),
+        );
+    }
+
+    fn finish_fullscreen_movie(
+        &mut self,
+        events: &mut Vec<String>,
+        state: FullscreenMovieState,
+        playing: PlayingState,
+        reason: Option<CutsceneEndReason>,
+    ) {
+        if state.skip_requested {
+            log_cutscene_skip_event(
+                events,
+                "complete",
+                state.label.as_deref(),
+                &state.name,
+                Some(state.elapsed_ms),
+                Some(state.polls),
+            );
+        }
+        if let Some(label) = state.label.as_deref() {
+            events.push(intro_timeline_json(&format!("{label}.end")));
+        }
+        log_cutscene_event(
+            events,
+            CutsceneEventFields {
+                phase: "end",
+                movie: &state.name,
+                movie_label: state.label.as_deref(),
+                playing,
+                elapsed_ms: Some(state.elapsed_ms),
+                polls: Some(state.polls),
+                result: reason.map(|value| value.as_str()),
+            },
+        );
     }
 }
 
@@ -310,45 +422,17 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
         sector: Option<String>,
         suppressed: bool,
     ) {
-        let message = self
-            .runtime
+        self.runtime
             .push_cut_scene(label, flags, set_file, sector, suppressed);
-        self.events.push(message);
     }
 
     pub(super) fn pop_cut_scene(&mut self) {
-        if let Some(message) = self.runtime.pop_cut_scene() {
-            self.events.push(message);
-        }
-    }
-
-    pub(super) fn push_override(&mut self, description: String) {
-        let message = self.runtime.push_override(description);
-        self.events.push(message);
-    }
-
-    pub(super) fn pop_override(&mut self) -> bool {
-        if let Some(message) = self.runtime.pop_override() {
-            self.events.push(message);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(super) fn clear_overrides(&mut self) {
-        for message in self.runtime.take_all_overrides() {
-            self.events.push(message);
-        }
+        self.runtime.pop_cut_scene();
     }
 
     pub(super) fn handle_sector_activation(&mut self, set_file: &str, sector: &str, active: bool) {
-        let messages = self
-            .runtime
+        self.runtime
             .handle_sector_activation(set_file, sector, active);
-        for message in messages {
-            self.events.push(message);
-        }
     }
 
     pub(super) fn set_commentary(&mut self, record: CommentaryRecord) {
@@ -372,23 +456,20 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
     }
 
     pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
-        let message = self.runtime.start_fullscreen_movie(movie, yields);
-        if let Some(label) = intro_timeline_movie_label_from_message(&message, "start") {
-            self.events.push(intro_timeline_json(&label));
-        }
-        self.events.push(message);
-        true
+        self.runtime
+            .start_fullscreen_movie(self.events, movie, yields)
     }
 
     pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
-        let (active, maybe_message) = self.runtime.poll_fullscreen_movie();
-        if let Some(message) = maybe_message {
-            if let Some(label) = intro_timeline_movie_label_from_message(&message, "end") {
-                self.events.push(intro_timeline_json(&label));
-            }
-            self.events.push(message);
-        }
-        active
+        self.runtime.poll_fullscreen_movie(self.events)
+    }
+
+    pub(super) fn request_cutscene_skip(&mut self) {
+        self.runtime.request_cutscene_skip(self.events);
+    }
+
+    pub(super) fn stop_fullscreen_movie(&mut self) {
+        self.runtime.stop_fullscreen_movie(self.events);
     }
 }
 
@@ -417,27 +498,88 @@ impl<'a> CutsceneRuntimeView<'a> {
     }
 }
 
-fn intro_timeline_movie_label_from_message(message: &str, phase: &str) -> Option<String> {
-    let prefix = if message.starts_with("cut_scene.fullscreen.start ") {
-        "cut_scene.fullscreen.start "
-    } else if message.starts_with("cut_scene.fullscreen.end ") {
-        "cut_scene.fullscreen.end "
-    } else {
-        return None;
-    };
-    let movie = message[prefix.len()..].trim();
-    intro_timeline_movie_label(movie, phase)
+struct CutsceneEventFields<'a> {
+    phase: &'a str,
+    movie: &'a str,
+    movie_label: Option<&'a str>,
+    playing: PlayingState,
+    elapsed_ms: Option<u128>,
+    polls: Option<u64>,
+    result: Option<&'a str>,
 }
 
-fn intro_timeline_movie_label(movie: &str, phase: &str) -> Option<String> {
-    let normalized = movie.trim().trim_end_matches(".snm").to_ascii_lowercase();
-    let prefix = match normalized.as_str() {
-        "intro" => "movie.intro",
-        "logos" => "movie.logos",
-        "mo_ts" => "movie.mo_ts",
-        _ => return None,
-    };
-    Some(format!("{prefix}.{phase}"))
+struct EventLineBuilder {
+    builder: EventBuilder,
+    parts: Vec<String>,
+}
+
+impl EventLineBuilder {
+    fn new(event: &str) -> Self {
+        Self {
+            builder: EventBuilder::new(event),
+            parts: vec![format!("event={event}")],
+        }
+    }
+
+    fn kv(mut self, key: &str, value: impl Display) -> Self {
+        let value = value.to_string();
+        self.builder = self.builder.kv(key, &value);
+        self.parts.push(format!("{key}={value}"));
+        self
+    }
+
+    fn kv_opt<T: Display>(mut self, key: &str, value: Option<T>) -> Self {
+        if let Some(value) = value {
+            let value = value.to_string();
+            self.builder = self.builder.kv(key, &value);
+            self.parts.push(format!("{key}={value}"));
+        }
+        self
+    }
+
+    fn finish(self) -> (EventBuilder, String) {
+        (self.builder, self.parts.join(" "))
+    }
+}
+
+fn log_cutscene_event(events: &mut Vec<String>, fields: CutsceneEventFields<'_>) {
+    let (builder, line) = EventLineBuilder::new("cutscene")
+        .kv("phase", fields.phase)
+        .kv("movie", fields.movie)
+        .kv("playing", fields.playing.as_str())
+        .kv_opt("movie_label", fields.movie_label)
+        .kv_opt("elapsed_ms", fields.elapsed_ms)
+        .kv_opt("polls", fields.polls)
+        .kv_opt("result", fields.result)
+        .finish();
+    log_event(builder);
+    events.push(line);
+}
+
+fn log_cutscene_skip_event(
+    events: &mut Vec<String>,
+    phase: &str,
+    movie_label: Option<&str>,
+    movie: &str,
+    elapsed_ms: Option<u128>,
+    polls: Option<u64>,
+) {
+    let (builder, line) = EventLineBuilder::new("cutscene_skip")
+        .kv("phase", phase)
+        .kv("movie", movie)
+        .kv_opt("movie_label", movie_label)
+        .kv_opt("elapsed_ms", elapsed_ms)
+        .kv_opt("polls", polls)
+        .finish();
+    log_event(builder);
+    events.push(line);
+}
+
+fn simulated_duration_ms(movie: &str, override_polls: Option<u32>) -> u128 {
+    if let Some(polls) = override_polls {
+        return (polls.max(1) as u128) * DEFAULT_POLL_STEP_MS;
+    }
+    default_fullscreen_duration_ms(movie)
 }
 
 fn intro_timeline_json(event: &str) -> String {

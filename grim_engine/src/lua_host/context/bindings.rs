@@ -1201,34 +1201,6 @@ fn install_engine_bindings(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Re
         })?,
     )?;
 
-    let set_override_context = context.clone();
-    globals.set(
-        "set_override",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let mut ctx = set_override_context.borrow_mut();
-            match args.get(0) {
-                Some(Value::Nil) | None => {
-                    ctx.pop_override();
-                }
-                Some(value) => {
-                    let description = describe_value(value);
-                    ctx.push_override(description);
-                }
-            }
-            Ok(())
-        })?,
-    )?;
-
-    let kill_override_context = context.clone();
-    globals.set(
-        "kill_override",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            let mut ctx = kill_override_context.borrow_mut();
-            ctx.clear_overrides();
-            Ok(())
-        })?,
-    )?;
-
     let fade_context = context.clone();
     globals.set(
         "FadeInChore",
@@ -3392,8 +3364,6 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
 
     wrap_start_cut_scene(lua, context.clone())?;
     wrap_end_cut_scene(lua, context.clone())?;
-    wrap_set_override(lua, context.clone())?;
-    wrap_kill_override(lua, context.clone())?;
     wrap_wait_for_message(lua, context.clone())?;
 
     Ok(())
@@ -3406,9 +3376,7 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
     globals.set(
         "StopCommentaryImmediately",
         lua.create_function(move |_, _: Variadic<Value>| {
-            stop_commentary_context
-                .borrow_mut()
-                .log_event("cut_scene.stop_commentary".to_string());
+            let _ = stop_commentary_context.borrow();
             Ok(())
         })?,
     )?;
@@ -3464,11 +3432,7 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
         "IsFullscreenMoviePlaying",
         lua.create_function(move |_, _: Variadic<Value>| {
             let mut ctx = movie_state_context.borrow_mut();
-            let playing = ctx.poll_fullscreen_movie();
-            if playing {
-                ctx.log_event("cut_scene.fullscreen.poll".to_string());
-            }
-            Ok(playing)
+            Ok(ctx.poll_fullscreen_movie())
         })?,
     )?;
 
@@ -3516,8 +3480,8 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
         "StopMovie",
         lua.create_function(move |_, _: Variadic<Value>| {
             let mut ctx = stop_movie_context.borrow_mut();
-            while ctx.poll_fullscreen_movie() {}
-            ctx.log_event("cut_scene.fullscreen.stop".to_string());
+            ctx.request_cutscene_skip();
+            ctx.stop_fullscreen_movie();
             Ok(())
         })?,
     )?;
@@ -3527,11 +3491,7 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
         "IsMoviePlaying",
         lua.create_function(move |_, _: Variadic<Value>| {
             let mut ctx = movie_poll_context.borrow_mut();
-            let playing = ctx.poll_fullscreen_movie();
-            if playing {
-                ctx.log_event("cut_scene.fullscreen.poll".to_string());
-            }
-            Ok(playing)
+            Ok(ctx.poll_fullscreen_movie())
         })?,
     )?;
 
@@ -3539,9 +3499,7 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
     globals.set(
         "hideSkipButton",
         lua.create_function(move |_, _: Variadic<Value>| {
-            hide_skip_context
-                .borrow_mut()
-                .log_event("cut_scene.skip.hide".to_string());
+            let _ = hide_skip_context.borrow();
             Ok(())
         })?,
     )?;
@@ -3550,9 +3508,7 @@ fn install_cutscene_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> R
     globals.set(
         "showSkipButton",
         lua.create_function(move |_, _: Variadic<Value>| {
-            show_skip_context
-                .borrow_mut()
-                .log_event("cut_scene.skip.show".to_string());
+            let _ = show_skip_context.borrow();
             Ok(())
         })?,
     )?;
@@ -3647,61 +3603,6 @@ fn wrap_end_cut_scene(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<
         },
     )?;
     globals.set("END_CUT_SCENE", wrapper)?;
-    Ok(())
-}
-
-fn wrap_set_override(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    let original: Function = match globals.get("set_override") {
-        Ok(func) => func,
-        Err(_) => return Ok(()),
-    };
-    let registry_key = lua.create_registry_value(original)?;
-    let ctx = context.clone();
-    let wrapper = lua.create_function(
-        move |lua_ctx, args: Variadic<Value>| -> LuaResult<MultiValue> {
-            let values: Vec<Value> = args.into_iter().collect();
-            let original: Function = lua_ctx.registry_value(&registry_key)?;
-            let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
-            {
-                let mut ctx = ctx.borrow_mut();
-                match values.get(0) {
-                    Some(Value::Nil) | None => {
-                        ctx.pop_override();
-                    }
-                    Some(value) => {
-                        ctx.push_override(describe_value(value));
-                    }
-                }
-            }
-            Ok(result)
-        },
-    )?;
-    globals.set("set_override", wrapper)?;
-    Ok(())
-}
-
-fn wrap_kill_override(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    let original: Function = match globals.get("kill_override") {
-        Ok(func) => func,
-        Err(_) => return Ok(()),
-    };
-    let registry_key = lua.create_registry_value(original)?;
-    let ctx = context.clone();
-    let wrapper = lua.create_function(
-        move |lua_ctx, args: Variadic<Value>| -> LuaResult<MultiValue> {
-            let values: Vec<Value> = args.into_iter().collect();
-            let original: Function = lua_ctx.registry_value(&registry_key)?;
-            let result = original.call::<_, MultiValue>(MultiValue::from_vec(values.clone()))?;
-            {
-                let mut ctx = ctx.borrow_mut();
-                ctx.clear_overrides();
-            }
-            Ok(result)
-        },
-    )?;
-    globals.set("kill_override", wrapper)?;
     Ok(())
 }
 

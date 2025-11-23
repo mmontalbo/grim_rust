@@ -946,6 +946,7 @@ dependencies = [
  "clap",
  "grim_analysis",
  "grim_formats",
+ "grim_telemetry_common",
  "libc",
  "mlua",
  "serde_json",
@@ -990,9 +991,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grim_telemetry_common"
+version = "0.1.0"
+
+[[package]]
 name = "grim_telemetry_shim"
 version = "0.1.0"
 dependencies = [
+ "grim_telemetry_common",
  "libc",
 ]
 

@@ -352,18 +352,6 @@ impl EngineContext {
         self.cutscene_runtime().pop_cut_scene();
     }
 
-    fn push_override(&mut self, description: String) {
-        self.cutscene_runtime().push_override(description);
-    }
-
-    fn pop_override(&mut self) -> bool {
-        self.cutscene_runtime().pop_override()
-    }
-
-    fn clear_overrides(&mut self) {
-        self.cutscene_runtime().clear_overrides();
-    }
-
     fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
         select_playback(&self.install_root, &movie, self.headless);
         self.cutscene_runtime()
@@ -372,6 +360,14 @@ impl EngineContext {
 
     pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
         self.cutscene_runtime().poll_fullscreen_movie()
+    }
+
+    fn request_cutscene_skip(&mut self) {
+        self.cutscene_runtime().request_cutscene_skip();
+    }
+
+    fn stop_fullscreen_movie(&mut self) {
+        self.cutscene_runtime().stop_fullscreen_movie();
     }
 
     fn begin_dialog_line(&mut self, id: &str, label: &str, line: &str) {

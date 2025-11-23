@@ -68,9 +68,9 @@ pub fn run_boot_sequence(
     context::load_system_script(&lua, data_root)?;
     context::override_boot_stubs(&lua, context.clone())?;
     context::call_boot(&lua, context.clone())?;
-    context::drive_active_scripts(&lua, context.clone(), 8, 32)?;
+    context::drive_active_scripts(&lua, context.clone(), 8, 128)?;
     if context::ensure_intro_cutscene(&lua, context.clone(), false)? {
-        context::drive_active_scripts(&lua, context.clone(), 16, 64)?;
+        context::drive_active_scripts(&lua, context.clone(), 16, 128)?;
     }
 
     let snapshot = context.borrow();
@@ -129,7 +129,7 @@ impl EngineRuntime {
 
         loop {
             let tick_start = Instant::now();
-            context::drive_active_scripts(&self.lua, self.context.clone(), 8, 32)?;
+            context::drive_active_scripts(&self.lua, self.context.clone(), 8, 128)?;
             self.frame = self.frame.wrapping_add(1);
             self.progress_movies();
             self.flush_new_events();
@@ -158,8 +158,7 @@ impl EngineRuntime {
         };
         self.intro_started |= was_intro;
         let had_any_after = {
-            let mut ctx = self.context.borrow_mut();
-            let _ = ctx.poll_fullscreen_movie();
+            let ctx = self.context.borrow();
             let active = ctx.active_fullscreen_movie();
             self.intro_movie_active = active
                 .as_deref()
