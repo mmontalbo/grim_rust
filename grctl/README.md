@@ -16,7 +16,8 @@ Common subcommands:
 
 - `engine`, `viewer`, and `retail` each support `start`, `stop`, `status`, and
   `logs`. Pass `--tail <n>` to control the initial output and `--follow` (or
-  `-f`) to stream updates continuously.
+  `-f`) to stream updates continuously. Use `--attach` on `engine start` or
+  `retail start` to tee the log to your terminal right after launch.
 - `scenario run <name>` launches an end-to-end harness; see below for usage tips.
 
 All child processes are launched with a generated session id and a consistent

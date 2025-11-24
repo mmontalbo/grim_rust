@@ -87,6 +87,9 @@ struct EngineStart {
     /// Enable verbose Lua logging.
     #[arg(long)]
     verbose: bool,
+    /// Stream the engine log to this terminal until you Ctrl-C.
+    #[arg(long)]
+    attach: bool,
     /// Additional arguments forwarded directly to grim_engine after '--'.
     #[arg(last = true)]
     extra_args: Vec<String>,
@@ -448,7 +451,22 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<()> {
         log_path,
         command,
         command_line,
-    )
+    )?;
+
+    if args.attach {
+        println!(
+            "[grctl] attaching to engine log (Ctrl-C to detach): {}",
+            paths.log_path(ComponentKind::Engine).display()
+        );
+        show_logs(paths, ComponentKind::Engine, 200, true)?;
+    } else {
+        println!(
+            "[grctl] engine log: {} (use 'grctl engine logs -f' to follow)",
+            paths.log_path(ComponentKind::Engine).display()
+        );
+    }
+
+    Ok(())
 }
 
 fn start_viewer(args: ViewerStart, paths: &Paths) -> Result<()> {
@@ -1391,6 +1409,7 @@ fn start_intro_watch_components(
         release: engine_release,
         headless: headless_engine,
         verbose: true,
+        attach: false,
         extra_args: Vec::new(),
     };
     start_engine(engine_args, paths)?;
