@@ -1,6 +1,3 @@
-#[cfg(test)]
-use grim_formats::SetFile as SetFileData;
-
 #[derive(Debug, Clone)]
 pub(super) struct SetDescriptor {
     pub(super) variable_name: String,
@@ -19,12 +16,7 @@ pub(super) struct SetSnapshot {
 #[derive(Debug, Clone, Default)]
 pub(super) struct ParsedSetGeometry;
 
-impl ParsedSetGeometry {
-    #[cfg(test)]
-    pub(super) fn from_set_file(_file: SetFileData) -> Self {
-        ParsedSetGeometry
-    }
-}
+impl ParsedSetGeometry {}
 
 #[derive(Debug, Clone)]
 pub(super) struct SectorHit {

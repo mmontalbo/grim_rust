@@ -53,11 +53,6 @@ impl<'a> PauseRuntimeView<'a> {
     pub(super) fn active(&self) -> bool {
         self.state.active
     }
-
-    #[cfg(test)]
-    pub(super) fn history(&self) -> &'a [PauseEvent] {
-        &self.state.history
-    }
 }
 
 pub(crate) fn install_game_pauser(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {

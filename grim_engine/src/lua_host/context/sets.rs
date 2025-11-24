@@ -47,15 +47,6 @@ impl<'a> SetRuntimeAdapter<'a> {
         newly_loaded
     }
 
-    #[cfg(test)]
-    pub(super) fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
-        let (has_geometry, geometry_message) = self.runtime.ensure_sector_state_map(set_file);
-        if let Some(message) = geometry_message {
-            self.events.push(message);
-        }
-        has_geometry
-    }
-
     pub(super) fn set_sector_active(
         &mut self,
         set_file_hint: Option<&str>,
@@ -265,15 +256,6 @@ impl SetRuntime {
                 .find(|name| name.to_ascii_lowercase() == lower)
                 .cloned()
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn insert_geometry_for_tests(
-        &mut self,
-        set_file: &str,
-        geometry: ParsedSetGeometry,
-    ) {
-        self.set_geometry.insert(set_file.to_string(), geometry);
     }
 
     pub(crate) fn ensure_geometry_cached(&mut self, set_file: &str) -> Option<String> {

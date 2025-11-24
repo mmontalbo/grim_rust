@@ -559,11 +559,6 @@ impl EngineContext {
         runtime.mark_set_loaded(set_file);
     }
 
-    #[cfg(test)]
-    fn ensure_sector_state_map(&mut self, set_file: &str) -> bool {
-        self.set_runtime().ensure_sector_state_map(set_file)
-    }
-
     fn set_sector_active(
         &mut self,
         set_file_hint: Option<&str>,
