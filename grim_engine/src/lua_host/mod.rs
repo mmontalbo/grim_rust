@@ -3,7 +3,7 @@ mod telemetry;
 mod types;
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,12 +12,10 @@ use anyhow::{Context, Result};
 use grim_analysis::resources::ResourceGraph;
 use mlua::{Lua, LuaOptions, StdLib};
 
-use crate::lab_collection::LabCollection;
 use context::TubePoseAliasCache;
 
 pub fn run_boot_sequence(
     data_root: &Path,
-    lab_root: Option<&Path>,
     verbose: bool,
     headless: bool,
 ) -> Result<EngineRuntime> {
@@ -26,31 +24,6 @@ pub fn run_boot_sequence(
             .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
     );
 
-    let lab_root_path = lab_root
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("dev-install"));
-    let lab_collection = if lab_root_path.is_dir() {
-        match LabCollection::load_from_dir(&lab_root_path) {
-            Ok(collection) => Some(Rc::new(collection)),
-            Err(err) => {
-                eprintln!(
-                    "[grim_engine] warning: failed to load LAB archives from {}: {:?}",
-                    lab_root_path.display(),
-                    err
-                );
-                None
-            }
-        }
-    } else {
-        if verbose {
-            eprintln!(
-                "[grim_engine] info: LAB root {} missing; continuing without geometry",
-                lab_root_path.display()
-            );
-        }
-        None
-    };
-
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
         .context("initialising Lua runtime with standard libraries")?;
     let tube_pose_aliases: TubePoseAliasCache = Rc::new(RefCell::new(None));
@@ -58,8 +31,7 @@ pub fn run_boot_sequence(
         resources,
         verbose,
         headless,
-        lab_collection,
-        lab_root_path.clone(),
+        data_root.to_path_buf(),
         tube_pose_aliases.clone(),
     )));
 

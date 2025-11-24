@@ -8,10 +8,9 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         data_root,
         headless,
         verbose,
-        lab_root,
     } = args;
 
-    let runtime = run_boot_sequence(&data_root, lab_root.as_deref(), verbose, headless)?;
+    let runtime = run_boot_sequence(&data_root, verbose, headless)?;
     runtime.run()?;
 
     Ok(())

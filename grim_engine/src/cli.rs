@@ -17,9 +17,6 @@ struct Args {
     #[arg(long)]
     verbose: bool,
 
-    /// Directory containing LAB archives (default: dev-install)
-    #[arg(long)]
-    lab_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,7 +24,6 @@ pub struct RunLuaArgs {
     pub data_root: PathBuf,
     pub headless: bool,
     pub verbose: bool,
-    pub lab_root: Option<PathBuf>,
 }
 
 pub fn parse() -> RunLuaArgs {
@@ -36,6 +32,5 @@ pub fn parse() -> RunLuaArgs {
         data_root: args.data_root,
         headless: args.headless,
         verbose: args.verbose,
-        lab_root: args.lab_root,
     }
 }

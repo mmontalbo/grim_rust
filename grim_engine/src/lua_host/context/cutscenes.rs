@@ -178,29 +178,6 @@ impl CutsceneRuntime {
         }
     }
 
-    pub(super) fn update_commentary_visibility(
-        &mut self,
-        visible: bool,
-        suppressed_reason: &str,
-    ) -> Option<String> {
-        let record = self.commentary.as_mut()?;
-        match (record.active, visible) {
-            (true, false) => {
-                record.active = false;
-                record.suppressed_reason = Some(suppressed_reason.to_string());
-                let display = record.display_label().to_string();
-                Some(format!("commentary.suspend {}", display))
-            }
-            (false, true) => {
-                record.active = true;
-                record.suppressed_reason = None;
-                let display = record.display_label().to_string();
-                Some(format!("commentary.resume {}", display))
-            }
-            _ => None,
-        }
-    }
-
     pub(super) fn commentary(&self) -> Option<&CommentaryRecord> {
         self.commentary.as_ref()
     }
@@ -444,15 +421,6 @@ impl<'a> CutsceneRuntimeAdapter<'a> {
     pub(super) fn disable_commentary(&mut self) {
         let message = self.runtime.disable_commentary();
         self.events.push(message);
-    }
-
-    pub(super) fn update_commentary_visibility(&mut self, visible: bool, suppressed_reason: &str) {
-        if let Some(message) = self
-            .runtime
-            .update_commentary_visibility(visible, suppressed_reason)
-        {
-            self.events.push(message);
-        }
     }
 
     pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {

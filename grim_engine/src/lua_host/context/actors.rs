@@ -199,17 +199,6 @@ impl ActorStore {
             .or_else(|| self.actors.get(&actor_id.to_ascii_lowercase()))
     }
 
-    pub(super) fn actor_position_xy(&self, actor_id: &str) -> Option<(f32, f32)> {
-        if let Some(actor) = self.actors.get(actor_id) {
-            return actor.position.map(|pos| (pos.x, pos.y));
-        }
-        let lowercase = actor_id.to_ascii_lowercase();
-        self.actors
-            .get(&lowercase)
-            .and_then(|actor| actor.position)
-            .map(|pos| (pos.x, pos.y))
-    }
-
     pub(super) fn set_actor_moving(&mut self, handle: u32, moving: bool) {
         if moving {
             self.moving_actors.insert(handle);

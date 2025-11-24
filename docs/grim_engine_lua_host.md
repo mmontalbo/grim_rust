@@ -7,9 +7,9 @@ experiment. Use this note as a quick map of what remains relevant.
 
 ## Control Flow
 - `run_boot_sequence` (`lua_host/mod.rs`) loads assets, initialises Lua, and
-  drives the boot scripts until we reach the intro playback loop. It always
-  yields an `EngineRuntime` because we now keep the Lua VM alive long enough to
-  finish the intro movie before exiting.
+  drives the boot scripts until we reach the intro playback loop. It yields an
+  `EngineRuntime` that stays alive long enough to finish the intro movie before
+  exiting.
 - `EngineRuntime::run` advances the Lua scheduler at ~30 Hz, polls fullscreen
   movie completion, and prints fresh events when running headless. There is no
   stream publishing path anymore.

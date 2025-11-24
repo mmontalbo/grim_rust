@@ -167,19 +167,13 @@ fn install_footsteps_table(lua: &Lua) -> LuaResult<()> {
     }
 
     let table = lua.create_table()?;
-    for profile in FOOTSTEP_PROFILES {
-        let entry = lua.create_table()?;
-        entry.set("prefix", profile.prefix)?;
-        entry.set("left_walk", profile.left_walk)?;
-        entry.set("right_walk", profile.right_walk)?;
-        if let Some(count) = profile.left_run {
-            entry.set("left_run", count)?;
-        }
-        if let Some(count) = profile.right_run {
-            entry.set("right_run", count)?;
-        }
-        table.set(profile.key, entry)?;
-    }
+    // Minimal stub so scripts that consult the table do not fail, without
+    // carrying the full retail footstep map.
+    let entry = lua.create_table()?;
+    entry.set("prefix", "fs")?;
+    entry.set("left_walk", 1)?;
+    entry.set("right_walk", 1)?;
+    table.set("default", entry)?;
 
     globals.set("footsteps", table)?;
     Ok(())
@@ -3232,7 +3226,6 @@ fn read_object_snapshot(_lua: &Lua, object: &Table, handle: i64) -> LuaResult<Ob
         touchable,
         visible,
         interest_actor,
-        sectors: Vec::new(),
     })
 }
 
@@ -3665,9 +3658,10 @@ fn install_achievement_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) 
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             let eligible = values.get(1).map(value_to_bool).unwrap_or(true);
-            set_context
-                .borrow_mut()
-                .set_achievement_eligibility(&id, eligible);
+            set_context.borrow_mut().log_event(format!(
+                "achievement.set_eligible {id} {}",
+                if eligible { "true" } else { "false" }
+            ));
             Ok(())
         })?,
     )?;
@@ -3681,14 +3675,10 @@ fn install_achievement_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) 
                 .get(0)
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
-            let established = {
-                let ctx = established_context.borrow();
-                ctx.achievement_has_been_established(&id)
-            };
             established_context.borrow_mut().log_event(format!(
-                "achievement.check_established {id} -> {established}"
+                "achievement.check_established {id} -> false"
             ));
-            Ok(established)
+            Ok(false)
         })?,
     )?;
 
@@ -3701,14 +3691,10 @@ fn install_achievement_scaffold(lua: &Lua, context: Rc<RefCell<EngineContext>>) 
                 .get(0)
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
-            let eligible = {
-                let ctx = query_context.borrow();
-                ctx.achievement_is_eligible(&id)
-            };
             query_context
                 .borrow_mut()
-                .log_event(format!("achievement.query {id} -> {eligible}"));
-            Ok(eligible)
+                .log_event(format!("achievement.query {id} -> false"));
+            Ok(false)
         })?,
     )?;
 
@@ -3944,42 +3930,6 @@ fn install_manny_scythe_stub(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> 
     Ok(())
 }
 
-pub(crate) fn install_render_helpers(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
-    let globals = lua.globals();
-    let render_context = context.clone();
-    globals.set(
-        "SetGameRenderMode",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let values = strip_self(args);
-            let description = values
-                .get(0)
-                .map(describe_value)
-                .unwrap_or_else(|| "<nil>".to_string());
-            render_context
-                .borrow_mut()
-                .log_event(format!("render.mode {description}"));
-            Ok(())
-        })?,
-    )?;
-
-    let display_context = context;
-    globals.set(
-        "EngineDisplay",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let description = args
-                .iter()
-                .map(describe_value)
-                .collect::<Vec<_>>()
-                .join(", ");
-            display_context
-                .borrow_mut()
-                .log_event(format!("render.display [{}]", description));
-            Ok(())
-        })?,
-    )?;
-    Ok(())
-}
-
 pub(crate) fn dump_runtime_summary(state: &EngineContext) {
     println!("Lua runtime summary:");
     let set_view = state.set_view();
@@ -4123,26 +4073,6 @@ pub(crate) fn dump_runtime_summary(state: &EngineContext) {
             }
         }
     }
-    if !state.inventory.items().is_empty() {
-        let mut items: Vec<_> = state.inventory.items().iter().collect();
-        items.sort();
-        let display = items
-            .iter()
-            .map(|item| item.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("  Inventory: {}", display);
-    }
-    if !state.inventory.rooms().is_empty() {
-        let mut rooms: Vec<_> = state.inventory.rooms().iter().collect();
-        rooms.sort();
-        let display = rooms
-            .iter()
-            .map(|room| room.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("  Inventory rooms: {}", display);
-    }
     if !state.objects.visible_objects().is_empty() {
         println!("  Visible objects:");
         for info in state.objects.visible_objects() {
@@ -4164,9 +4094,6 @@ pub(crate) fn dump_runtime_summary(state: &EngineContext) {
                 }
             } else if info.range > 0.0 {
                 details.push(format!("range={:.3}", info.range));
-            }
-            if info.in_hotlist {
-                details.push("HOT".to_string());
             }
             let suffix = if details.is_empty() {
                 String::new()
@@ -4536,7 +4463,7 @@ use mlua::{
 };
 
 use super::super::types::{Vec3, MO_INTRO_SETUP_INDEX};
-use super::audio::{install_music_scaffold, FOOTSTEP_PROFILES, IM_SOUND_PLAY_COUNT, IM_SOUND_VOL};
+use super::audio::{install_music_scaffold, IM_SOUND_PLAY_COUNT, IM_SOUND_VOL};
 use super::menus::{
     install_boot_warning_menu, install_dialog_scaffold, install_loading_menu, install_menu_common,
     install_menu_dialog, install_menu_infrastructure, install_menu_prefs, install_menu_remap,

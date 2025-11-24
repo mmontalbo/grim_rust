@@ -94,13 +94,11 @@ pub(super) fn normalize_tube_event(map: &BTreeMap<String, String>, event: &str) 
     Some(updated.join(" "))
 }
 
-mod achievements;
 mod actors;
 mod audio;
 mod bindings;
 mod cutscenes;
 mod geometry;
-mod inventory;
 mod menus;
 mod movement;
 mod movies;
@@ -109,14 +107,12 @@ mod pause;
 mod scripts;
 mod sets;
 
-use achievements::{AchievementRuntime, AchievementRuntimeAdapter, AchievementRuntimeView};
 use actors::{runtime::ActorRuntime, ActorSnapshot, ActorStore};
 use audio::{AudioRuntime, AudioRuntimeAdapter, AudioRuntimeView};
 use cutscenes::{
     CommentaryRecord, CutsceneRuntime, CutsceneRuntimeAdapter, CutsceneRuntimeView, DialogState,
 };
 use geometry::SectorHit;
-use inventory::{InventoryRuntimeAdapter, InventoryState};
 use menus::{MenuRegistry, MenuRegistryView, MenuState};
 use movement::{MovementRuntimeAdapter, MovementRuntimeView};
 use movies::select_playback;
@@ -127,12 +123,11 @@ use sets::{SectorToggleResult, SetRuntime, SetRuntimeAdapter, SetRuntimeView};
 
 pub(super) use bindings::{
     call_boot, describe_value, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene,
-    install_globals, install_package_path, install_render_helpers, load_system_script,
-    override_boot_stubs, split_self, strip_self, value_to_bool, value_to_f32, value_to_string,
+    install_globals, install_package_path, load_system_script, override_boot_stubs, split_self,
+    strip_self, value_to_bool, value_to_f32, value_to_string,
 };
 
 use super::types::{Vec3, MANNY_OFFICE_SEED_POS, MANNY_OFFICE_SEED_ROT};
-use crate::lab_collection::LabCollection;
 use grim_analysis::resources::ResourceGraph;
 use mlua::RegistryKey;
 
@@ -162,11 +157,9 @@ pub(super) struct EngineContext {
     events: Vec<String>,
     sets: SetRuntime,
     actors: ActorStore,
-    inventory: InventoryState,
     menus: MenuRegistry,
     voice_effect: Option<String>,
     objects: ObjectRuntime,
-    achievements: AchievementRuntime,
     cutscenes: CutsceneRuntime,
     pause: PauseState,
     audio: AudioRuntime,
@@ -178,11 +171,10 @@ impl EngineContext {
         resources: Rc<ResourceGraph>,
         verbose: bool,
         headless: bool,
-        lab_collection: Option<Rc<LabCollection>>,
         install_root: PathBuf,
         tube_pose_aliases: TubePoseAliasCache,
     ) -> Self {
-        let sets = SetRuntime::new(resources.clone(), verbose, lab_collection);
+        let sets = SetRuntime::new(resources.clone());
         EngineContext {
             verbose,
             headless,
@@ -191,11 +183,9 @@ impl EngineContext {
             events: Vec::new(),
             sets,
             actors: ActorStore::new(1100),
-            inventory: InventoryState::new(),
             menus: MenuRegistry::new(),
             voice_effect: None,
             objects: ObjectRuntime::new(),
-            achievements: AchievementRuntime::new(),
             cutscenes: CutsceneRuntime::new(),
             pause: PauseState::default(),
             audio: AudioRuntime::new(),
@@ -232,12 +222,7 @@ impl EngineContext {
     }
 
     fn object_runtime(&mut self) -> ObjectRuntimeAdapter<'_> {
-        ObjectRuntimeAdapter::new(
-            &mut self.objects,
-            &mut self.events,
-            &self.actors,
-            &mut self.sets,
-        )
+        ObjectRuntimeAdapter::new(&mut self.objects, &mut self.events, &self.actors)
     }
 
     fn cutscene_runtime(&mut self) -> CutsceneRuntimeAdapter<'_> {
@@ -257,30 +242,11 @@ impl EngineContext {
     }
 
     fn movement_runtime(&mut self) -> MovementRuntimeAdapter<'_> {
-        MovementRuntimeAdapter::new(
-            &mut self.actors,
-            &mut self.sets,
-            &mut self.objects,
-            &mut self.cutscenes,
-            &mut self.events,
-            self.tube_pose_aliases.clone(),
-        )
+        MovementRuntimeAdapter::new(&mut self.actors, &mut self.events, self.tube_pose_aliases.clone())
     }
 
     fn movement_view(&self) -> MovementRuntimeView<'_> {
-        MovementRuntimeView::new(&self.actors, &self.sets, &self.objects)
-    }
-
-    fn inventory_runtime(&mut self) -> InventoryRuntimeAdapter<'_> {
-        InventoryRuntimeAdapter::new(&mut self.inventory, &mut self.events)
-    }
-
-    fn achievement_runtime(&mut self) -> AchievementRuntimeAdapter<'_> {
-        AchievementRuntimeAdapter::new(&mut self.achievements, &mut self.events)
-    }
-
-    fn achievement_view(&self) -> AchievementRuntimeView<'_> {
-        AchievementRuntimeView::new(&self.achievements)
+        MovementRuntimeView::new(&self.actors)
     }
 
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
@@ -508,18 +474,6 @@ impl EngineContext {
 
     fn ensure_menu_state(&mut self, name: &str) -> Rc<RefCell<MenuState>> {
         self.menus.ensure(name)
-    }
-
-    fn set_achievement_eligibility(&mut self, id: &str, eligible: bool) {
-        self.achievement_runtime().set_eligibility(id, eligible);
-    }
-
-    fn achievement_is_eligible(&self, id: &str) -> bool {
-        self.achievement_view().is_eligible(id)
-    }
-
-    fn achievement_has_been_established(&self, id: &str) -> bool {
-        self.achievement_view().has_been_established(id)
     }
 
     fn start_script(&mut self, label: String, callable: Option<RegistryKey>) -> u32 {
@@ -784,11 +738,11 @@ impl EngineContext {
     }
 
     fn add_inventory_item(&mut self, name: &str) {
-        self.inventory_runtime().add_item(name);
+        self.log_event(format!("inventory.add {name}"));
     }
 
     fn register_inventory_room(&mut self, name: &str) {
-        self.inventory_runtime().register_room(name);
+        self.log_event(format!("inventory.room {name}"));
     }
 
     fn record_sector_hit(&mut self, id: &str, label: &str, hit: SectorHit) {
@@ -851,8 +805,7 @@ impl EngineContext {
     fn visible_object_handles(&self) -> Vec<i64> {
         let sets = self.set_view();
         let current = sets.current_set().map(|set| set.set_file.as_str());
-        self.objects
-            .visible_handles(current, |set, sector| self.is_sector_active(set, sector))
+        self.objects.visible_handles(current)
     }
 
     fn record_visible_objects(&mut self, handles: &[i64]) {
@@ -1032,13 +985,11 @@ mod tests {
     use super::super::types::Vec3;
     use super::bindings::{candidate_paths, value_slice_to_vec3};
     use super::cutscenes;
-    use super::geometry::ParsedSetGeometry;
     use super::menus::install_menu_common;
     use super::objects::ObjectSnapshot;
     use super::pause::{install_game_pauser, PauseEvent, PauseLabel};
     use super::EngineContext;
     use grim_analysis::resources::{ResourceGraph, SetMetadata, SetupSlot};
-    use grim_formats::SetFile as SetFileData;
     use mlua::{Function, Lua, Table, Value};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -1070,17 +1021,6 @@ mod tests {
         assert!((vec.x - 1.0).abs() < f32::EPSILON);
         assert!((vec.y - 2.0).abs() < f32::EPSILON);
         assert!((vec.z - 3.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn achievement_flags_are_tracked() {
-        let mut ctx = make_context();
-        assert!(!ctx.achievement_has_been_established("ACHIEVE_CLASSIC_DRIVER"));
-        ctx.set_achievement_eligibility("ACHIEVE_CLASSIC_DRIVER", true);
-        assert!(ctx.achievement_has_been_established("ACHIEVE_CLASSIC_DRIVER"));
-        assert!(ctx.achievement_is_eligible("ACHIEVE_CLASSIC_DRIVER"));
-        ctx.set_achievement_eligibility("ACHIEVE_CLASSIC_DRIVER", false);
-        assert!(!ctx.achievement_is_eligible("ACHIEVE_CLASSIC_DRIVER"));
     }
 
     fn make_context() -> EngineContext {
@@ -1270,89 +1210,6 @@ mod tests {
             .any(|event| event == "actor.manny.collision_scale 0.350"));
     }
 
-    fn manny_geometry_set() -> SetFileData {
-        let raw = "section: setups\n\tnumsetups\t5\n\tsetup\tmo_ddtws\n\tposition\t0.6\t2.0\t0.0\n\tinterest\t0.6\t2.2\t0.0\n\tsetup\tmo_winws\n\tposition\t0.2\t2.6\t0.0\n\tinterest\t0.2\t2.8\t0.0\n\tsetup\tmo_comin\n\tposition\t1.35\t0.25\t0.0\n\tinterest\t1.35\t0.45\t0.0\n\tsetup\tmo_mcecu\n\tposition\t0.62\t2.05\t0.0\n\tinterest\t0.62\t2.25\t0.0\n\tsetup\tmo_mnycu\n\tposition\t1.3\t0.2\t0.0\n\tinterest\t1.2\t0.4\t0.0\n\nsection: sectors\n\tsector\t\tmo_walk_default\n\tID\t\t6002\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t0.3\t1.7\t0.0\n\t         \t\t0.9\t1.7\t0.0\n\t         \t\t0.9\t2.3\t0.0\n\t         \t\t0.3\t2.3\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n\tsector\t\tmo_window_walk\n\tID\t\t6100\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t-0.1\t2.3\t0.0\n\t         \t\t0.3\t2.3\t0.0\n\t         \t\t0.3\t2.8\t0.0\n\t         \t\t-0.1\t2.8\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n\tsector\t\tmo_entry_walk\n\tID\t\t6200\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t1.1\t0.0\t0.0\n\t         \t\t1.6\t0.0\t0.0\n\t         \t\t1.6\t0.5\t0.0\n\t         \t\t1.1\t0.5\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n";
-        SetFileData::parse(raw.as_bytes()).expect("parse manny geometry")
-    }
-
-    fn install_manny_geometry(ctx: &mut EngineContext) {
-        ctx.sets.insert_geometry_for_tests(
-            "mo.set",
-            ParsedSetGeometry::from_set_file(manny_geometry_set()),
-        );
-        ctx.ensure_sector_state_map("mo.set");
-    }
-
-    #[test]
-    fn manny_hot_sector_tracks_room_zones() {
-        let mut ctx = make_context();
-        install_manny_geometry(&mut ctx);
-
-        prepare_manny(
-            &mut ctx,
-            Vec3 {
-                x: 0.62,
-                y: 2.05,
-                z: 0.0,
-            },
-        );
-        let desk_hit = ctx.default_sector_hit("manny", Some("hot"));
-        assert_eq!(desk_hit.name, "mo_ddtws");
-
-        ctx.set_actor_position(
-            "manny",
-            "Manny",
-            Vec3 {
-                x: 1.35,
-                y: 0.2,
-                z: 0.0,
-            },
-        );
-        let door_hit = ctx.default_sector_hit("manny", Some("hot"));
-        assert_eq!(door_hit.name, "mo_comin");
-
-        ctx.set_actor_position(
-            "manny",
-            "Manny",
-            Vec3 {
-                x: 0.2,
-                y: 2.6,
-                z: 0.0,
-            },
-        );
-        let window_hit = ctx.default_sector_hit("manny", Some("hot"));
-        assert_eq!(window_hit.name, "mo_winws");
-    }
-
-    fn sample_geometry_set() -> SetFileData {
-        let raw = "section: setups\n\tnumsetups\t1\n\tsetup\tcam_a\n\tposition\t0.0\t0.0\t0.0\n\tinterest\t0.3\t0.3\t0.0\n\troll\t\t0.0\n\tfov\t\t45.0\n\tnclip\t\t0.1\n\tfclip\t\t100.0\n\nsection: sectors\n\tsector\t\tdesk_walk\n\tID\t\t10\n\ttype\t\twalk\n\tdefault visibility\t\tvisible\n\theight\t\t0.0\n\tnumvertices\t4\n\tvertices:\t\t0.0\t0.0\t0.0\n\t         \t\t1.0\t0.0\t0.0\n\t         \t\t1.0\t1.0\t0.0\n\t         \t\t0.0\t1.0\t0.0\n\tnumtris 2\n\ttriangles:\t\t0 1 2\n\t\t\t\t0 2 3\n";
-        SetFileData::parse(raw.as_bytes()).expect("parse sample set")
-    }
-
-    #[test]
-    fn geometry_walk_sector_selected_for_point() {
-        let mut ctx = make_context();
-        ctx.sets.insert_geometry_for_tests(
-            "mo.set",
-            ParsedSetGeometry::from_set_file(sample_geometry_set()),
-        );
-        ctx.switch_to_set("mo.set");
-        let (id, _handle) = ctx.register_actor_with_handle("Guard", Some(2002));
-        ctx.put_actor_in_set(&id, "Guard", "mo.set");
-        ctx.set_actor_position(
-            &id,
-            "Guard",
-            Vec3 {
-                x: 0.25,
-                y: 0.25,
-                z: 0.0,
-            },
-        );
-        let hit = ctx.geometry_sector_hit(&id, "walk").expect("walk sector");
-        assert_eq!(hit.name, "desk_walk");
-        assert_eq!(hit.kind, "WALK");
-    }
-
     #[test]
     fn actor_visibility_controls_object_handles() {
         let mut ctx = make_context();
@@ -1437,174 +1294,5 @@ mod tests {
         assert!(ctx.audio_view().sfx().active.contains_key(&handle));
         ctx.stop_sound_effect(Some(handle.clone()));
         assert!(!ctx.audio_view().sfx().active.contains_key(&handle));
-
-        ctx.play_sound_effect("ambient".to_string(), Vec::new());
-        ctx.play_sound_effect("buzz".to_string(), Vec::new());
-        assert!(!ctx.audio_view().sfx().active.is_empty());
-        ctx.stop_sound_effect(None);
-        assert!(ctx.audio_view().sfx().active.is_empty());
-    }
-
-    #[test]
-    fn visible_objects_respect_sector_activation() {
-        let mut ctx = make_context();
-        ctx.sets.insert_geometry_for_tests(
-            "mo.set",
-            ParsedSetGeometry::from_set_file(sample_geometry_set()),
-        );
-        ctx.switch_to_set("mo.set");
-        let object_handle = 3100;
-        ctx.register_object(ObjectSnapshot {
-            handle: object_handle,
-            name: "desk".to_string(),
-            string_name: Some("desk".to_string()),
-            set_file: Some("mo.set".to_string()),
-            position: Some(Vec3 {
-                x: 0.25,
-                y: 0.25,
-                z: 0.0,
-            }),
-            range: 0.5,
-            touchable: true,
-            visible: true,
-            interest_actor: None,
-            sectors: Vec::new(),
-        });
-        assert_eq!(ctx.visible_object_handles(), vec![object_handle]);
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
-        assert!(ctx.visible_object_handles().is_empty());
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
-        assert_eq!(ctx.visible_object_handles(), vec![object_handle]);
-    }
-
-    #[test]
-    fn interest_actor_objects_track_sector_activation() {
-        let mut ctx = make_context();
-        ctx.sets.insert_geometry_for_tests(
-            "mo.set",
-            ParsedSetGeometry::from_set_file(sample_geometry_set()),
-        );
-        ctx.switch_to_set("mo.set");
-        let (actor_id, actor_handle) = ctx.register_actor_with_handle("Helper", Some(2100));
-        ctx.put_actor_in_set(&actor_id, "Helper", "mo.set");
-        ctx.register_object(ObjectSnapshot {
-            handle: 3200,
-            name: "helper".to_string(),
-            string_name: Some("helper".to_string()),
-            set_file: None,
-            position: None,
-            range: 0.5,
-            touchable: true,
-            visible: true,
-            interest_actor: Some(actor_handle),
-            sectors: Vec::new(),
-        });
-        ctx.set_actor_position(
-            &actor_id,
-            "Helper",
-            Vec3 {
-                x: 0.25,
-                y: 0.25,
-                z: 0.0,
-            },
-        );
-        assert_eq!(ctx.visible_object_handles(), vec![3200]);
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
-        assert!(ctx.visible_object_handles().is_empty());
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
-        assert_eq!(ctx.visible_object_handles(), vec![3200]);
-        let sectors = ctx.objects.object(3200).expect("object").sectors.clone();
-        assert!(!sectors.is_empty(), "expected computed sectors");
-        assert!(sectors.iter().any(|sector| sector.name == "desk_walk"));
-    }
-
-    #[test]
-    fn commentary_respects_sector_activation() {
-        let mut ctx = make_context();
-        ctx.sets.insert_geometry_for_tests(
-            "mo.set",
-            ParsedSetGeometry::from_set_file(sample_geometry_set()),
-        );
-        ctx.switch_to_set("mo.set");
-        let object_handle = 3300;
-        ctx.register_object(ObjectSnapshot {
-            handle: object_handle,
-            name: "tube_commentary".to_string(),
-            string_name: Some("tube".to_string()),
-            set_file: Some("mo.set".to_string()),
-            position: Some(Vec3 {
-                x: 0.25,
-                y: 0.25,
-                z: 0.0,
-            }),
-            range: 0.5,
-            touchable: true,
-            visible: true,
-            interest_actor: None,
-            sectors: Vec::new(),
-        });
-        ctx.record_visible_objects(&[object_handle]);
-        ctx.set_commentary_active(true, Some("Year1MannysOfficeDesign".to_string()));
-        let commentary = ctx.cutscenes.commentary().expect("commentary state");
-        assert!(commentary.active, "commentary should start active");
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
-        let commentary = ctx.cutscenes.commentary().expect("commentary state");
-        assert!(
-            !commentary.active,
-            "commentary should suspend when sector is inactive"
-        );
-        assert_eq!(commentary.suppressed_reason.as_deref(), Some("not_visible"));
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
-        let commentary = ctx.cutscenes.commentary().expect("commentary state");
-        assert!(
-            commentary.active,
-            "commentary should resume once the sector is reactivated"
-        );
-    }
-
-    #[test]
-    fn cut_scene_tracks_sector_activation() {
-        let mut ctx = make_context();
-        ctx.sets.insert_geometry_for_tests(
-            "mo.set",
-            ParsedSetGeometry::from_set_file(sample_geometry_set()),
-        );
-        ctx.switch_to_set("mo.set");
-        let (manny_id, _handle) = ctx.register_actor_with_handle("Manny", Some(1001));
-        ctx.put_actor_in_set(&manny_id, "Manny", "mo.set");
-        ctx.set_actor_position(
-            &manny_id,
-            "Manny",
-            Vec3 {
-                x: 0.25,
-                y: 0.25,
-                z: 0.0,
-            },
-        );
-        ctx.push_cut_scene(Some("demo".to_string()), Vec::new());
-        let record = ctx
-            .cutscenes
-            .cut_scene_stack()
-            .last()
-            .expect("cut scene record");
-        assert_eq!(record.set_file.as_deref(), Some("mo.set"));
-        assert_eq!(record.sector.as_deref(), Some("desk_walk"));
-        assert!(!record.suppressed, "cut scene should start active");
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", false);
-        assert!(
-            ctx.cutscenes
-                .cut_scene_stack()
-                .last()
-                .expect("cut scene")
-                .suppressed
-        );
-        let _ = ctx.set_sector_active(Some("mo.set"), "desk_walk", true);
-        assert!(
-            !ctx.cutscenes
-                .cut_scene_stack()
-                .last()
-                .expect("cut scene")
-                .suppressed
-        );
     }
 }
