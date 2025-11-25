@@ -26,18 +26,25 @@ static CLOSURE_PUSH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CALLFUNCTION_TRACKER: OnceLock<Mutex<CallfunctionTracker>> = OnceLock::new();
 static GLOBAL_ACCESS_TRACKER: OnceLock<Mutex<GlobalAccessTracker>> = OnceLock::new();
 
+fn verbose_fields_enabled() -> bool {
+    static VERBOSE: OnceLock<bool> = OnceLock::new();
+    *VERBOSE.get_or_init(|| env::var("GRIM_SHIM_VERBOSE_FIELDS").is_ok())
+}
+
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {
-    let sequence = CLOSURE_PUSH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+    let verbose = verbose_fields_enabled();
     let func_addr = func as *const c_void as usize;
-    let origin = ClosureOrigin::new(func as *const c_void);
-    log_event(add_origin_fields(
-        EventBuilder::new("push_cclosure")
-            .kv("name", label)
+    let origin = verbose.then(|| ClosureOrigin::new(func as *const c_void));
+    let mut event = EventBuilder::new("push_cclosure")
+        .kv("name", label)
+        .kv("func", format!("0x{func_addr:08x}"));
+    if verbose {
+        let sequence = CLOSURE_PUSH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        event = event
             .kv("push_seq", format!("{sequence:06}"))
-            .kv("func", format!("0x{func_addr:08x}"))
-            .kv("upvalues", upvalues),
-        Some(&origin),
-    ));
+            .kv("upvalues", upvalues);
+    }
+    log_event(add_origin_fields(event, origin.as_ref()));
 
     if !call_real_lua_push_c_closure(func, upvalues) {
         log_line("unable to forward lua_pushCclosure call; retail VM may misbehave");
@@ -83,11 +90,16 @@ pub(crate) unsafe fn trace_lua_call(name: *const c_char) -> c_int {
 
 pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let verbose = verbose_fields_enabled();
 
     if call_real_lua_setglobal(name) {
         if let Some(handle) = call_real_lua_getglobal(name) {
-            let origin = call_real_lua_getcfunction(handle)
-                .map(|func| ClosureOrigin::new(func as *const c_void));
+            let origin = if verbose {
+                call_real_lua_getcfunction(handle)
+                    .map(|func| ClosureOrigin::new(func as *const c_void))
+            } else {
+                None
+            };
 
             if let Ok(mut tracker) = callfunction_tracker().lock() {
                 tracker.remember_label(handle, format!("global:{label}"));
@@ -98,13 +110,13 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                 log_line("lua_setglobal tracker mutex poisoned; skipping cache update");
             }
 
-            log_event(add_origin_fields(
-                EventBuilder::new("bind_global")
-                    .kv("name", &label)
-                    .kv("handle", format!("0x{handle:08x}"))
-                    .kv("label", format!("global:{label}")),
-                origin.as_ref(),
-            ));
+            let mut event = EventBuilder::new("bind_global")
+                .kv("name", &label)
+                .kv("handle", format!("0x{handle:08x}"));
+            if verbose {
+                event = event.kv("label", format!("global:{label}"));
+            }
+            log_event(add_origin_fields(event, origin.as_ref()));
         }
     }
 }
@@ -144,8 +156,12 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
             match handle {
                 Some(handle) => {
                     let label = resolve_lua_function_label(handle);
-                    let origin = call_real_lua_getcfunction(handle)
-                        .map(|func| ClosureOrigin::new(func as *const c_void));
+                    let origin = if verbose_fields_enabled() {
+                        call_real_lua_getcfunction(handle)
+                            .map(|func| ClosureOrigin::new(func as *const c_void))
+                    } else {
+                        None
+                    };
                     if let Ok(mut tracker) = callfunction_tracker().lock() {
                         tracker.remember_label_if_missing(handle, format!("ref:{reference}"));
                         if let Some(origin) = origin.clone() {
@@ -187,8 +203,12 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
     match call_real_lua_getref(reference) {
         Some(handle) => {
             let label = resolve_lua_function_label(handle);
-            let origin = call_real_lua_getcfunction(handle)
-                .map(|func| ClosureOrigin::new(func as *const c_void));
+            let origin = if verbose_fields_enabled() {
+                call_real_lua_getcfunction(handle)
+                    .map(|func| ClosureOrigin::new(func as *const c_void))
+            } else {
+                None
+            };
             if let Ok(mut tracker) = callfunction_tracker().lock() {
                 tracker.remember_label_if_missing(handle, format!("ref:{reference}"));
                 if let Some(origin) = origin.clone() {
@@ -523,6 +543,10 @@ fn global_access_tracker() -> &'static Mutex<GlobalAccessTracker> {
 }
 
 fn add_origin_fields(mut builder: EventBuilder, origin: Option<&ClosureOrigin>) -> EventBuilder {
+    if !verbose_fields_enabled() {
+        return builder;
+    }
+
     if let Some(origin) = origin {
         builder = builder.kv("origin", format!("0x{addr:08x}", addr = origin.func_addr));
         if let Some(module) = &origin.module {
