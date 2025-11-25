@@ -16,7 +16,6 @@ struct Args {
     /// Print additional logging from the Lua host
     #[arg(long)]
     verbose: bool,
-
 }
 
 #[derive(Debug, Clone)]

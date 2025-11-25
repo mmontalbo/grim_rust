@@ -1,6 +1,5 @@
 mod context;
 mod telemetry;
-mod types;
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -9,31 +8,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use grim_analysis::resources::ResourceGraph;
 use mlua::{Lua, LuaOptions, StdLib};
 
-use context::TubePoseAliasCache;
-
-pub fn run_boot_sequence(
-    data_root: &Path,
-    verbose: bool,
-    headless: bool,
-) -> Result<EngineRuntime> {
-    let resources = Rc::new(
-        ResourceGraph::from_data_root(data_root)
-            .with_context(|| format!("loading resource graph from {}", data_root.display()))?,
-    );
-
+pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Result<EngineRuntime> {
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
         .context("initialising Lua runtime with standard libraries")?;
-    let tube_pose_aliases: TubePoseAliasCache = Rc::new(RefCell::new(None));
-    let context = Rc::new(RefCell::new(context::EngineContext::new(
-        resources,
-        verbose,
-        headless,
-        data_root.to_path_buf(),
-        tube_pose_aliases.clone(),
-    )));
+    let context = Rc::new(RefCell::new(context::EngineContext::new(verbose, headless)));
 
     context::install_package_path(&lua, data_root)?;
     context::install_globals(&lua, data_root, context.clone())?;
@@ -91,7 +71,7 @@ impl EngineRuntime {
             frame: 0,
             intro_started: intro_movie_active,
             intro_movie_active,
-            intro_finished: false,
+            intro_finished: !intro_movie_active,
             event_cursor: initial_event_cursor,
         }
     }
@@ -119,30 +99,31 @@ impl EngineRuntime {
     }
 
     fn progress_movies(&mut self) {
-        let (was_intro, had_any_before) = {
-            let ctx = self.context.borrow();
-            let active = ctx.active_fullscreen_movie();
-            let intro_active = active
-                .as_deref()
-                .map(|name| name.eq_ignore_ascii_case("intro"))
-                .unwrap_or(false);
-            (intro_active, active.is_some())
-        };
-        self.intro_started |= was_intro;
-        let had_any_after = {
-            let ctx = self.context.borrow();
-            let active = ctx.active_fullscreen_movie();
-            self.intro_movie_active = active
-                .as_deref()
-                .map(|name| name.eq_ignore_ascii_case("intro"))
-                .unwrap_or(false);
-            active.is_some()
+        use context::MovieStep;
+
+        let step = {
+            let mut ctx = self.context.borrow_mut();
+            ctx.step_fullscreen_movie()
         };
 
-        if was_intro && !self.intro_movie_active {
-            self.intro_finished = true;
-        } else if (self.intro_started || had_any_before) && !had_any_after {
-            self.intro_finished = true;
+        match step {
+            MovieStep::Idle => {
+                self.intro_movie_active = false;
+                if !self.intro_started {
+                    self.intro_finished = true;
+                }
+            }
+            MovieStep::Active(name) => {
+                let intro_active = name.eq_ignore_ascii_case("intro");
+                self.intro_started |= intro_active;
+                self.intro_movie_active = intro_active;
+            }
+            MovieStep::Finished(name) => {
+                let intro_done = name.eq_ignore_ascii_case("intro");
+                self.intro_started |= intro_done;
+                self.intro_movie_active = false;
+                self.intro_finished = true;
+            }
         }
     }
 
