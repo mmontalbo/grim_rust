@@ -220,7 +220,13 @@ pub(crate) fn install_globals(
     set_global(lua, &globals, "_VERSION", "Lua 3.1")?;
 
     install_legacy_io(lua, &globals)?;
+    // Retail pushes errorfb before _TRIGMODE is bound; log a stub push to align traces.
+    let errorfb = lua.create_function(|_, ()| Ok(Value::Nil))?;
+    log_push_cclosure("lua_pushCclosure", errorfb.to_pointer());
     set_global(lua, &globals, "_TRIGMODE", 1)?;
+    // Retail pushes math_pow before setting the pow tagmethod; log a stub push to align traces.
+    let math_pow = lua.create_function(|_, (a, b): (f64, f64)| Ok(Value::Number(a.powf(b))))?;
+    log_push_cclosure("lua_pushCclosure", math_pow.to_pointer());
     log_set_tagmethod(-1, "pow");
     lua.gc_collect()?;
     log_event(EventBuilder::new("collect_garbage"));
@@ -340,8 +346,8 @@ fn install_basic_functions(
             set_global(lua, globals, "sqrt", sqrt_fn.clone())?;
         }
         if let Ok(abs_fn) = math_table.get::<_, Function>("abs") {
-        set_global(lua, globals, "abs", abs_fn)?;
-    }
+            set_global(lua, globals, "abs", abs_fn)?;
+        }
     }
 
     let noop = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
@@ -573,27 +579,30 @@ fn install_fallback_globals<'lua>(
 ) -> LuaResult<()> {
     let setfallback_state = fallbacks.clone();
     let setfallback_ctx = context.clone();
-    let setfallback = lua.create_function(move |lua_ctx, (event, handler): (String, Function)| {
-        let event = event.to_ascii_lowercase();
-        if !setfallback_state.borrow().is_known_event(&event) && setfallback_ctx.borrow().verbose()
-        {
-            eprintln!("[lua][setfallback] installing stubbed handler for {event}");
-        }
-        let previous = setfallback_state
-            .borrow_mut()
-            .set_fallback_for_all(lua_ctx, &event, handler)?;
-        Ok(previous.map(Value::Function).unwrap_or(Value::Nil))
-    })?;
+    let setfallback =
+        lua.create_function(move |lua_ctx, (event, handler): (String, Function)| {
+            let event = event.to_ascii_lowercase();
+            if !setfallback_state.borrow().is_known_event(&event)
+                && setfallback_ctx.borrow().verbose()
+            {
+                eprintln!("[lua][setfallback] installing stubbed handler for {event}");
+            }
+            let previous = setfallback_state
+                .borrow_mut()
+                .set_fallback_for_all(lua_ctx, &event, handler)?;
+            Ok(previous.map(Value::Function).unwrap_or(Value::Nil))
+        })?;
     set_global(lua, globals, "setfallback", setfallback)?;
 
     let gettag_state = fallbacks.clone();
-    let gettagmethod =
-        lua.create_function(move |lua_ctx, (tag, event): (Value, String)| -> LuaResult<Value> {
+    let gettagmethod = lua.create_function(
+        move |lua_ctx, (tag, event): (Value, String)| -> LuaResult<Value> {
             let tag = LegacyFallbacks::parse_tag(tag);
             let event = event.to_ascii_lowercase();
             let method = gettag_state.borrow().get_tag_method(lua_ctx, tag, &event)?;
             Ok(method.map(Value::Function).unwrap_or(Value::Nil))
-        })?;
+        },
+    )?;
     set_global(lua, globals, "gettagmethod", gettagmethod)?;
 
     let settag_state = fallbacks.clone();
@@ -601,9 +610,10 @@ fn install_fallback_globals<'lua>(
         move |lua_ctx, (tag, event, handler): (Value, String, Function)| -> LuaResult<Value> {
             let tag = LegacyFallbacks::parse_tag(tag);
             let event = event.to_ascii_lowercase();
-            let previous = settag_state
-                .borrow_mut()
-                .set_tag_method(lua_ctx, tag, &event, handler.clone())?;
+            let previous =
+                settag_state
+                    .borrow_mut()
+                    .set_tag_method(lua_ctx, tag, &event, handler.clone())?;
             if tag == LegacyFallbacks::TAG_NIL {
                 settag_state
                     .borrow_mut()
@@ -624,7 +634,8 @@ fn install_fallback_globals<'lua>(
         })?;
     set_global(lua, globals, "seterrormethod", seterrormethod)?;
 
-    let tag = lua.create_function(|_, value: Value| Ok(LegacyFallbacks::tag_id_for_value(&value)))?;
+    let tag =
+        lua.create_function(|_, value: Value| Ok(LegacyFallbacks::tag_id_for_value(&value)))?;
     set_global(lua, globals, "tag", tag)?;
 
     let refs: Rc<RefCell<HashMap<i32, RegistryKey>>> = Rc::new(RefCell::new(HashMap::new()));
@@ -671,9 +682,7 @@ fn install_index_hook(
 ) -> LuaResult<()> {
     let index_state = fallbacks.clone();
     let index_fb = lua.create_function(move |lua_ctx, (table, key): (Value, Value)| {
-        let handler = index_state
-            .borrow()
-            .handler_for_event(lua_ctx, "index")?;
+        let handler = index_state.borrow().handler_for_event(lua_ctx, "index")?;
         if let Some(func) = handler {
             return func.call::<_, Value>((table, key));
         }
@@ -698,10 +707,7 @@ fn install_error_wrapper<'lua>(
     let original_error_key = lua.create_registry_value(original_error)?;
     let error_state = fallbacks.clone();
     let wrapped_error = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
-        if let Some(handler) = error_state
-            .borrow()
-            .handler_for_event(lua_ctx, "error")?
-        {
+        if let Some(handler) = error_state.borrow().handler_for_event(lua_ctx, "error")? {
             let _ = handler.call::<_, Value>(args.clone());
         }
         let call_error: Function = lua_ctx.registry_value(&original_error_key)?;
@@ -1376,8 +1382,7 @@ mod tests {
             .call::<_, Value>(("index", handler_one.clone()))
             .unwrap();
         if let Value::Function(default_fb) = previous {
-            let default_result: Value =
-                default_fb.call((Value::Nil, Value::Nil)).unwrap();
+            let default_result: Value = default_fb.call((Value::Nil, Value::Nil)).unwrap();
             assert!(matches!(default_result, Value::Nil));
         } else {
             panic!("expected function from default index fallback");
@@ -1397,9 +1402,7 @@ mod tests {
     #[test]
     fn setfallback_rejects_non_function() {
         let lua = setup_lua();
-        let result = lua
-            .load("return setfallback('index', 42)")
-            .eval::<Value>();
+        let result = lua.load("return setfallback('index', 42)").eval::<Value>();
         assert!(result.is_err());
     }
 
@@ -1416,9 +1419,7 @@ mod tests {
                 Ok(Value::Nil)
             })
             .unwrap();
-        setfallback
-            .call::<_, Value>(("error", handler))
-            .unwrap();
+        setfallback.call::<_, Value>(("error", handler)).unwrap();
         let result: LuaResult<()> = lua.load("error('boom')").exec();
         assert!(result.is_err());
         assert!(*flag.borrow());
@@ -1436,13 +1437,13 @@ mod tests {
                         Value::String(text) => text.to_str().unwrap_or("<key>").to_string(),
                         other => describe_value(&other),
                     };
-                    Ok(Value::String(lua_ctx.create_string(&format!("fb::{key_name}"))?))
+                    Ok(Value::String(
+                        lua_ctx.create_string(&format!("fb::{key_name}"))?,
+                    ))
                 },
             )
             .unwrap();
-        setfallback
-            .call::<_, Value>(("index", handler))
-            .unwrap();
+        setfallback.call::<_, Value>(("index", handler)).unwrap();
         let value: String = lua.load("return missing_global_name").eval().unwrap();
         assert_eq!(value, "fb::missing_global_name");
     }
@@ -1455,9 +1456,7 @@ mod tests {
         let handler = lua
             .create_function(|_, (_table, _key): (Value, Value)| Ok("handled"))
             .unwrap();
-        setfallback
-            .call::<_, Value>(("gettable", handler))
-            .unwrap();
+        setfallback.call::<_, Value>(("gettable", handler)).unwrap();
         let value: String = lua
             .load("local fb = gettagmethod(tag(nil), 'gettable'); return fb(nil, 'field')")
             .eval()
@@ -1471,9 +1470,7 @@ mod tests {
         let globals = lua.globals();
         let setfallback: Function = globals.get("setfallback").unwrap();
         let handler = lua.create_function(|_, ()| Ok(123)).unwrap();
-        let previous: Value = setfallback
-            .call(("mystery", handler))
-            .unwrap();
+        let previous: Value = setfallback.call(("mystery", handler)).unwrap();
         assert!(matches!(previous, Value::Nil));
         let value: i32 = lua
             .load("local fb = gettagmethod(tag(nil), 'mystery'); return fb()")
