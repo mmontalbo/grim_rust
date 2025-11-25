@@ -14,11 +14,15 @@ nix-shell --run 'cargo run -p grctl -- status'
 
 Common subcommands:
 
-- `engine`, `viewer`, and `retail` each support `start`, `stop`, `status`, and
-  `logs`. Pass `--tail <n>` to control the initial output and `--follow` (or
-  `-f`) to stream updates continuously. Use `--attach` on `engine start` or
-  `retail start` to tee the log to your terminal right after launch.
-- `scenario run <name>` launches an end-to-end harness; see below for usage tips.
+- `compare boot [--run-id <tag>] [--engine-release] [--engine-headless] [--retail-vanilla] [--retail-no-timeout]`
+  starts grim_engine and retail together with a shared run id and prints the log
+  paths for both.
+- `engine start|stop|status|logs` and `retail start|stop|status|logs` are still
+  available. Pass `--run-id <tag>` on `start` to control the telemetry run id,
+  or rely on the generated default. Use `--attach` on `start` to follow the log
+  immediately. `logs` accepts `--run latest|<id>`; the default is `latest`.
+  A minimal manual flow is `grctl engine start --run <id> --attach` then
+  `grctl retail start --run <id> --attach` so both logs share the same run id.
 
 All child processes are launched with a generated session id and a consistent
 environment:
@@ -27,40 +31,24 @@ environment:
 GRCTL_MANAGED=1
 GRCTL_SESSION_ID=<uuid>
 GRCTL_COMPONENT=<component label>
-GRCTL_LOG_PATH=<log file destination>
+GRCTL_LOG_PATH=<per-run log path>
 GRCTL_STATE_DIR=<target/grctl/state>
+GRIM_TRACE_RUN_ID=<run id injected into grim_engine and the retail shim>
 ```
 
-State files live in `target/grctl/state/*.json` and logs in
-`target/grctl/logs/*.log`. `grctl` clears stale state automatically when it
-detects that a recorded PID has already exited.
+State files live in `target/grctl/state/*.json`. Logs are per-run at
+`target/grctl/logs/<component>/<run_id>.log`, and `target/grctl/logs/<component>.log`
+is a convenience symlink to the newest run. `grctl` clears stale state
+automatically when it detects that a recorded PID has already exited.
 
 ## Live parity watch
 
-- `watch intro-timeline [--engine-log <path>] [--retail-events <path>] [--poll-interval-ms <ms>] [--from-end]` tails `target/grctl/logs/grim_engine.log` and `dev-install/mods/telemetry_events.jsonl`, parses `intro.timeline` events, and prints a rolling missing/extra/order summary.
+- `watch intro-timeline [--engine-log <path>] [--retail-events <path>] [--poll-interval-ms <ms>] [--from-end]` tails `target/grctl/logs/grim_engine.log` (symlink to the latest run) and `dev-install/mods/telemetry_events.jsonl`, parses `intro.timeline` events, and prints a rolling missing/extra/order summary.
 - Example: `nix-shell --run 'cargo run -p grctl -- watch intro-timeline --poll-interval-ms 500'`.
 - `watch intro-timeline --launch [--engine-release]` clears the intro logs, starts grim_engine headless with verbose logging, launches the retail capture without a timeout, and then begins the watch. Press Ctrl-C to stop the watch and shut down the launched components.
 
-## Scenario runs
-
-- Use `grctl scenario run intro-to-office-computer` (or `intro-to-office-tube`)
-  for the intro playback. The harness now runs grim_engine headless with verbose
-  logging and waits for the `movie.logos.*` / `movie.intro.*` timeline markers
-  the engine emits as it simulates fullscreen playback.
-- `--hold-seconds <seconds>` keeps tailing the log briefly after all markers
-  land. The engine exits once the intro cutscene completes, so the extra wait is
-  primarily for log collection.
-- `--detach` leaves grim_engine running under grctl supervision. Stop it later
-  with `grctl scenario stop` or `grctl engine stop` once you are done inspecting
-  the session.
-- `--artifacts-dir <path>` writes the scenario JSON report to a directory of your
-  choosing. The `intro_timeline` field is currently empty because the live
-  streaming pipeline was removed; only the observed markers are recorded.
-- GrimStream exposure and the viewer handshake were trimmed from grim_engine, so
-  streaming overlays are no longer available during scenario runs.
-- `grctl retail start --vanilla` skips the Lua hook/LD_PRELOAD shim so you can
-  compare a clean retail run against the instrumented build. Leave the flag off
-  (default) to keep telemetry events flowing into the scenario harness.
+The scenario and viewer helpers remain available but are hidden; they are not
+part of the streamlined boot/telemetry comparison flow.
 
 ## Retail helpers
 
@@ -72,8 +60,9 @@ detects that a recorded PID has already exited.
   preloads the shim once it is built.
 ## Design notes
 
-- Launchers open append-only log files and run a background reaper that removes
-  state and records the process exit code.
+- Launchers open per-run log files and run a background reaper that removes
+  state and records the process exit code. A symlink in `target/grctl/logs/`
+  always points to the most recent run for quick tails.
 - Scenario wrappers run under `cargo run` so the shared logging and timeout
   handling stay consistent across runs.
 - All orchestration commands accept `--timeout`. Passing `--timeout 0` disables

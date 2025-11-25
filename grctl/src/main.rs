@@ -8,7 +8,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -49,17 +51,20 @@ enum CommandKind {
     #[command(subcommand)]
     Engine(EngineCommand),
     /// Manage grim_viewer instances.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Viewer(ViewerCommand),
     /// Manage the retail Grim Fandango binary.
     #[command(subcommand)]
     Retail(RetailCommand),
     /// Run or manage scenario harness sessions.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Scenario(ScenarioCommand),
     /// Watch live parity signals between engine and retail.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Watch(WatchCommand),
+    /// Run engine/retail together for quick boot comparisons.
+    #[command(subcommand)]
+    Compare(CompareCommand),
     /// Show component status for the entire stack.
     Status,
 }
@@ -76,7 +81,7 @@ enum EngineCommand {
     Logs(LogArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct EngineStart {
     /// Run grim_engine with cargo --release.
     #[arg(long)]
@@ -85,17 +90,20 @@ struct EngineStart {
     #[arg(long)]
     headless: bool,
     /// Enable verbose Lua logging.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     verbose: bool,
     /// Stream the engine log to this terminal until you Ctrl-C.
     #[arg(long)]
     attach: bool,
+    /// Override the GRIM_TRACE_RUN_ID for this launch.
+    #[arg(long, value_parser = parse_run_id)]
+    run_id: Option<String>,
     /// Additional arguments forwarded directly to grim_engine after '--'.
     #[arg(last = true)]
     extra_args: Vec<String>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum ViewerCommand {
     Start(ViewerStart),
     Stop,
@@ -103,7 +111,7 @@ enum ViewerCommand {
     Logs(LogArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct ViewerStart {
     /// Run grim_viewer with cargo --release.
     #[arg(long)]
@@ -132,10 +140,11 @@ enum RetailCommand {
     Status,
     Logs(LogArgs),
     /// Copy the Steam install into dev-install (defaults to ~/.steam/...).
+    #[command(hide = true)]
     Copy(RetailCopy),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct RetailStart {
     /// Time limit for the retail session (examples: 20s, 5m). Use 0 to disable.
     #[arg(long, default_value = "20s")]
@@ -149,6 +158,9 @@ struct RetailStart {
     /// Stream the retail stdout/stderr log to this terminal until you Ctrl-C.
     #[arg(long)]
     attach: bool,
+    /// Override the GRIM_TRACE_RUN_ID for this launch.
+    #[arg(long, value_parser = parse_run_id)]
+    run_id: Option<String>,
     /// Additional arguments passed directly to the retail binary after '--'.
     #[arg(last = true)]
     extra_args: Vec<String>,
@@ -164,7 +176,7 @@ struct RetailCopy {
     force: bool,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum ScenarioCommand {
     /// Run a managed scenario harness.
     Run(ScenarioArgs),
@@ -172,7 +184,7 @@ enum ScenarioCommand {
     Stop,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct ScenarioArgs {
     /// Scenario to execute.
     #[arg(value_enum)]
@@ -215,6 +227,43 @@ enum WatchCommand {
     IntroTimeline(WatchIntroArgs),
 }
 
+#[derive(Subcommand, Debug)]
+enum CompareCommand {
+    /// Launch grim_engine and retail with a shared run_id for boot comparisons.
+    Boot(CompareBootArgs),
+    /// Print log/telemetry paths for a given run_id to make diffing easy.
+    Paths(ComparePathsArgs),
+}
+
+#[derive(Args, Debug)]
+struct CompareBootArgs {
+    /// Optional run identifier shared across engine + retail (defaults to a new UUID).
+    #[arg(long, value_parser = parse_run_id)]
+    run_id: Option<String>,
+    /// Run grim_engine with cargo --release.
+    #[arg(long)]
+    engine_release: bool,
+    /// Start the engine in headless mode.
+    #[arg(long)]
+    engine_headless: bool,
+    /// Run retail without the Rust shim (vanilla).
+    #[arg(long)]
+    retail_vanilla: bool,
+    /// Disable the retail timeout (defaults to 20s).
+    #[arg(long)]
+    retail_no_timeout: bool,
+}
+
+#[derive(Args, Debug)]
+struct ComparePathsArgs {
+    /// Run selection to surface (defaults to latest).
+    #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
+    run: RunSelection,
+    /// Print a short tail preview from both logs.
+    #[arg(long)]
+    preview: bool,
+}
+
 #[derive(Args, Debug)]
 struct WatchIntroArgs {
     /// Path to the grim_engine log to watch.
@@ -237,7 +286,7 @@ struct WatchIntroArgs {
     engine_release: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct LogArgs {
     /// Number of lines to display from the end of the log (0 prints the entire file).
     #[arg(long, default_value_t = 80)]
@@ -245,6 +294,179 @@ struct LogArgs {
     /// Continuously stream log updates after the initial tail.
     #[arg(long, short = 'f')]
     follow: bool,
+    /// Select which run_id segment to display (defaults to latest run).
+    #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
+    run: RunSelection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RunSelection {
+    Latest,
+    Id(String),
+}
+
+fn parse_run_selection(value: &str) -> std::result::Result<RunSelection, String> {
+    if value.eq_ignore_ascii_case("latest") {
+        Ok(RunSelection::Latest)
+    } else {
+        validate_run_id(value)?;
+        Ok(RunSelection::Id(value.to_string()))
+    }
+}
+
+fn parse_run_id(value: &str) -> std::result::Result<String, String> {
+    validate_run_id(value)?;
+    Ok(value.to_string())
+}
+
+fn validate_run_id(value: &str) -> std::result::Result<(), String> {
+    if value.is_empty() {
+        return Err("run id cannot be empty".to_string());
+    }
+    let allowed = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    if !value.chars().all(allowed) {
+        return Err("run id must be alphanumeric with '-' or '_'".to_string());
+    }
+    Ok(())
+}
+
+fn compare_paths(args: ComparePathsArgs, paths: &Paths) -> Result<()> {
+    let run_id = resolve_compare_run_id(paths, &args.run)?;
+    let engine_log = paths.run_log_path(ComponentKind::Engine, &run_id)?;
+    let retail_log = paths.run_log_path(ComponentKind::Retail, &run_id)?;
+    if !engine_log.exists() {
+        bail!(
+            "engine log missing for run {} at {}",
+            run_id,
+            engine_log.display()
+        );
+    }
+    if !retail_log.exists() {
+        bail!(
+            "retail log missing for run {} at {}",
+            run_id,
+            retail_log.display()
+        );
+    }
+    println!("[grctl] compare paths for run {run_id}");
+    println!("  engine log:    {}", engine_log.display());
+    println!("  retail log:    {}", retail_log.display());
+    println!(
+        "  telemetry:     {}",
+        paths.retail_telemetry_path().display()
+    );
+    println!();
+    println!("Follow both:");
+    println!("  grctl engine logs --run {run_id} -f");
+    println!("  grctl retail logs --run {run_id} -f");
+    println!();
+    println!("Quick diff:");
+    println!(
+        "  diff -u {} {} | less -R",
+        engine_log.display(),
+        retail_log.display()
+    );
+    if args.preview {
+        const PREVIEW_TAIL: usize = 20;
+        const RETAIL_SLACK: u64 = 50;
+        let last_engine_seq = last_seq_in_file(&engine_log)?;
+        let retail_cutoff = last_engine_seq.map(|seq| seq.saturating_add(RETAIL_SLACK));
+        println!();
+        println!("Preview (last {} lines):", PREVIEW_TAIL);
+        println!("  [engine]");
+        for line in tail_file(&engine_log, PREVIEW_TAIL)? {
+            println!("    {line}");
+        }
+        println!("  [retail]");
+        let (retail_lines, truncated) =
+            filtered_tail_by_seq(&retail_log, retail_cutoff, PREVIEW_TAIL)?;
+        for line in retail_lines {
+            println!("    {line}");
+        }
+        if let Some(cutoff) = retail_cutoff {
+            if truncated {
+                println!("    ... (retail lines with seq>{cutoff} omitted to align with engine)");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_compare_run_id(paths: &Paths, selection: &RunSelection) -> Result<String> {
+    match selection {
+        RunSelection::Id(run_id) => Ok(run_id.clone()),
+        RunSelection::Latest => {
+            let mut runs = paths.list_run_logs(ComponentKind::Engine)?;
+            runs.sort_by_key(|(_, path)| {
+                path.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+            });
+            let Some((run_id, _)) = runs.pop() else {
+                bail!("no engine runs recorded yet");
+            };
+            Ok(run_id)
+        }
+    }
+}
+
+fn parse_seq_from_line(line: &str) -> Option<u64> {
+    let idx = line.find(" seq=")?;
+    let rest = &line[idx + " seq=".len()..];
+    let mut digits = String::new();
+    for ch in rest.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn last_seq_in_file(path: &Path) -> Result<Option<u64>> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut last = None;
+    for line in reader.lines() {
+        let line = line?;
+        if let Some(seq) = parse_seq_from_line(&line) {
+            last = Some(seq);
+        }
+    }
+    Ok(last)
+}
+
+fn filtered_tail_by_seq(
+    path: &Path,
+    cutoff: Option<u64>,
+    tail: usize,
+) -> Result<(Vec<String>, bool)> {
+    if cutoff.is_none() {
+        return tail_file(path, tail).map(|lines| (lines, false));
+    }
+    let cutoff = cutoff.unwrap();
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut buffer: VecDeque<String> = VecDeque::with_capacity(tail);
+    let mut truncated = false;
+    for line in reader.lines() {
+        let line = line?;
+        if let Some(seq) = parse_seq_from_line(&line) {
+            if seq > cutoff {
+                truncated = true;
+                continue;
+            }
+        }
+        if buffer.len() == tail {
+            buffer.pop_front();
+        }
+        buffer.push_back(line);
+    }
+    Ok((buffer.into_iter().collect(), truncated))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
@@ -277,8 +499,22 @@ impl ComponentKind {
 struct ComponentState {
     pid: u32,
     session_id: String,
+    #[serde(default)]
+    run_id: Option<String>,
     command: Vec<String>,
     started_at: DateTime<Utc>,
+    log_path: PathBuf,
+}
+
+impl ComponentState {
+    fn effective_run_id(&self) -> &str {
+        self.run_id.as_deref().unwrap_or(&self.session_id)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LaunchInfo {
+    run_id: String,
     log_path: PathBuf,
 }
 
@@ -322,6 +558,65 @@ impl Paths {
         self.log_dir.join(format!("{}.log", component.as_str()))
     }
 
+    fn component_log_dir(&self, component: ComponentKind) -> Result<PathBuf> {
+        let dir = self.log_dir.join(component.as_str());
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("creating log directory {}", dir.display()))?;
+        Ok(dir)
+    }
+
+    fn run_log_path(&self, component: ComponentKind, run_id: &str) -> Result<PathBuf> {
+        let dir = self.component_log_dir(component)?;
+        Ok(dir.join(format!("{run_id}.log")))
+    }
+
+    fn update_latest_log_alias(&self, component: ComponentKind, target: &Path) -> Result<()> {
+        let alias = self.log_path(component);
+        if let Err(err) = fs::remove_file(&alias) {
+            if err.kind() != io::ErrorKind::NotFound {
+                return Err(err).with_context(|| format!("clearing {}", alias.display()));
+            }
+        }
+        #[cfg(unix)]
+        {
+            unix_fs::symlink(target, &alias)
+                .with_context(|| format!("linking {} -> {}", alias.display(), target.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::hard_link(target, &alias).with_context(|| {
+                format!(
+                    "linking {} to {} (hard link fallback on this platform)",
+                    alias.display(),
+                    target.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn list_run_logs(&self, component: ComponentKind) -> Result<Vec<(String, PathBuf)>> {
+        let dir = self.component_log_dir(component)?;
+        let mut runs = Vec::new();
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("reading log directory {}", dir.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            runs.push((stem.to_string(), path));
+        }
+        Ok(runs)
+    }
+
     fn launcher_script(&self, session_id: &str) -> PathBuf {
         self.launcher_dir.join(format!("retail_{session_id}.sh"))
     }
@@ -344,6 +639,7 @@ fn main() -> Result<()> {
         CommandKind::Retail(cmd) => handle_retail(cmd, &paths),
         CommandKind::Scenario(cmd) => handle_scenario(cmd, &paths),
         CommandKind::Watch(cmd) => handle_watch(cmd, &paths),
+        CommandKind::Compare(cmd) => handle_compare(cmd, &paths),
         CommandKind::Status => {
             for component in [
                 ComponentKind::Engine,
@@ -359,15 +655,13 @@ fn main() -> Result<()> {
 
 fn handle_engine(cmd: EngineCommand, paths: &Paths) -> Result<()> {
     match cmd {
-        EngineCommand::Start(args) => start_engine(args, paths),
+        EngineCommand::Start(args) => start_engine(args, paths).map(|_| ()),
         EngineCommand::Stop => stop_component(ComponentKind::Engine, paths, false),
         EngineCommand::Status => {
             print_component_status(paths, ComponentKind::Engine)?;
             Ok(())
         }
-        EngineCommand::Logs(args) => {
-            show_logs(paths, ComponentKind::Engine, args.tail, args.follow)
-        }
+        EngineCommand::Logs(args) => show_logs(paths, ComponentKind::Engine, &args),
     }
 }
 
@@ -379,24 +673,20 @@ fn handle_viewer(cmd: ViewerCommand, paths: &Paths) -> Result<()> {
             print_component_status(paths, ComponentKind::Viewer)?;
             Ok(())
         }
-        ViewerCommand::Logs(args) => {
-            show_logs(paths, ComponentKind::Viewer, args.tail, args.follow)
-        }
+        ViewerCommand::Logs(args) => show_logs(paths, ComponentKind::Viewer, &args),
     }
 }
 
 fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
     match cmd {
-        RetailCommand::Start(args) => start_retail(args, paths),
+        RetailCommand::Start(args) => start_retail(args, paths).map(|_| ()),
         RetailCommand::Stop => stop_component(ComponentKind::Retail, paths, true),
         RetailCommand::Status => {
             print_component_status(paths, ComponentKind::Retail)?;
             print_retail_instrumentation(paths)?;
             Ok(())
         }
-        RetailCommand::Logs(args) => {
-            show_logs(paths, ComponentKind::Retail, args.tail, args.follow)
-        }
+        RetailCommand::Logs(args) => show_logs(paths, ComponentKind::Retail, &args),
         RetailCommand::Copy(args) => copy_retail(args, paths),
     }
 }
@@ -414,11 +704,73 @@ fn handle_watch(cmd: WatchCommand, paths: &Paths) -> Result<()> {
     }
 }
 
-fn start_engine(args: EngineStart, paths: &Paths) -> Result<()> {
+fn handle_compare(cmd: CompareCommand, paths: &Paths) -> Result<()> {
+    match cmd {
+        CompareCommand::Boot(args) => compare_boot(args, paths),
+        CompareCommand::Paths(args) => compare_paths(args, paths),
+    }
+}
+
+fn compare_boot(args: CompareBootArgs, paths: &Paths) -> Result<()> {
+    let run_id = args
+        .run_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let mut guard = LaunchGuard::default();
+
+    let engine_args = EngineStart {
+        release: args.engine_release,
+        headless: args.engine_headless,
+        verbose: false,
+        attach: false,
+        run_id: Some(run_id.clone()),
+        extra_args: Vec::new(),
+    };
+    let engine_launch = start_engine(engine_args, paths)?;
+    guard.push(ComponentKind::Engine);
+
+    let retail_args = RetailStart {
+        timeout: if args.retail_no_timeout {
+            "0".to_string()
+        } else {
+            "20s".to_string()
+        },
+        no_timeout: args.retail_no_timeout,
+        vanilla: args.retail_vanilla,
+        attach: false,
+        run_id: Some(run_id.clone()),
+        extra_args: Vec::new(),
+    };
+    let retail_launch = match start_retail(retail_args, paths) {
+        Ok(info) => info,
+        Err(err) => {
+            guard.stop_all(paths);
+            return Err(err);
+        }
+    };
+
+    println!("[grctl] compare boot run {}", engine_launch.run_id);
+    println!("  engine log:   {}", engine_launch.log_path.display());
+    println!("  retail log:   {}", retail_launch.log_path.display());
+    println!(
+        "  telemetry:    {}",
+        paths.retail_telemetry_path().display()
+    );
+    println!(
+        "Next: grctl engine logs --run {} -f | grctl retail logs --run {} -f",
+        engine_launch.run_id, retail_launch.run_id
+    );
+
+    Ok(())
+}
+
+fn start_engine(args: EngineStart, paths: &Paths) -> Result<LaunchInfo> {
     ensure_component_available(ComponentKind::Engine, paths)?;
 
     let session_id = Uuid::new_v4().to_string();
-    let log_path = paths.log_path(ComponentKind::Engine);
+    let run_id = args.run_id.clone().unwrap_or_else(|| session_id.clone());
+    let log_path = paths.run_log_path(ComponentKind::Engine, &run_id)?;
 
     let mut command_line = vec!["cargo".to_string(), "run".to_string()];
     let mut command = Command::new("cargo");
@@ -447,8 +799,9 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<()> {
     launch_component(
         ComponentKind::Engine,
         paths,
-        session_id,
-        log_path,
+        session_id.clone(),
+        run_id.clone(),
+        log_path.clone(),
         command,
         command_line,
     )?;
@@ -456,24 +809,31 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<()> {
     if args.attach {
         println!(
             "[grctl] attaching to engine log (Ctrl-C to detach): {}",
-            paths.log_path(ComponentKind::Engine).display()
+            log_path.display()
         );
-        show_logs(paths, ComponentKind::Engine, 200, true)?;
+        let log_args = LogArgs {
+            tail: 200,
+            follow: true,
+            run: RunSelection::Id(run_id.clone()),
+        };
+        show_logs(paths, ComponentKind::Engine, &log_args)?;
     } else {
         println!(
-            "[grctl] engine log: {} (use 'grctl engine logs -f' to follow)",
-            paths.log_path(ComponentKind::Engine).display()
+            "[grctl] engine log (run {}): {}",
+            run_id,
+            log_path.display()
         );
     }
 
-    Ok(())
+    Ok(LaunchInfo { run_id, log_path })
 }
 
 fn start_viewer(args: ViewerStart, paths: &Paths) -> Result<()> {
     ensure_component_available(ComponentKind::Viewer, paths)?;
 
     let session_id = Uuid::new_v4().to_string();
-    let log_path = paths.log_path(ComponentKind::Viewer);
+    let run_id = session_id.clone();
+    let log_path = paths.run_log_path(ComponentKind::Viewer, &run_id)?;
 
     let mut command_line = vec!["cargo".to_string(), "run".to_string()];
     let mut command = Command::new("cargo");
@@ -513,17 +873,19 @@ fn start_viewer(args: ViewerStart, paths: &Paths) -> Result<()> {
         ComponentKind::Viewer,
         paths,
         session_id,
+        run_id,
         log_path,
         command,
         command_line,
     )
 }
 
-fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
+fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
     ensure_component_available(ComponentKind::Retail, paths)?;
 
     let session_id = Uuid::new_v4().to_string();
-    let log_path = paths.log_path(ComponentKind::Retail);
+    let run_id = args.run_id.clone().unwrap_or_else(|| session_id.clone());
+    let log_path = paths.run_log_path(ComponentKind::Retail, &run_id)?;
 
     let layout = RetailLayout::new(&paths.repo_root)?;
     layout.ensure_dev_install_exists()?;
@@ -549,8 +911,9 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
     launch_component(
         ComponentKind::Retail,
         paths,
-        session_id,
-        log_path,
+        session_id.clone(),
+        run_id.clone(),
+        log_path.clone(),
         command,
         command_line,
     )?;
@@ -558,17 +921,23 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<()> {
     if args.attach {
         println!(
             "[grctl] attaching to retail log (Ctrl-C to detach): {}",
-            paths.log_path(ComponentKind::Retail).display()
+            log_path.display()
         );
-        show_logs(paths, ComponentKind::Retail, 200, true)?;
+        let log_args = LogArgs {
+            tail: 200,
+            follow: true,
+            run: RunSelection::Id(run_id.clone()),
+        };
+        show_logs(paths, ComponentKind::Retail, &log_args)?;
     } else {
         println!(
-            "[grctl] retail log: {} (use 'grctl retail logs -f' to follow)",
-            paths.log_path(ComponentKind::Retail).display()
+            "[grctl] retail log (run {}): {}",
+            run_id,
+            log_path.display()
         );
     }
 
-    Ok(())
+    Ok(LaunchInfo { run_id, log_path })
 }
 
 fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
@@ -871,6 +1240,7 @@ fn launch_component(
     component: ComponentKind,
     paths: &Paths,
     session_id: String,
+    run_id: String,
     log_path: PathBuf,
     mut command: Command,
     command_line: Vec<String>,
@@ -882,7 +1252,11 @@ fn launch_component(
     command.env("GRCTL_COMPONENT", component.as_str());
     command.env("GRCTL_LOG_PATH", &log_path);
     command.env("GRCTL_STATE_DIR", &paths.state_dir);
+    command.env("GRIM_TRACE_RUN_ID", &run_id);
 
+    if log_path.exists() {
+        fs::remove_file(&log_path).with_context(|| format!("clearing {}", log_path.display()))?;
+    }
     let mut log_file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -891,11 +1265,17 @@ fn launch_component(
     let timestamp = Utc::now();
     writeln!(
         log_file,
-        "\n===== [{}] launching {} =====",
-        timestamp.to_rfc3339(),
-        component.display()
+        "\n===== launching {} session={} run_id={} at {} =====",
+        component.display(),
+        session_id,
+        run_id,
+        timestamp.to_rfc3339()
     )
     .ok();
+
+    paths
+        .update_latest_log_alias(component, &log_path)
+        .with_context(|| format!("updating latest log alias for {}", component.as_str()))?;
 
     let stdout = log_file
         .try_clone()
@@ -918,6 +1298,7 @@ fn launch_component(
     let state = ComponentState {
         pid,
         session_id: session_id.clone(),
+        run_id: Some(run_id.clone()),
         command: command_line,
         started_at: timestamp,
         log_path: log_path.clone(),
@@ -926,10 +1307,11 @@ fn launch_component(
     spawn_reaper(component, paths.clone(), log_path, child);
 
     println!(
-        "[grctl] started {} (pid {}, session {})",
+        "[grctl] started {} (pid {}, session {}, run {})",
         component.display(),
         pid,
-        session_id
+        session_id,
+        run_id
     );
     Ok(())
 }
@@ -1174,15 +1556,17 @@ fn print_component_status(paths: &Paths, component: ComponentKind) -> Result<()>
         }
         Some(state) => {
             if process_alive(state.pid) {
+                let run_id = state.effective_run_id();
                 let uptime = match (Utc::now() - state.started_at).to_std() {
                     Ok(duration) => format_duration(duration).to_string(),
                     Err(_) => "unknown".to_string(),
                 };
                 println!(
-                    "[grctl] {:<12} status: running (pid {}, session {}, uptime {})",
+                    "[grctl] {:<12} status: running (pid {}, session {}, run {}, uptime {})",
                     component.as_str(),
                     state.pid,
                     state.session_id,
+                    run_id,
                     uptime
                 );
             } else {
@@ -1197,25 +1581,57 @@ fn print_component_status(paths: &Paths, component: ComponentKind) -> Result<()>
     Ok(())
 }
 
-fn show_logs(paths: &Paths, component: ComponentKind, tail: usize, follow: bool) -> Result<()> {
-    let log_path = paths.log_path(component);
-    if !log_path.exists() {
-        bail!(
-            "no log file found for {} at {}",
-            component.display(),
-            log_path.display()
-        );
-    }
-    println!("# {}", log_path.display());
-    if follow {
-        follow_logs(&log_path, tail)?;
+fn show_logs(paths: &Paths, component: ComponentKind, args: &LogArgs) -> Result<()> {
+    let (run_id, log_path) = resolve_run_path(paths, component, &args.run)?;
+    println!("# {} (run {})", log_path.display(), run_id);
+
+    if args.follow {
+        follow_logs(&log_path, args.tail)
     } else {
-        let lines = tail_file(&log_path, tail)?;
+        let lines = tail_file(&log_path, args.tail)?;
         for line in lines {
             println!("{line}");
         }
+        Ok(())
     }
-    Ok(())
+}
+
+fn resolve_run_path(
+    paths: &Paths,
+    component: ComponentKind,
+    selection: &RunSelection,
+) -> Result<(String, PathBuf)> {
+    match selection {
+        RunSelection::Latest => {
+            let run_dir = paths.component_log_dir(component)?;
+            let mut runs = paths.list_run_logs(component)?;
+            if runs.is_empty() {
+                bail!(
+                    "no runs recorded yet for {} under {}",
+                    component.display(),
+                    run_dir.display()
+                );
+            }
+            runs.sort_by_key(|(_, path)| {
+                path.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+            });
+            let (run_id, path) = runs.pop().expect("non-empty after sort ensured above");
+            Ok((run_id, path))
+        }
+        RunSelection::Id(run_id) => {
+            let path = paths.run_log_path(component, run_id)?;
+            if !path.exists() {
+                bail!(
+                    "no log for run {} at {} (use --run latest to pick the newest run)",
+                    run_id,
+                    path.display()
+                );
+            }
+            Ok((run_id.clone(), path))
+        }
+    }
 }
 
 fn follow_logs(path: &Path, tail: usize) -> Result<()> {
@@ -1349,12 +1765,12 @@ fn watch_intro_timeline(args: WatchIntroArgs, paths: &Paths) -> Result<()> {
     let (engine_path, retail_path) = if launch {
         ensure_component_available(ComponentKind::Engine, paths)?;
         ensure_component_available(ComponentKind::Retail, paths)?;
-        prepare_intro_watch_sources(paths)?;
-        start_intro_watch_components(paths, &mut guard, headless_engine, engine_release)?;
-        (
-            paths.log_path(ComponentKind::Engine),
-            paths.retail_telemetry_path(),
-        )
+        let run_id = Uuid::new_v4().to_string();
+        let engine_log = paths.run_log_path(ComponentKind::Engine, &run_id)?;
+        let retail_events = paths.retail_telemetry_path();
+        prepare_intro_watch_sources(&engine_log, &retail_events)?;
+        start_intro_watch_components(paths, &mut guard, headless_engine, engine_release, &run_id)?;
+        (engine_log, retail_events)
     } else {
         (
             resolve_repo_path(paths, &engine_log),
@@ -1404,15 +1820,17 @@ fn start_intro_watch_components(
     guard: &mut LaunchGuard,
     headless_engine: bool,
     engine_release: bool,
+    run_id: &str,
 ) -> Result<()> {
     let engine_args = EngineStart {
         release: engine_release,
         headless: headless_engine,
         verbose: true,
         attach: false,
+        run_id: Some(run_id.to_string()),
         extra_args: Vec::new(),
     };
-    start_engine(engine_args, paths)?;
+    let _ = start_engine(engine_args, paths)?;
     guard.push(ComponentKind::Engine);
 
     let retail_args = RetailStart {
@@ -1420,19 +1838,18 @@ fn start_intro_watch_components(
         no_timeout: true,
         vanilla: false,
         attach: false,
+        run_id: Some(run_id.to_string()),
         extra_args: Vec::new(),
     };
-    start_retail(retail_args, paths)?;
+    let _ = start_retail(retail_args, paths)?;
     guard.push(ComponentKind::Retail);
 
     Ok(())
 }
 
-fn prepare_intro_watch_sources(paths: &Paths) -> Result<()> {
-    let engine_path = paths.log_path(ComponentKind::Engine);
-    let retail_path = paths.retail_telemetry_path();
-    reset_file(&engine_path)?;
-    reset_file(&retail_path)?;
+fn prepare_intro_watch_sources(engine_path: &Path, retail_path: &Path) -> Result<()> {
+    reset_file(engine_path)?;
+    reset_file(retail_path)?;
     Ok(())
 }
 
@@ -1556,11 +1973,10 @@ fn run_intro_timeline_loop(
         }
 
         if let Some(paths) = status_paths {
-            let engine_log = paths.log_path(ComponentKind::Engine);
-            let retail_log = paths.log_path(ComponentKind::Retail);
             if !reported_engine_exit {
                 if let Some(state) = load_state(ComponentKind::Engine, paths)? {
                     if !process_alive(state.pid) {
+                        let engine_log = state.log_path.clone();
                         println!(
                             "[grctl] grim_engine exited (pid {}, session {}); recent log:",
                             state.pid, state.session_id
@@ -1573,6 +1989,7 @@ fn run_intro_timeline_loop(
             if !reported_retail_exit {
                 if let Some(state) = load_state(ComponentKind::Retail, paths)? {
                     if !process_alive(state.pid) {
+                        let retail_log = state.log_path.clone();
                         println!(
                             "[grctl] retail_game exited (pid {}, session {}); recent log:",
                             state.pid, state.session_id
@@ -1588,15 +2005,19 @@ fn run_intro_timeline_loop(
     }
 
     if let Some(paths) = status_paths {
-        let engine_log = paths.log_path(ComponentKind::Engine);
-        let retail_log = paths.log_path(ComponentKind::Retail);
         if !reported_engine_exit {
             if let Some(state) = load_state(ComponentKind::Engine, paths)? {
                 if !process_alive(state.pid) {
+                    let engine_log = state.log_path.clone();
                     println!(
                         "[grctl] grim_engine exited (pid {}, session {}); recent log:",
                         state.pid, state.session_id
                     );
+                    print_log_tail(&engine_log, 20);
+                }
+            } else {
+                let engine_log = paths.log_path(ComponentKind::Engine);
+                if engine_log.exists() {
                     print_log_tail(&engine_log, 20);
                 }
             }
@@ -1604,10 +2025,16 @@ fn run_intro_timeline_loop(
         if !reported_retail_exit {
             if let Some(state) = load_state(ComponentKind::Retail, paths)? {
                 if !process_alive(state.pid) {
+                    let retail_log = state.log_path.clone();
                     println!(
                         "[grctl] retail_game exited (pid {}, session {}); recent log:",
                         state.pid, state.session_id
                     );
+                    print_log_tail(&retail_log, 20);
+                }
+            } else {
+                let retail_log = paths.log_path(ComponentKind::Retail);
+                if retail_log.exists() {
                     print_log_tail(&retail_log, 20);
                 }
             }

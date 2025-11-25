@@ -9,8 +9,9 @@ movie.
 - `grim_engine` emits JSON lines (matching the retail telemetry schema) such as
   `{"label":"intro.timeline","data":{"event":"movie.logos.start"}}` whenever it
   enters or exits one of the fullscreen videos. `grctl watch intro-timeline`
-  clears `target/grctl/logs/grim_engine.log` before every launched session so
-  the log only contains fresh data.
+  clears a fresh per-run log (`target/grctl/logs/grim_engine/<run_id>.log`) and
+  updates the `target/grctl/logs/grim_engine.log` symlink to that run before
+  every launched session.
 - `tools/live_retail_capture` writes a JSONL stream to
   `dev-install/mods/telemetry_events.jsonl` with the same shape: `label` set to
   `intro.timeline` and `data.event` holding the specific marker
@@ -27,9 +28,9 @@ movie.
    nix-shell --run "cargo run -p grctl -- watch intro-timeline --launch"
    ```
 
-   The helper clears prior intro logs, starts a headless `grim_engine` with
-   verbose logging plus the retail capture, and tails both sources until you
-   press Ctrl-C.
+   The helper clears prior intro logs for a shared run id, starts a headless
+   `grim_engine` with verbose logging plus the retail capture, and tails both
+   sources until you press Ctrl-C.
 
 3. Inspect the rolling summary printed during the watch. Matching timelines
    produce `intro timeline matches across engine and retail` once all markers
@@ -39,9 +40,12 @@ movie.
 
    ```bash
    nix-shell --run 'cargo run -p grctl -- watch intro-timeline \
-     --engine-log <path/to/grim_engine.log> \
+     --engine-log target/grctl/logs/grim_engine/<run_id>.log \
      --retail-events dev-install/mods/telemetry_events.jsonl'
    ```
+
+   The `target/grctl/logs/grim_engine.log` symlink always points at the newest
+   run if you prefer to tail the latest log automatically.
 
    Use `--from-end` if you want the watch to start from the existing tail of
    each file instead of processing everything from the beginning.
