@@ -3,6 +3,9 @@ name = "grim_telemetry_common"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+libc = "0.2"
+
 [lib]
 name = "grim_telemetry_common"
 path = "src/lib.rs"

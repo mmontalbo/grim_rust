@@ -1,148 +1,53 @@
-use libc::pid_t;
-use std::{
-    env,
-    fmt::Display,
-    fs::OpenOptions,
-    io::{self, BufWriter, Write},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+use std::ffi::c_void;
 
-enum LogTarget {
-    Stderr(io::Stderr),
-    File(BufWriter<std::fs::File>),
-}
+pub(crate) use grim_telemetry_common::EventBuilder;
+use grim_telemetry_common::{TelemetryConfig, TelemetryLogger};
 
-struct LogSink {
-    target: Mutex<LogTarget>,
-}
+const ENGINE_ID: &str = "grim_engine";
+const VM_ID: &str = "lua";
 
-static LOG_SINK: OnceLock<LogSink> = OnceLock::new();
-static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
-
-const ENGINE_ID: &str = "rust";
-const VM_ID: &str = "lua32";
-
-pub(crate) fn log_line(message: &str) {
-    let sink = LOG_SINK.get_or_init(LogSink::init);
-    sink.write_line(message);
-}
+static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
+    engine_id: ENGINE_ID,
+    vm_id: VM_ID,
+    log_env_vars: &["GRIM_ENGINE_LOG"],
+    line_prefix: "grim_engine",
+    run_id_env: None,
+});
 
 pub(crate) fn log_event(event: EventBuilder) {
-    let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    let ts = elapsed_millis();
-    let fields = event.finish();
-    let mut parts = Vec::with_capacity(fields.len() + 4);
-    parts.push(format!("engine={ENGINE_ID}"));
-    parts.push(format!("vm_id={VM_ID}"));
-    parts.push(format!("seq={seq}"));
-    parts.push(format!("ts={ts}"));
-    parts.extend(fields);
-    log_line(&parts.join(" "));
+    LOGGER.log_event(event);
 }
 
-pub(crate) struct EventBuilder {
-    fields: Vec<String>,
+pub(crate) fn log_push_cclosure(label: &str, func: *const c_void) {
+    log_event(
+        EventBuilder::new("push_cclosure")
+            .kv("name", label)
+            .kv("func", format!("{func:p}")),
+    );
 }
 
-impl EventBuilder {
-    pub(crate) fn new(event: impl Into<String>) -> Self {
-        Self {
-            fields: vec![format!("event={}", event.into())],
-        }
-    }
-
-    pub(crate) fn kv(mut self, key: &str, value: impl Display) -> Self {
-        let mut value = value.to_string();
-        let needs_quotes = value.contains(|c: char| c.is_whitespace());
-        if needs_quotes {
-            value = value.replace('"', "\\\"");
-            self.fields.push(format!("{key}=\"{value}\""));
-        } else {
-            self.fields.push(format!("{key}={value}"));
-        }
-        self
-    }
-
-    fn finish(self) -> Vec<String> {
-        self.fields
-    }
+pub(crate) fn log_bind_global(name: &str, func: *const c_void) {
+    log_event(
+        EventBuilder::new("bind_global")
+            .kv("name", name)
+            .kv("handle", format!("{func:p}")),
+    );
 }
 
-impl LogSink {
-    fn init() -> Self {
-        let path = env::var("GRIM_SHIM_LOG").or_else(|_| env::var("GRIM_TRACE_LOG"));
-        if let Ok(path) = path {
-            match OpenOptions::new().create(true).append(true).open(&path) {
-                Ok(file) => {
-                    let writer = BufWriter::new(file);
-                    return Self {
-                        target: Mutex::new(LogTarget::File(writer)),
-                    };
-                }
-                Err(err) => {
-                    eprintln!(
-                        "[grim-engine-trace] failed to open {path} for logging: {err}; falling back to stderr"
-                    );
-                }
-            }
-        }
-
-        Self {
-            target: Mutex::new(LogTarget::Stderr(io::stderr())),
-        }
+pub(crate) fn log_store_ref(lock: i32, reference: i32, label: Option<String>) {
+    let mut event = EventBuilder::new("store_ref")
+        .kv("lock", lock)
+        .kv("ref", reference);
+    if let Some(label) = label {
+        event = event.kv("label", label);
     }
-
-    fn write_line(&self, message: &str) {
-        let timestamp = format_timestamp();
-        let pid = unsafe { libc::getpid() };
-        let tid = current_tid();
-        let mut guard = self
-            .target
-            .lock()
-            .expect("log sink mutex should never be poisoned");
-        let line = format!("[grim-engine-trace ts={timestamp} pid={pid} tid={tid}] {message}\n");
-        match &mut *guard {
-            LogTarget::Stderr(stderr) => {
-                let _ = stderr.write_all(line.as_bytes());
-                let _ = stderr.flush();
-            }
-            LogTarget::File(file) => {
-                let _ = file.write_all(line.as_bytes());
-                let _ = file.flush();
-            }
-        }
-    }
+    log_event(event);
 }
 
-fn format_timestamp() -> String {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => {
-            let secs = duration.as_secs();
-            let millis = duration.subsec_millis();
-            format!("{secs}.{millis:03}")
-        }
-        Err(_) => "unknown".to_string(),
-    }
-}
-
-fn current_tid() -> pid_t {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::syscall(libc::SYS_gettid) as pid_t
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    unsafe {
-        libc::pthread_self() as pid_t
-    }
-}
-
-fn elapsed_millis() -> u128 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    let start = START.get_or_init(Instant::now);
-    start.elapsed().as_millis()
+pub(crate) fn log_set_tagmethod(tag: i64, event: &str) {
+    log_event(
+        EventBuilder::new("set_tagmethod")
+            .kv("tag", tag)
+            .kv("event_name", event),
+    );
 }
