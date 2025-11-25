@@ -34,7 +34,7 @@ fn verbose_fields_enabled() -> bool {
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {
     let verbose = verbose_fields_enabled();
     let func_addr = func as *const c_void as usize;
-    let origin = verbose.then(|| ClosureOrigin::new(func as *const c_void));
+    let origin = Some(ClosureOrigin::new(func as *const c_void));
     let mut event = EventBuilder::new("push_cclosure")
         .kv("name", label)
         .kv("func", format!("0x{func_addr:08x}"));
@@ -543,10 +543,6 @@ fn global_access_tracker() -> &'static Mutex<GlobalAccessTracker> {
 }
 
 fn add_origin_fields(mut builder: EventBuilder, origin: Option<&ClosureOrigin>) -> EventBuilder {
-    if !verbose_fields_enabled() {
-        return builder;
-    }
-
     if let Some(origin) = origin {
         builder = builder.kv("origin", format!("0x{addr:08x}", addr = origin.func_addr));
         if let Some(module) = &origin.module {

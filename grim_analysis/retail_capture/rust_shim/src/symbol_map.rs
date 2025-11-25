@@ -136,11 +136,25 @@ impl LoadedSymbolMap {
     }
 
     fn lookup(&self, addr: usize, module_base: Option<usize>) -> Option<SymbolMapHit> {
-        let offset = match module_base {
-            Some(base) => addr.checked_sub(base)?,
-            None => addr,
-        };
+        // First try relative to module base (useful for shared libraries).
+        let mut candidates = Vec::new();
+        if let Some(base) = module_base {
+            if let Some(offset) = addr.checked_sub(base) {
+                candidates.push(offset);
+            }
+        }
+        // Also try absolute addresses so maps generated from nm on the main executable work.
+        candidates.push(addr);
 
+        for candidate in candidates {
+            if let Some(hit) = self.lookup_addr(candidate) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    fn lookup_addr(&self, offset: usize) -> Option<SymbolMapHit> {
         let idx = match self
             .entries
             .binary_search_by_key(&offset, |entry| entry.addr)
@@ -152,10 +166,8 @@ impl LoadedSymbolMap {
         let entry = &self.entries[idx];
         let distance = offset.saturating_sub(entry.addr);
         if distance > 0x4000 {
-            // The closest symbol is too far away to be trustworthy.
             return None;
         }
-
         Some(SymbolMapHit {
             name: entry.name.clone(),
             distance,

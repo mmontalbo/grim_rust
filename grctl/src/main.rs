@@ -27,7 +27,7 @@ use std::os::unix::fs as unix_fs;
 use std::os::unix::fs::PermissionsExt;
 
 mod retail;
-use retail::{extend_env_var, warn_if_shaders_missing, HookMode, RetailLayout};
+use retail::{extend_env_var, warn_if_shaders_missing, HookMode, RetailLayout, SymbolMapStatus};
 
 const RETAIL_STEAM_APP_ID: &str = "345350";
 const RETAIL_LUA_PATH: &str = "./?.lua;./?.LUA;./mods/?.lua";
@@ -897,11 +897,18 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
     };
     if matches!(mode, HookMode::Instrumented) {
         ensure_rust_shim_ready(paths, &layout)?;
+        ensure_symbol_map_ready(paths, &layout)?;
         let status = layout.instrumentation_status()?;
         if !status.shim_available {
             eprintln!(
                 "[grctl] warning: LD_PRELOAD shim missing. Run 'cargo build -p grim_telemetry_shim --release' so {} exists; retail hooks will be incomplete until the Rust shim is built.",
                 layout.preferred_shim_path().display(),
+            );
+        }
+        if status.symbol_map != SymbolMapStatus::Fresh {
+            eprintln!(
+                "[grctl] warning: retail symbol map missing or stale at {}; labels may show raw addresses",
+                layout.symbol_map_path().display(),
             );
         }
     }
@@ -965,6 +972,42 @@ fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
     }
 }
 
+fn ensure_symbol_map_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
+    match layout.symbol_map_status()? {
+        SymbolMapStatus::Fresh => return Ok(()),
+        SymbolMapStatus::Stale | SymbolMapStatus::Missing => {}
+    }
+
+    println!("[grctl] rebuilding retail symbol map...");
+    let dev_install = layout.dev_install().to_string_lossy().into_owned();
+    let map_path = layout.symbol_map_path().to_string_lossy().into_owned();
+    let command = format!(
+        "cd {} && nm -n --demangle GrimFandango | awk '$2 ~ /^[tT]$/ {{print $1, $3}}' > {}",
+        shell_quote(&dev_install),
+        shell_quote(&map_path)
+    );
+    let status = Command::new("nix-shell")
+        .current_dir(&paths.repo_root)
+        .args(["--run", &command])
+        .status()
+        .context("building retail symbol map with nm")?;
+    if !status.success() {
+        bail!("retail symbol map generation failed with status {}", status);
+    }
+
+    match layout.symbol_map_status()? {
+        SymbolMapStatus::Fresh => Ok(()),
+        SymbolMapStatus::Stale => bail!(
+            "retail symbol map at {} is stale after regeneration",
+            layout.symbol_map_path().display()
+        ),
+        SymbolMapStatus::Missing => bail!(
+            "retail symbol map missing after regeneration attempt at {}",
+            layout.symbol_map_path().display()
+        ),
+    }
+}
+
 fn ensure_i686_target_installed() -> Result<()> {
     let status = Command::new("rustup")
         .args(["target", "add", RUST_SHIM_TARGET])
@@ -1009,10 +1052,13 @@ fn print_retail_instrumentation(paths: &Paths) -> Result<()> {
 }
 
 fn describe_instrumentation(status: &retail::InstrumentationStatus) -> String {
-    if status.shim_available {
-        "instrumented (shim available)".to_string()
-    } else {
-        "vanilla (shim missing; build grim_telemetry_shim)".to_string()
+    match (status.shim_available, status.symbol_map) {
+        (false, _) => "vanilla (shim missing; build grim_telemetry_shim)".to_string(),
+        (true, SymbolMapStatus::Fresh) => "instrumented (shim + symbol map ready)".to_string(),
+        (true, SymbolMapStatus::Stale) => "instrumented (shim ready, symbol map stale)".to_string(),
+        (true, SymbolMapStatus::Missing) => {
+            "instrumented (shim ready, symbol map missing)".to_string()
+        }
     }
 }
 
@@ -1037,7 +1083,7 @@ fn build_retail_command(
         command_line.push("steam-run".to_string());
         Command::new("steam-run")
     };
-    let retail_bin = layout.dev_install().join("GrimFandango");
+    let retail_bin = layout.retail_bin();
     if !retail_bin.exists() {
         bail!(
             "retail binary missing at {}; run 'grctl retail copy' first",
@@ -1106,6 +1152,18 @@ fn assemble_retail_env(
         envs.push(("SDL_AUDIODRIVER".to_string(), audio));
     }
     envs.extend(build_steam_env(layout));
+    if matches!(mode, HookMode::Instrumented) {
+        if let SymbolMapStatus::Fresh = layout.symbol_map_status()? {
+            envs.push((
+                "GRIM_SHIM_SYMBOL_MAP".to_string(),
+                layout.symbol_map_path().to_string_lossy().into_owned(),
+            ));
+            envs.push((
+                "GRIM_SHIM_SYMBOL_MAP_MODULE".to_string(),
+                "GrimFandango".to_string(),
+            ));
+        }
+    }
     let preload = build_ld_preload(mode, layout, extra_preloads)?;
     Ok((envs, preload))
 }

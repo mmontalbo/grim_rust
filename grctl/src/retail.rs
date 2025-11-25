@@ -14,9 +14,18 @@ pub enum HookMode {
     Vanilla,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymbolMapStatus {
+    Missing,
+    Stale,
+    Fresh,
+}
+
 #[derive(Clone, Debug)]
 pub struct RetailLayout {
     dev_install: PathBuf,
+    retail_bin: PathBuf,
+    symbol_map: PathBuf,
     steam_install: PathBuf,
     steam_root: Option<PathBuf>,
     rust_shim_workspace_release: PathBuf,
@@ -28,11 +37,14 @@ pub struct RetailLayout {
 #[derive(Clone, Debug)]
 pub struct InstrumentationStatus {
     pub shim_available: bool,
+    pub symbol_map: SymbolMapStatus,
 }
 
 impl RetailLayout {
     pub fn new(repo_root: &Path) -> Result<Self> {
         let dev_install = repo_root.join("dev-install");
+        let retail_bin = dev_install.join("GrimFandango");
+        let symbol_map = dev_install.join("GrimFandango.sym");
         let steam_root = detect_steam_root_path().ok();
         let shim_name = "libgrim_telemetry_shim.so";
         let rust_workspace_target = repo_root.join("target").join("i686-unknown-linux-gnu");
@@ -49,6 +61,8 @@ impl RetailLayout {
         let steam_install = detect_steam_install_path()?;
         Ok(Self {
             dev_install,
+            retail_bin,
+            symbol_map,
             steam_install,
             steam_root,
             rust_shim_workspace_release,
@@ -60,6 +74,14 @@ impl RetailLayout {
 
     pub fn dev_install(&self) -> &Path {
         &self.dev_install
+    }
+
+    pub fn retail_bin(&self) -> &Path {
+        &self.retail_bin
+    }
+
+    pub fn symbol_map_path(&self) -> &Path {
+        &self.symbol_map
     }
 
     pub fn steam_root(&self) -> Option<&Path> {
@@ -97,7 +119,11 @@ impl RetailLayout {
 
     pub fn instrumentation_status(&self) -> Result<InstrumentationStatus> {
         let shim_available = self.resolved_shim_path().is_some();
-        Ok(InstrumentationStatus { shim_available })
+        let symbol_map = self.symbol_map_status()?;
+        Ok(InstrumentationStatus {
+            shim_available,
+            symbol_map,
+        })
     }
 
     pub fn sync_from(&self, source_override: Option<&Path>, force: bool) -> Result<PathBuf> {
@@ -218,6 +244,36 @@ fn detect_steam_root_path() -> Result<PathBuf> {
 fn push_unique_if_exists(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
     if candidate.exists() && !paths.iter().any(|existing| existing == &candidate) {
         paths.push(candidate);
+    }
+}
+
+impl RetailLayout {
+    pub fn symbol_map_status(&self) -> Result<SymbolMapStatus> {
+        if !self.symbol_map.exists() {
+            return Ok(SymbolMapStatus::Missing);
+        }
+
+        let map_meta = self
+            .symbol_map
+            .metadata()
+            .with_context(|| format!("reading {}", self.symbol_map.display()))?;
+        let bin_meta = self
+            .retail_bin
+            .metadata()
+            .with_context(|| format!("reading {}", self.retail_bin.display()))?;
+
+        let map_time = map_meta.modified().ok();
+        let bin_time = bin_meta.modified().ok();
+        if let (Some(map_time), Some(bin_time)) = (map_time, bin_time) {
+            if map_time >= bin_time {
+                Ok(SymbolMapStatus::Fresh)
+            } else {
+                Ok(SymbolMapStatus::Stale)
+            }
+        } else {
+            // If we cannot compare times, assume present but possibly stale.
+            Ok(SymbolMapStatus::Stale)
+        }
     }
 }
 

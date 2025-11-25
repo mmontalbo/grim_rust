@@ -13,7 +13,7 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_bind_global, log_push_cclosure, log_set_tagmethod, log_store_ref,
+    log_bind_global, log_event, log_push_cclosure, log_set_tagmethod, log_store_ref, EventBuilder,
 };
 
 use super::EngineContext;
@@ -223,10 +223,12 @@ pub(crate) fn install_globals(
     set_global(lua, &globals, "_TRIGMODE", 1)?;
     log_set_tagmethod(-1, "pow");
     lua.gc_collect()?;
+    log_event(EventBuilder::new("collect_garbage"));
 
     install_pi_constant(lua, &globals)?;
     install_system_table(lua, &globals, context.clone())?;
     lua.gc_collect()?;
+    log_event(EventBuilder::new("collect_garbage"));
 
     install_basic_functions(lua, &globals, context.clone())?;
 
