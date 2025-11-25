@@ -26,6 +26,8 @@ pub struct RetailLayout {
     dev_install: PathBuf,
     retail_bin: PathBuf,
     symbol_map: PathBuf,
+    liblua_bin: PathBuf,
+    liblua_symbol_map: PathBuf,
     steam_install: PathBuf,
     steam_root: Option<PathBuf>,
     rust_shim_workspace_release: PathBuf,
@@ -38,6 +40,7 @@ pub struct RetailLayout {
 pub struct InstrumentationStatus {
     pub shim_available: bool,
     pub symbol_map: SymbolMapStatus,
+    pub liblua_symbol_map: SymbolMapStatus,
 }
 
 impl RetailLayout {
@@ -45,6 +48,8 @@ impl RetailLayout {
         let dev_install = repo_root.join("dev-install");
         let retail_bin = dev_install.join("GrimFandango");
         let symbol_map = dev_install.join("GrimFandango.sym");
+        let liblua_bin = dev_install.join("libLua.so");
+        let liblua_symbol_map = dev_install.join("libLua.so.sym");
         let steam_root = detect_steam_root_path().ok();
         let shim_name = "libgrim_telemetry_shim.so";
         let rust_workspace_target = repo_root.join("target").join("i686-unknown-linux-gnu");
@@ -63,6 +68,8 @@ impl RetailLayout {
             dev_install,
             retail_bin,
             symbol_map,
+            liblua_bin,
+            liblua_symbol_map,
             steam_install,
             steam_root,
             rust_shim_workspace_release,
@@ -82,6 +89,14 @@ impl RetailLayout {
 
     pub fn symbol_map_path(&self) -> &Path {
         &self.symbol_map
+    }
+
+    pub fn liblua_bin(&self) -> &Path {
+        &self.liblua_bin
+    }
+
+    pub fn liblua_symbol_map_path(&self) -> &Path {
+        &self.liblua_symbol_map
     }
 
     pub fn steam_root(&self) -> Option<&Path> {
@@ -120,9 +135,11 @@ impl RetailLayout {
     pub fn instrumentation_status(&self) -> Result<InstrumentationStatus> {
         let shim_available = self.resolved_shim_path().is_some();
         let symbol_map = self.symbol_map_status()?;
+        let liblua_symbol_map = self.liblua_symbol_map_status()?;
         Ok(InstrumentationStatus {
             shim_available,
             symbol_map,
+            liblua_symbol_map,
         })
     }
 
@@ -202,6 +219,35 @@ impl RetailLayout {
     }
 }
 
+pub(crate) fn symbol_map_status_for(
+    map_path: &Path,
+    binary_path: &Path,
+) -> Result<SymbolMapStatus> {
+    if !map_path.exists() {
+        return Ok(SymbolMapStatus::Missing);
+    }
+
+    let map_meta = map_path
+        .metadata()
+        .with_context(|| format!("reading {}", map_path.display()))?;
+    let bin_meta = binary_path
+        .metadata()
+        .with_context(|| format!("reading {}", binary_path.display()))?;
+
+    let map_time = map_meta.modified().ok();
+    let bin_time = bin_meta.modified().ok();
+    if let (Some(map_time), Some(bin_time)) = (map_time, bin_time) {
+        if map_time >= bin_time {
+            Ok(SymbolMapStatus::Fresh)
+        } else {
+            Ok(SymbolMapStatus::Stale)
+        }
+    } else {
+        // If we cannot compare times, assume present but possibly stale.
+        Ok(SymbolMapStatus::Stale)
+    }
+}
+
 fn detect_steam_install_path() -> Result<PathBuf> {
     if let Ok(value) = std::env::var("GRIM_STEAM_INSTALL") {
         let path = PathBuf::from(value);
@@ -249,31 +295,11 @@ fn push_unique_if_exists(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
 
 impl RetailLayout {
     pub fn symbol_map_status(&self) -> Result<SymbolMapStatus> {
-        if !self.symbol_map.exists() {
-            return Ok(SymbolMapStatus::Missing);
-        }
+        symbol_map_status_for(&self.symbol_map, &self.retail_bin)
+    }
 
-        let map_meta = self
-            .symbol_map
-            .metadata()
-            .with_context(|| format!("reading {}", self.symbol_map.display()))?;
-        let bin_meta = self
-            .retail_bin
-            .metadata()
-            .with_context(|| format!("reading {}", self.retail_bin.display()))?;
-
-        let map_time = map_meta.modified().ok();
-        let bin_time = bin_meta.modified().ok();
-        if let (Some(map_time), Some(bin_time)) = (map_time, bin_time) {
-            if map_time >= bin_time {
-                Ok(SymbolMapStatus::Fresh)
-            } else {
-                Ok(SymbolMapStatus::Stale)
-            }
-        } else {
-            // If we cannot compare times, assume present but possibly stale.
-            Ok(SymbolMapStatus::Stale)
-        }
+    pub fn liblua_symbol_map_status(&self) -> Result<SymbolMapStatus> {
+        symbol_map_status_for(&self.liblua_symbol_map, &self.liblua_bin)
     }
 }
 

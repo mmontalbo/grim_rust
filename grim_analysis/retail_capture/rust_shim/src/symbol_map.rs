@@ -19,6 +19,10 @@ struct SymbolEntry {
     name: String,
 }
 
+struct SymbolMaps {
+    maps: Vec<LoadedSymbolMap>,
+}
+
 struct LoadedSymbolMap {
     entries: Vec<SymbolEntry>,
     module_filter: Option<String>,
@@ -30,29 +34,52 @@ pub(crate) fn lookup_symbol_from_map(
     module_path: Option<&str>,
     module_base: Option<usize>,
 ) -> Option<SymbolMapHit> {
-    let map = symbol_map()?;
-    if !map.matches_module(module_path) {
-        return None;
+    let maps = symbol_maps()?;
+    maps.lookup(addr, module_path, module_base)
+}
+
+fn symbol_maps() -> Option<&'static SymbolMaps> {
+    static MAPS: OnceLock<Option<SymbolMaps>> = OnceLock::new();
+    MAPS.get_or_init(load_symbol_maps).as_ref()
+}
+
+fn load_symbol_maps() -> Option<SymbolMaps> {
+    let mut maps = Vec::new();
+    if let Some(map) = load_symbol_map("GRIM_SHIM_SYMBOL_MAP", "GRIM_SHIM_SYMBOL_MAP_MODULE") {
+        maps.push(map);
     }
-    map.lookup(addr, module_base)
+    if let Some(map) = load_symbol_map(
+        "GRIM_SHIM_SYMBOL_MAP_LUALIB",
+        "GRIM_SHIM_SYMBOL_MAP_LUALIB_MODULE",
+    ) {
+        maps.push(map);
+    }
+    if maps.is_empty() {
+        None
+    } else {
+        Some(SymbolMaps { maps })
+    }
 }
 
-fn symbol_map() -> Option<&'static LoadedSymbolMap> {
-    static MAP: OnceLock<Option<LoadedSymbolMap>> = OnceLock::new();
-    MAP.get_or_init(load_symbol_map).as_ref()
-}
-
-fn load_symbol_map() -> Option<LoadedSymbolMap> {
-    let path = env::var("GRIM_SHIM_SYMBOL_MAP").ok()?;
-    let module_filter = env::var("GRIM_SHIM_SYMBOL_MAP_MODULE")
-        .ok()
-        .filter(|value| !value.is_empty());
-
+fn load_symbol_map(path_var: &str, module_var: &str) -> Option<LoadedSymbolMap> {
+    let path = env::var(path_var).ok()?;
+    let module_filter = env::var(module_var).ok().filter(|value| !value.is_empty());
     let path_ref = Path::new(&path);
+    load_symbol_map_at_path(path_ref, module_filter)
+}
+
+fn load_symbol_map_at_path(
+    path_ref: &Path,
+    module_filter: Option<String>,
+) -> Option<LoadedSymbolMap> {
+    let path_display = path_ref.display().to_string();
     let file = match File::open(path_ref) {
         Ok(file) => file,
         Err(err) => {
-            log_line(&format!("failed to open symbol map at {path}: {err}"));
+            log_line(&format!(
+                "failed to open symbol map at {}: {err}",
+                path_display
+            ));
             return None;
         }
     };
@@ -67,7 +94,7 @@ fn load_symbol_map() -> Option<LoadedSymbolMap> {
                 }
             }
             Err(err) => {
-                log_line(&format!("error while reading {path}: {err}"));
+                log_line(&format!("error while reading {}: {err}", path_display));
                 break;
             }
         }
@@ -76,7 +103,7 @@ fn load_symbol_map() -> Option<LoadedSymbolMap> {
     if entries.is_empty() {
         log_line(&format!(
             "symbol map {} contained no parseable entries; skipping",
-            path
+            path_display
         ));
         return None;
     }
@@ -124,6 +151,33 @@ fn parse_symbol_line(line: &str) -> Option<SymbolEntry> {
 
 fn parse_hex_addr(token: &str) -> Option<usize> {
     usize::from_str_radix(token.trim_start_matches("0x"), 16).ok()
+}
+
+impl SymbolMaps {
+    fn lookup(
+        &self,
+        addr: usize,
+        module_path: Option<&str>,
+        module_base: Option<usize>,
+    ) -> Option<SymbolMapHit> {
+        if let Some(path) = module_path {
+            for map in self.maps.iter().filter(|map| map.module_filter.is_some()) {
+                if map.matches_module(Some(path)) {
+                    if let Some(hit) = map.lookup(addr, module_base) {
+                        return Some(hit);
+                    }
+                }
+            }
+        }
+
+        for map in self.maps.iter().filter(|map| map.module_filter.is_none()) {
+            if let Some(hit) = map.lookup(addr, module_base) {
+                return Some(hit);
+            }
+        }
+
+        None
+    }
 }
 
 impl LoadedSymbolMap {

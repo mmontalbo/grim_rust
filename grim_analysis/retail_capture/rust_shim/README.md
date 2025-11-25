@@ -67,11 +67,17 @@ without modifying the game's assets.
 - Restrict lookups to a specific module path substring (e.g. `GrimFandango`) by
   setting `GRIM_SHIM_SYMBOL_MAP_MODULE=GrimFandango`; otherwise the map is used
   for any closure.
+- Additional maps can be provided with
+  `GRIM_SHIM_SYMBOL_MAP_LUALIB=/path/to/libLua.map` (and optional
+  `GRIM_SHIM_SYMBOL_MAP_LUALIB_MODULE`, defaulting to `libLua.so`). The shim
+  selects the map whose module filter matches `dladdr`'s module path; if none
+  match, unfiltered maps are used as a fallback.
 - To produce a map, build an unstripped 32-bit binary from the retail checkout,
   making sure it matches the retail architecture/flags. For libLua or other
   shared objects, run `nm -an` or `readelf -Ws` on the unstripped `.so` and
-  point `GRIM_SHIM_SYMBOL_MAP` at that file. Keep the map in sync with the
-  binary you run against; different builds will have different offsets.
+  point `GRIM_SHIM_SYMBOL_MAP` (or the libLua-specific env var) at that file.
+  Keep the map in sync with the binary you run against; different builds will
+  have different offsets.
 
 ## Building
 

@@ -27,7 +27,10 @@ use std::os::unix::fs as unix_fs;
 use std::os::unix::fs::PermissionsExt;
 
 mod retail;
-use retail::{extend_env_var, warn_if_shaders_missing, HookMode, RetailLayout, SymbolMapStatus};
+use retail::{
+    extend_env_var, symbol_map_status_for, warn_if_shaders_missing, HookMode, RetailLayout,
+    SymbolMapStatus,
+};
 
 const RETAIL_STEAM_APP_ID: &str = "345350";
 const RETAIL_LUA_PATH: &str = "./?.lua;./?.LUA;./mods/?.lua";
@@ -897,7 +900,7 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
     };
     if matches!(mode, HookMode::Instrumented) {
         ensure_rust_shim_ready(paths, &layout)?;
-        ensure_symbol_map_ready(paths, &layout)?;
+        ensure_symbol_maps_ready(paths, &layout)?;
         let status = layout.instrumentation_status()?;
         if !status.shim_available {
             eprintln!(
@@ -909,6 +912,12 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
             eprintln!(
                 "[grctl] warning: retail symbol map missing or stale at {}; labels may show raw addresses",
                 layout.symbol_map_path().display(),
+            );
+        }
+        if status.liblua_symbol_map != SymbolMapStatus::Fresh {
+            eprintln!(
+                "[grctl] warning: libLua symbol map missing or stale at {}; Lua closures may show raw addresses",
+                layout.liblua_symbol_map_path().display(),
             );
         }
     }
@@ -972,38 +981,70 @@ fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
     }
 }
 
-fn ensure_symbol_map_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
-    match layout.symbol_map_status()? {
+fn ensure_symbol_maps_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
+    ensure_symbol_map_for_binary(
+        paths,
+        layout,
+        "retail",
+        layout.retail_bin(),
+        layout.symbol_map_path(),
+    )?;
+    ensure_symbol_map_for_binary(
+        paths,
+        layout,
+        "libLua",
+        layout.liblua_bin(),
+        layout.liblua_symbol_map_path(),
+    )?;
+    Ok(())
+}
+
+fn ensure_symbol_map_for_binary(
+    paths: &Paths,
+    layout: &RetailLayout,
+    label: &str,
+    binary: &Path,
+    map_path: &Path,
+) -> Result<()> {
+    match symbol_map_status_for(map_path, binary)? {
         SymbolMapStatus::Fresh => return Ok(()),
         SymbolMapStatus::Stale | SymbolMapStatus::Missing => {}
     }
 
-    println!("[grctl] rebuilding retail symbol map...");
+    println!("[grctl] rebuilding {label} symbol map...");
     let dev_install = layout.dev_install().to_string_lossy().into_owned();
-    let map_path = layout.symbol_map_path().to_string_lossy().into_owned();
+    let binary_name = binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("unable to determine filename for {}", binary.display()))?;
+    let map_dest = map_path.to_string_lossy().into_owned();
     let command = format!(
-        "cd {} && nm -n --demangle GrimFandango | awk '$2 ~ /^[tT]$/ {{print $1, $3}}' > {}",
+        "cd {} && nm -n --demangle {} | awk '$2 ~ /^[tT]$/ {{print $1, $3}}' > {}",
         shell_quote(&dev_install),
-        shell_quote(&map_path)
+        shell_quote(binary_name),
+        shell_quote(&map_dest)
     );
     let status = Command::new("nix-shell")
         .current_dir(&paths.repo_root)
         .args(["--run", &command])
         .status()
-        .context("building retail symbol map with nm")?;
+        .with_context(|| format!("building {label} symbol map with nm"))?;
     if !status.success() {
-        bail!("retail symbol map generation failed with status {}", status);
+        bail!(
+            "{label} symbol map generation failed with status {}",
+            status
+        );
     }
 
-    match layout.symbol_map_status()? {
+    match symbol_map_status_for(map_path, binary)? {
         SymbolMapStatus::Fresh => Ok(()),
         SymbolMapStatus::Stale => bail!(
-            "retail symbol map at {} is stale after regeneration",
-            layout.symbol_map_path().display()
+            "{label} symbol map at {} is stale after regeneration",
+            map_path.display()
         ),
         SymbolMapStatus::Missing => bail!(
-            "retail symbol map missing after regeneration attempt at {}",
-            layout.symbol_map_path().display()
+            "{label} symbol map missing after regeneration attempt at {}",
+            map_path.display()
         ),
     }
 }
@@ -1052,13 +1093,26 @@ fn print_retail_instrumentation(paths: &Paths) -> Result<()> {
 }
 
 fn describe_instrumentation(status: &retail::InstrumentationStatus) -> String {
-    match (status.shim_available, status.symbol_map) {
-        (false, _) => "vanilla (shim missing; build grim_telemetry_shim)".to_string(),
-        (true, SymbolMapStatus::Fresh) => "instrumented (shim + symbol map ready)".to_string(),
-        (true, SymbolMapStatus::Stale) => "instrumented (shim ready, symbol map stale)".to_string(),
-        (true, SymbolMapStatus::Missing) => {
-            "instrumented (shim ready, symbol map missing)".to_string()
-        }
+    if !status.shim_available {
+        return "vanilla (shim missing; build grim_telemetry_shim)".to_string();
+    }
+    if status.symbol_map == SymbolMapStatus::Fresh
+        && status.liblua_symbol_map == SymbolMapStatus::Fresh
+    {
+        return "instrumented (shim + symbol maps ready)".to_string();
+    }
+    format!(
+        "instrumented (shim ready, symbol maps: retail={}, libLua={})",
+        describe_map_status(status.symbol_map),
+        describe_map_status(status.liblua_symbol_map),
+    )
+}
+
+fn describe_map_status(status: SymbolMapStatus) -> &'static str {
+    match status {
+        SymbolMapStatus::Fresh => "fresh",
+        SymbolMapStatus::Stale => "stale",
+        SymbolMapStatus::Missing => "missing",
     }
 }
 
@@ -1161,6 +1215,25 @@ fn assemble_retail_env(
             envs.push((
                 "GRIM_SHIM_SYMBOL_MAP_MODULE".to_string(),
                 "GrimFandango".to_string(),
+            ));
+        }
+        if let SymbolMapStatus::Fresh = layout.liblua_symbol_map_status()? {
+            envs.push((
+                "GRIM_SHIM_SYMBOL_MAP_LUALIB".to_string(),
+                layout
+                    .liblua_symbol_map_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+            let module_name = layout
+                .liblua_bin()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("libLua.so")
+                .to_string();
+            envs.push((
+                "GRIM_SHIM_SYMBOL_MAP_LUALIB_MODULE".to_string(),
+                module_name,
             ));
         }
     }
