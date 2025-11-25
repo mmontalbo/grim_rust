@@ -3,14 +3,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::format_duration;
@@ -18,7 +14,6 @@ use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 #[cfg(unix)]
@@ -53,21 +48,12 @@ enum CommandKind {
     /// Manage grim_engine instances.
     #[command(subcommand)]
     Engine(EngineCommand),
-    /// Manage grim_viewer instances.
-    #[command(subcommand, hide = true)]
-    Viewer(ViewerCommand),
     /// Manage the retail Grim Fandango binary.
     #[command(subcommand)]
     Retail(RetailCommand),
-    /// Run or manage scenario harness sessions.
-    #[command(subcommand, hide = true)]
-    Scenario(ScenarioCommand),
-    /// Watch live parity signals between engine and retail.
-    #[command(subcommand, hide = true)]
-    Watch(WatchCommand),
-    /// Run engine/retail together for quick boot comparisons.
+    /// Parity-focused helpers for engine vs retail.
     #[command(subcommand)]
-    Compare(CompareCommand),
+    Parity(ParityCommand),
     /// Show component status for the entire stack.
     Status,
 }
@@ -107,36 +93,6 @@ struct EngineStart {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-enum ViewerCommand {
-    Start(ViewerStart),
-    Stop,
-    Status,
-    Logs(LogArgs),
-}
-
-#[derive(Args, Debug, Clone)]
-struct ViewerStart {
-    /// Run grim_viewer with cargo --release.
-    #[arg(long)]
-    release: bool,
-    /// Address grim_viewer connects to for engine state updates.
-    #[arg(long)]
-    engine_stream: Option<String>,
-    /// Start grim_viewer without expecting a retail capture feed.
-    #[arg(long)]
-    no_retail: bool,
-    /// Initial window width.
-    #[arg(long, default_value_t = 1280)]
-    window_width: u32,
-    /// Initial window height.
-    #[arg(long, default_value_t = 720)]
-    window_height: u32,
-    /// Additional arguments forwarded to grim_viewer after '--'.
-    #[arg(last = true)]
-    extra_args: Vec<String>,
-}
-
-#[derive(Subcommand, Debug)]
 enum RetailCommand {
     Start(RetailStart),
     Stop,
@@ -169,7 +125,7 @@ struct RetailStart {
     extra_args: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct RetailCopy {
     /// Source directory to copy from (defaults to $GRIM_STEAM_INSTALL or ~/.steam/...).
     #[arg(long)]
@@ -179,67 +135,33 @@ struct RetailCopy {
     force: bool,
 }
 
-#[derive(Subcommand, Debug, Clone)]
-enum ScenarioCommand {
-    /// Run a managed scenario harness.
-    Run(ScenarioArgs),
-    /// Stop any scenario-managed components still running under grctl.
-    Stop,
-}
-
 #[derive(Args, Debug, Clone)]
-struct ScenarioArgs {
-    /// Scenario to execute.
-    #[arg(value_enum)]
-    scenario: ScenarioKind,
-    /// Maximum runtime in seconds before grctl aborts the scenario (0 disables).
-    #[arg(long)]
-    timeout: Option<u64>,
-    /// Extra hold time in seconds after the scenario markers appear.
-    #[arg(long, default_value_t = 0.0)]
-    hold_seconds: f64,
-    /// Launch the scenario components and exit immediately without waiting for completion.
-    #[arg(long)]
-    detach: bool,
-    /// Optional directory for scenario artifacts (forwarded to grim_scenarios).
-    #[arg(long)]
-    artifacts_dir: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-#[clap(rename_all = "kebab_case")]
-enum ScenarioKind {
-    #[clap(name = "intro-to-office-computer")]
-    IntroToOfficeComputer,
-    #[clap(name = "intro-to-office-tube")]
-    IntroToOfficeTube,
-}
-
-impl ScenarioKind {
-    fn as_cli(self) -> &'static str {
-        match self {
-            ScenarioKind::IntroToOfficeComputer => "intro-to-office-computer",
-            ScenarioKind::IntroToOfficeTube => "intro-to-office-tube",
-        }
-    }
+struct LogArgs {
+    /// Number of lines to display from the end of the log (0 prints the entire file).
+    #[arg(long, default_value_t = 80)]
+    tail: usize,
+    /// Continuously stream log updates after the initial tail.
+    #[arg(long, short = 'f')]
+    follow: bool,
+    /// Select which run_id segment to display (defaults to latest run).
+    #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
+    run: RunSelection,
 }
 
 #[derive(Subcommand, Debug)]
-enum WatchCommand {
-    /// Watch intro.timeline parity between grim_engine logs and retail telemetry.
-    IntroTimeline(WatchIntroArgs),
-}
-
-#[derive(Subcommand, Debug)]
-enum CompareCommand {
-    /// Launch grim_engine and retail with a shared run_id for boot comparisons.
-    Boot(CompareBootArgs),
-    /// Print log/telemetry paths for a given run_id to make diffing easy.
-    Paths(ComparePathsArgs),
+enum ParityCommand {
+    /// Launch grim_engine and retail with a shared run_id for parity checks.
+    Start(ParityStartArgs),
+    /// Tail engine/retail logs aligned by seq for a given run_id.
+    Tail(ParityTailArgs),
+    /// Stop both engine and retail sessions launched by grctl.
+    Stop(ParityStopArgs),
+    /// Show engine/retail status together.
+    Status,
 }
 
 #[derive(Args, Debug)]
-struct CompareBootArgs {
+struct ParityStartArgs {
     /// Optional run identifier shared across engine + retail (defaults to a new UUID).
     #[arg(long, value_parser = parse_run_id)]
     run_id: Option<String>,
@@ -258,48 +180,26 @@ struct CompareBootArgs {
 }
 
 #[derive(Args, Debug)]
-struct ComparePathsArgs {
-    /// Run selection to surface (defaults to latest).
-    #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
-    run: RunSelection,
-    /// Print a short tail preview from both logs.
+struct ParityStopArgs {
+    /// Force kill if graceful stop times out.
     #[arg(long)]
-    preview: bool,
+    force: bool,
 }
 
 #[derive(Args, Debug)]
-struct WatchIntroArgs {
-    /// Path to the grim_engine log to watch.
-    #[arg(long, default_value = "target/grctl/logs/grim_engine.log")]
-    engine_log: PathBuf,
-    /// Path to the retail telemetry JSONL file.
-    #[arg(long, default_value = "dev-install/mods/telemetry_events.jsonl")]
-    retail_events: PathBuf,
-    /// Poll interval (ms) for reading new lines.
-    #[arg(long, default_value_t = 500)]
-    poll_interval_ms: u64,
-    /// Skip existing content and start watching from the end of each file.
-    #[arg(long)]
-    from_end: bool,
-    /// Launch grim_engine and the retail capture before watching.
-    #[arg(long)]
-    launch: bool,
-    /// Run grim_engine/grim_viewer with --release when launching the session.
-    #[arg(long, requires = "launch")]
-    engine_release: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-struct LogArgs {
-    /// Number of lines to display from the end of the log (0 prints the entire file).
-    #[arg(long, default_value_t = 80)]
-    tail: usize,
-    /// Continuously stream log updates after the initial tail.
-    #[arg(long, short = 'f')]
-    follow: bool,
-    /// Select which run_id segment to display (defaults to latest run).
+struct ParityTailArgs {
+    /// Run selection to stream (defaults to latest).
     #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
     run: RunSelection,
+    /// Number of recent seqs to print before following (0 to skip).
+    #[arg(long, default_value_t = 30)]
+    backfill: usize,
+    /// Start streaming from the beginning of each log (ignores --backfill).
+    #[arg(long)]
+    from_start: bool,
+    /// Poll interval in milliseconds when watching for new lines.
+    #[arg(long, default_value_t = 300)]
+    poll_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -333,8 +233,8 @@ fn validate_run_id(value: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn compare_paths(args: ComparePathsArgs, paths: &Paths) -> Result<()> {
-    let run_id = resolve_compare_run_id(paths, &args.run)?;
+fn parity_tail(args: ParityTailArgs, paths: &Paths) -> Result<()> {
+    let run_id = resolve_parity_run_id(paths, &args.run)?;
     let engine_log = paths.run_log_path(ComponentKind::Engine, &run_id)?;
     let retail_log = paths.run_log_path(ComponentKind::Retail, &run_id)?;
     if !engine_log.exists() {
@@ -351,51 +251,105 @@ fn compare_paths(args: ComparePathsArgs, paths: &Paths) -> Result<()> {
             retail_log.display()
         );
     }
-    println!("[grctl] compare paths for run {run_id}");
-    println!("  engine log:    {}", engine_log.display());
-    println!("  retail log:    {}", retail_log.display());
-    println!(
-        "  telemetry:     {}",
-        paths.retail_telemetry_path().display()
-    );
+
+    println!("[grctl] parity tail for run {run_id}");
+    println!("  engine log: {}", engine_log.display());
+    println!("  retail log: {}", retail_log.display());
+    println!("  poll: {}ms", args.poll_ms);
+    if args.from_start {
+        println!("  starting from beginning of both logs");
+    } else if args.backfill > 0 {
+        println!("  backfill last {} seqs before following", args.backfill);
+    } else {
+        println!("  starting from end (no backfill)");
+    }
     println!();
-    println!("Follow both:");
-    println!("  grctl engine logs --run {run_id} -f");
-    println!("  grctl retail logs --run {run_id} -f");
-    println!();
-    println!("Quick diff:");
-    println!(
-        "  diff -u {} {} | less -R",
-        engine_log.display(),
-        retail_log.display()
-    );
-    if args.preview {
-        const PREVIEW_TAIL: usize = 20;
-        const RETAIL_SLACK: u64 = 50;
-        let last_engine_seq = last_seq_in_file(&engine_log)?;
-        let retail_cutoff = last_engine_seq.map(|seq| seq.saturating_add(RETAIL_SLACK));
-        println!();
-        println!("Preview (last {} lines):", PREVIEW_TAIL);
-        println!("  [engine]");
-        for line in tail_file(&engine_log, PREVIEW_TAIL)? {
-            println!("    {line}");
-        }
-        println!("  [retail]");
-        let (retail_lines, truncated) =
-            filtered_tail_by_seq(&retail_log, retail_cutoff, PREVIEW_TAIL)?;
-        for line in retail_lines {
-            println!("    {line}");
-        }
-        if let Some(cutoff) = retail_cutoff {
-            if truncated {
-                println!("    ... (retail lines with seq>{cutoff} omitted to align with engine)");
-            }
+
+    let mut printed: HashMap<u64, (Option<String>, Option<String>)> = HashMap::new();
+    if !args.from_start && args.backfill > 0 {
+        let pairs = backfill_pairs(&engine_log, &retail_log, args.backfill)?;
+        for (seq, engine_line, retail_line) in pairs {
+            print_aligned_row(seq, engine_line.as_deref(), retail_line.as_deref());
+            printed.insert(seq, (engine_line, retail_line));
         }
     }
-    Ok(())
+
+    let mut engine_pos = if args.from_start {
+        0
+    } else {
+        fs::metadata(&engine_log).map(|m| m.len()).unwrap_or(0)
+    };
+    let mut retail_pos = if args.from_start {
+        0
+    } else {
+        fs::metadata(&retail_log).map(|m| m.len()).unwrap_or(0)
+    };
+
+    let poll = Duration::from_millis(args.poll_ms);
+    loop {
+        let engine_lines = match read_new_lines(&engine_log, &mut engine_pos) {
+            Ok(lines) => lines,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                println!(
+                    "[grctl] waiting for engine log to appear at {}; retrying...",
+                    engine_log.display()
+                );
+                thread::sleep(poll);
+                continue;
+            }
+            Err(err) => return Err(err).context(format!("reading {}", engine_log.display())),
+        };
+        let retail_lines = match read_new_lines(&retail_log, &mut retail_pos) {
+            Ok(lines) => lines,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                println!(
+                    "[grctl] waiting for retail log to appear at {}; retrying...",
+                    retail_log.display()
+                );
+                thread::sleep(poll);
+                continue;
+            }
+            Err(err) => return Err(err).context(format!("reading {}", retail_log.display())),
+        };
+
+        let mut new_seqs: Vec<u64> = Vec::new();
+        for line in engine_lines {
+            if let Some(seq) = parse_seq_from_line(&line) {
+                let entry = printed.entry(seq).or_insert((None, None));
+                if entry.0.is_none() {
+                    entry.0 = Some(line.clone());
+                }
+                if !new_seqs.contains(&seq) {
+                    new_seqs.push(seq);
+                }
+            }
+        }
+        for line in retail_lines {
+            if let Some(seq) = parse_seq_from_line(&line) {
+                let entry = printed.entry(seq).or_insert((None, None));
+                if entry.1.is_none() {
+                    entry.1 = Some(line.clone());
+                }
+                if !new_seqs.contains(&seq) {
+                    new_seqs.push(seq);
+                }
+            }
+        }
+
+        if !new_seqs.is_empty() {
+            new_seqs.sort_unstable();
+            for seq in new_seqs {
+                if let Some((engine_line, retail_line)) = printed.get(&seq) {
+                    print_aligned_row(seq, engine_line.as_deref(), retail_line.as_deref());
+                }
+            }
+        }
+
+        thread::sleep(poll);
+    }
 }
 
-fn resolve_compare_run_id(paths: &Paths, selection: &RunSelection) -> Result<String> {
+fn resolve_parity_run_id(paths: &Paths, selection: &RunSelection) -> Result<String> {
     match selection {
         RunSelection::Id(run_id) => Ok(run_id.clone()),
         RunSelection::Latest => {
@@ -430,53 +384,90 @@ fn parse_seq_from_line(line: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-fn last_seq_in_file(path: &Path) -> Result<Option<u64>> {
+fn tail_lines_by_seq(path: &Path, limit: usize) -> Result<Vec<(u64, String)>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
-    let mut last = None;
+    let mut buffer: VecDeque<(u64, String)> = VecDeque::with_capacity(limit.max(1));
     for line in reader.lines() {
         let line = line?;
-        if let Some(seq) = parse_seq_from_line(&line) {
-            last = Some(seq);
-        }
-    }
-    Ok(last)
-}
-
-fn filtered_tail_by_seq(
-    path: &Path,
-    cutoff: Option<u64>,
-    tail: usize,
-) -> Result<(Vec<String>, bool)> {
-    if cutoff.is_none() {
-        return tail_file(path, tail).map(|lines| (lines, false));
-    }
-    let cutoff = cutoff.unwrap();
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut buffer: VecDeque<String> = VecDeque::with_capacity(tail);
-    let mut truncated = false;
-    for line in reader.lines() {
-        let line = line?;
-        if let Some(seq) = parse_seq_from_line(&line) {
-            if seq > cutoff {
-                truncated = true;
-                continue;
-            }
-        }
-        if buffer.len() == tail {
+        let Some(seq) = parse_seq_from_line(&line) else {
+            continue;
+        };
+        if buffer.len() == limit {
             buffer.pop_front();
         }
-        buffer.push_back(line);
+        buffer.push_back((seq, line));
     }
-    Ok((buffer.into_iter().collect(), truncated))
+    Ok(buffer.into_iter().collect())
+}
+
+fn backfill_pairs(
+    engine_log: &Path,
+    retail_log: &Path,
+    limit: usize,
+) -> Result<Vec<(u64, Option<String>, Option<String>)>> {
+    let engine_events = tail_lines_by_seq(engine_log, limit)?;
+    let retail_events = tail_lines_by_seq(retail_log, limit)?;
+    let mut engine_map = HashMap::new();
+    let mut retail_map = HashMap::new();
+    for (seq, line) in engine_events {
+        engine_map.insert(seq, line);
+    }
+    for (seq, line) in retail_events {
+        retail_map.insert(seq, line);
+    }
+    let mut seqs: Vec<u64> = engine_map
+        .keys()
+        .copied()
+        .chain(retail_map.keys().copied())
+        .collect();
+    seqs.sort_unstable();
+    seqs.dedup();
+    if seqs.len() > limit {
+        let keep_from = seqs.len().saturating_sub(limit);
+        seqs.drain(0..keep_from);
+    }
+    let mut rows = Vec::new();
+    for seq in seqs {
+        rows.push((seq, engine_map.remove(&seq), retail_map.remove(&seq)));
+    }
+    Ok(rows)
+}
+
+fn print_aligned_row(seq: u64, engine: Option<&str>, retail: Option<&str>) {
+    let engine_text = engine.unwrap_or("(missing in engine)");
+    let retail_text = retail.unwrap_or("(missing in retail)");
+    println!("seq={seq:06}");
+    println!("  engine: {engine_text}");
+    println!("  retail: {retail_text}");
+}
+
+fn read_new_lines(path: &Path, position: &mut u64) -> io::Result<Vec<String>> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let len = reader.get_ref().metadata()?.len();
+    if len < *position {
+        *position = 0;
+    }
+    reader.seek(SeekFrom::Start(*position))?;
+    let mut lines = Vec::new();
+    let mut new_pos = *position;
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        new_pos += bytes as u64;
+        lines.push(line.trim_end_matches(&['\n', '\r'][..]).to_string());
+    }
+    *position = new_pos;
+    Ok(lines)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
 enum ComponentKind {
     Engine,
-    Viewer,
     Retail,
 }
 
@@ -484,7 +475,6 @@ impl ComponentKind {
     fn as_str(self) -> &'static str {
         match self {
             ComponentKind::Engine => "grim_engine",
-            ComponentKind::Viewer => "grim_viewer",
             ComponentKind::Retail => "retail_game",
         }
     }
@@ -492,7 +482,6 @@ impl ComponentKind {
     fn display(self) -> &'static str {
         match self {
             ComponentKind::Engine => "grim_engine",
-            ComponentKind::Viewer => "grim_viewer",
             ComponentKind::Retail => "retail game",
         }
     }
@@ -638,17 +627,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         CommandKind::Engine(cmd) => handle_engine(cmd, &paths),
-        CommandKind::Viewer(cmd) => handle_viewer(cmd, &paths),
         CommandKind::Retail(cmd) => handle_retail(cmd, &paths),
-        CommandKind::Scenario(cmd) => handle_scenario(cmd, &paths),
-        CommandKind::Watch(cmd) => handle_watch(cmd, &paths),
-        CommandKind::Compare(cmd) => handle_compare(cmd, &paths),
+        CommandKind::Parity(cmd) => handle_parity(cmd, &paths),
         CommandKind::Status => {
-            for component in [
-                ComponentKind::Engine,
-                ComponentKind::Viewer,
-                ComponentKind::Retail,
-            ] {
+            for component in [ComponentKind::Engine, ComponentKind::Retail] {
                 print_component_status(&paths, component)?;
             }
             Ok(())
@@ -668,18 +650,6 @@ fn handle_engine(cmd: EngineCommand, paths: &Paths) -> Result<()> {
     }
 }
 
-fn handle_viewer(cmd: ViewerCommand, paths: &Paths) -> Result<()> {
-    match cmd {
-        ViewerCommand::Start(args) => start_viewer(args, paths),
-        ViewerCommand::Stop => stop_component(ComponentKind::Viewer, paths, false),
-        ViewerCommand::Status => {
-            print_component_status(paths, ComponentKind::Viewer)?;
-            Ok(())
-        }
-        ViewerCommand::Logs(args) => show_logs(paths, ComponentKind::Viewer, &args),
-    }
-}
-
 fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
     match cmd {
         RetailCommand::Start(args) => start_retail(args, paths).map(|_| ()),
@@ -694,27 +664,20 @@ fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
     }
 }
 
-fn handle_scenario(cmd: ScenarioCommand, paths: &Paths) -> Result<()> {
+fn handle_parity(cmd: ParityCommand, paths: &Paths) -> Result<()> {
     match cmd {
-        ScenarioCommand::Run(args) => run_scenario(paths, args),
-        ScenarioCommand::Stop => stop_scenario(paths),
+        ParityCommand::Start(args) => parity_start(args, paths),
+        ParityCommand::Tail(args) => parity_tail(args, paths),
+        ParityCommand::Stop(args) => parity_stop(args, paths),
+        ParityCommand::Status => {
+            print_component_status(paths, ComponentKind::Engine)?;
+            print_component_status(paths, ComponentKind::Retail)?;
+            Ok(())
+        }
     }
 }
 
-fn handle_watch(cmd: WatchCommand, paths: &Paths) -> Result<()> {
-    match cmd {
-        WatchCommand::IntroTimeline(args) => watch_intro_timeline(args, paths),
-    }
-}
-
-fn handle_compare(cmd: CompareCommand, paths: &Paths) -> Result<()> {
-    match cmd {
-        CompareCommand::Boot(args) => compare_boot(args, paths),
-        CompareCommand::Paths(args) => compare_paths(args, paths),
-    }
-}
-
-fn compare_boot(args: CompareBootArgs, paths: &Paths) -> Result<()> {
+fn parity_start(args: ParityStartArgs, paths: &Paths) -> Result<()> {
     let run_id = args
         .run_id
         .clone()
@@ -753,7 +716,7 @@ fn compare_boot(args: CompareBootArgs, paths: &Paths) -> Result<()> {
         }
     };
 
-    println!("[grctl] compare boot run {}", engine_launch.run_id);
+    println!("[grctl] parity run {}", engine_launch.run_id);
     println!("  engine log:   {}", engine_launch.log_path.display());
     println!("  retail log:   {}", retail_launch.log_path.display());
     println!(
@@ -766,6 +729,25 @@ fn compare_boot(args: CompareBootArgs, paths: &Paths) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn parity_stop(args: ParityStopArgs, paths: &Paths) -> Result<()> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for component in [ComponentKind::Engine, ComponentKind::Retail] {
+        let force = args.force || matches!(component, ComponentKind::Retail);
+        if let Err(err) = stop_component(component, paths, force) {
+            eprintln!(
+                "[grctl] warning: failed to stop {}: {err:?}",
+                component.display()
+            );
+            last_err = Some(err);
+        }
+    }
+    if let Some(err) = last_err {
+        Err(err)
+    } else {
+        Ok(())
+    }
 }
 
 fn start_engine(args: EngineStart, paths: &Paths) -> Result<LaunchInfo> {
@@ -829,58 +811,6 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<LaunchInfo> {
     }
 
     Ok(LaunchInfo { run_id, log_path })
-}
-
-fn start_viewer(args: ViewerStart, paths: &Paths) -> Result<()> {
-    ensure_component_available(ComponentKind::Viewer, paths)?;
-
-    let session_id = Uuid::new_v4().to_string();
-    let run_id = session_id.clone();
-    let log_path = paths.run_log_path(ComponentKind::Viewer, &run_id)?;
-
-    let mut command_line = vec!["cargo".to_string(), "run".to_string()];
-    let mut command = Command::new("cargo");
-    command.arg("run");
-    if args.release {
-        command.arg("--release");
-        command_line.push("--release".to_string());
-    }
-    command.args(["-p", "grim_viewer", "--"]);
-    command_line.push("-p".to_string());
-    command_line.push("grim_viewer".to_string());
-    command_line.push("--".to_string());
-    if let Some(stream) = &args.engine_stream {
-        command.arg("--engine-stream");
-        command.arg(stream);
-        command_line.push("--engine-stream".to_string());
-        command_line.push(stream.clone());
-    }
-    command.arg("--window-width");
-    command.arg(args.window_width.to_string());
-    command_line.push("--window-width".to_string());
-    command_line.push(args.window_width.to_string());
-    command.arg("--window-height");
-    command.arg(args.window_height.to_string());
-    command_line.push("--window-height".to_string());
-    command_line.push(args.window_height.to_string());
-    if args.no_retail {
-        command.arg("--no-retail");
-        command_line.push("--no-retail".to_string());
-    }
-    for extra in &args.extra_args {
-        command.arg(extra);
-        command_line.push(extra.clone());
-    }
-
-    launch_component(
-        ComponentKind::Viewer,
-        paths,
-        session_id,
-        run_id,
-        log_path,
-        command,
-        command_line,
-    )
 }
 
 fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
@@ -1873,530 +1803,5 @@ impl LaunchGuard {
             }
         }
         self.components.clear();
-    }
-}
-
-fn watch_intro_timeline(args: WatchIntroArgs, paths: &Paths) -> Result<()> {
-    let WatchIntroArgs {
-        engine_log,
-        retail_events,
-        poll_interval_ms,
-        from_end,
-        launch,
-        engine_release,
-    } = args;
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    install_watch_shutdown_handler(shutdown.clone())?;
-
-    let poll_interval = Duration::from_millis(poll_interval_ms);
-    let mut guard = LaunchGuard::default();
-    let headless_engine = true;
-
-    let (engine_path, retail_path) = if launch {
-        ensure_component_available(ComponentKind::Engine, paths)?;
-        ensure_component_available(ComponentKind::Retail, paths)?;
-        let run_id = Uuid::new_v4().to_string();
-        let engine_log = paths.run_log_path(ComponentKind::Engine, &run_id)?;
-        let retail_events = paths.retail_telemetry_path();
-        prepare_intro_watch_sources(&engine_log, &retail_events)?;
-        start_intro_watch_components(paths, &mut guard, headless_engine, engine_release, &run_id)?;
-        (engine_log, retail_events)
-    } else {
-        (
-            resolve_repo_path(paths, &engine_log),
-            resolve_repo_path(paths, &retail_events),
-        )
-    };
-
-    println!("[grctl] watching intro.timeline parity");
-    println!("  engine log: {}", engine_path.display());
-    println!("  retail telemetry: {}", retail_path.display());
-    println!("  poll interval: {}ms", poll_interval_ms);
-    if from_end {
-        println!("  starting from end of both files");
-    }
-    if launch {
-        println!("  launched: grim_engine (headless, --verbose) and retail capture");
-        println!("[grctl] press Ctrl-C to stop the watch and shut down launched components");
-    }
-
-    let status_paths = if launch { Some(paths) } else { None };
-    let result = run_intro_timeline_loop(
-        &engine_path,
-        &retail_path,
-        from_end,
-        poll_interval,
-        &shutdown,
-        status_paths,
-    );
-
-    if launch {
-        println!("[grctl] stopping launched components...");
-        guard.stop_all(paths);
-    }
-
-    result
-}
-
-fn install_watch_shutdown_handler(flag: Arc<AtomicBool>) -> Result<()> {
-    ctrlc::set_handler(move || {
-        flag.store(true, Ordering::SeqCst);
-    })
-    .context("installing Ctrl-C handler for intro timeline watch")
-}
-
-fn start_intro_watch_components(
-    paths: &Paths,
-    guard: &mut LaunchGuard,
-    headless_engine: bool,
-    engine_release: bool,
-    run_id: &str,
-) -> Result<()> {
-    let engine_args = EngineStart {
-        release: engine_release,
-        headless: headless_engine,
-        verbose: true,
-        attach: false,
-        run_id: Some(run_id.to_string()),
-        extra_args: Vec::new(),
-    };
-    let _ = start_engine(engine_args, paths)?;
-    guard.push(ComponentKind::Engine);
-
-    let retail_args = RetailStart {
-        timeout: "0".to_string(),
-        no_timeout: true,
-        vanilla: false,
-        attach: false,
-        run_id: Some(run_id.to_string()),
-        extra_args: Vec::new(),
-    };
-    let _ = start_retail(retail_args, paths)?;
-    guard.push(ComponentKind::Retail);
-
-    Ok(())
-}
-
-fn prepare_intro_watch_sources(engine_path: &Path, retail_path: &Path) -> Result<()> {
-    reset_file(engine_path)?;
-    reset_file(retail_path)?;
-    Ok(())
-}
-
-fn reset_file(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating parent directory for {}", path.display()))?;
-    }
-    if path.exists() {
-        fs::remove_file(path).with_context(|| format!("clearing {}", path.display()))?;
-    }
-    File::create(path).with_context(|| format!("initializing {}", path.display()))?;
-    Ok(())
-}
-
-fn run_intro_timeline_loop(
-    engine_path: &Path,
-    retail_path: &Path,
-    from_end: bool,
-    poll_interval: Duration,
-    shutdown: &Arc<AtomicBool>,
-    status_paths: Option<&Paths>,
-) -> Result<()> {
-    let mut engine_pos = start_position(engine_path, from_end);
-    let mut retail_pos = start_position(retail_path, from_end);
-    let mut engine_events: Vec<String> = Vec::new();
-    let mut retail_events: Vec<String> = Vec::new();
-    let mut last_snapshot = String::new();
-    let mut first_snapshot = true;
-    let mut waiting_for_engine = false;
-    let mut waiting_for_retail = false;
-    let mut reported_engine_exit = false;
-    let mut reported_retail_exit = false;
-
-    while !shutdown.load(Ordering::SeqCst) {
-        let mut changed = false;
-
-        match read_new_lines(engine_path, &mut engine_pos, from_end) {
-            Ok((lines, reset)) => {
-                if reset {
-                    engine_events.clear();
-                    changed = true;
-                    println!(
-                        "[grctl] {} truncated; restarting {}",
-                        engine_path.display(),
-                        if from_end { "at end" } else { "from start" }
-                    );
-                }
-                for line in lines {
-                    if let Some(event) = parse_intro_timeline_line(&line) {
-                        engine_events.push(event);
-                        changed = true;
-                    }
-                }
-                if waiting_for_engine {
-                    println!(
-                        "[grctl] engine log available; resuming watch at {}",
-                        engine_path.display()
-                    );
-                    waiting_for_engine = false;
-                    changed = true;
-                }
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                if !waiting_for_engine {
-                    println!(
-                        "[grctl] waiting for engine log {}; retrying...",
-                        engine_path.display()
-                    );
-                    waiting_for_engine = true;
-                }
-            }
-            Err(err) => return Err(err).context(format!("reading {}", engine_path.display())),
-        };
-
-        match read_new_lines(retail_path, &mut retail_pos, from_end) {
-            Ok((lines, reset)) => {
-                if reset {
-                    retail_events.clear();
-                    changed = true;
-                    println!(
-                        "[grctl] {} truncated; restarting {}",
-                        retail_path.display(),
-                        if from_end { "at end" } else { "from start" }
-                    );
-                }
-                for line in lines {
-                    if let Some(event) = parse_intro_timeline_line(&line) {
-                        retail_events.push(event);
-                        changed = true;
-                    }
-                }
-                if waiting_for_retail {
-                    println!(
-                        "[grctl] retail telemetry available; resuming watch at {}",
-                        retail_path.display()
-                    );
-                    waiting_for_retail = false;
-                    changed = true;
-                }
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                if !waiting_for_retail {
-                    println!(
-                        "[grctl] waiting for retail telemetry {}; retrying...",
-                        retail_path.display()
-                    );
-                    waiting_for_retail = true;
-                }
-            }
-            Err(err) => return Err(err).context(format!("reading {}", retail_path.display())),
-        };
-
-        if changed || first_snapshot {
-            let snapshot = render_intro_snapshot(&engine_events, &retail_events);
-            if snapshot != last_snapshot {
-                println!("{snapshot}");
-                last_snapshot = snapshot;
-            }
-            first_snapshot = false;
-        }
-
-        if let Some(paths) = status_paths {
-            if !reported_engine_exit {
-                if let Some(state) = load_state(ComponentKind::Engine, paths)? {
-                    if !process_alive(state.pid) {
-                        let engine_log = state.log_path.clone();
-                        println!(
-                            "[grctl] grim_engine exited (pid {}, session {}); recent log:",
-                            state.pid, state.session_id
-                        );
-                        print_log_tail(&engine_log, 20);
-                        reported_engine_exit = true;
-                    }
-                }
-            }
-            if !reported_retail_exit {
-                if let Some(state) = load_state(ComponentKind::Retail, paths)? {
-                    if !process_alive(state.pid) {
-                        let retail_log = state.log_path.clone();
-                        println!(
-                            "[grctl] retail_game exited (pid {}, session {}); recent log:",
-                            state.pid, state.session_id
-                        );
-                        print_log_tail(&retail_log, 20);
-                        reported_retail_exit = true;
-                    }
-                }
-            }
-        }
-
-        thread::sleep(poll_interval);
-    }
-
-    if let Some(paths) = status_paths {
-        if !reported_engine_exit {
-            if let Some(state) = load_state(ComponentKind::Engine, paths)? {
-                if !process_alive(state.pid) {
-                    let engine_log = state.log_path.clone();
-                    println!(
-                        "[grctl] grim_engine exited (pid {}, session {}); recent log:",
-                        state.pid, state.session_id
-                    );
-                    print_log_tail(&engine_log, 20);
-                }
-            } else {
-                let engine_log = paths.log_path(ComponentKind::Engine);
-                if engine_log.exists() {
-                    print_log_tail(&engine_log, 20);
-                }
-            }
-        }
-        if !reported_retail_exit {
-            if let Some(state) = load_state(ComponentKind::Retail, paths)? {
-                if !process_alive(state.pid) {
-                    let retail_log = state.log_path.clone();
-                    println!(
-                        "[grctl] retail_game exited (pid {}, session {}); recent log:",
-                        state.pid, state.session_id
-                    );
-                    print_log_tail(&retail_log, 20);
-                }
-            } else {
-                let retail_log = paths.log_path(ComponentKind::Retail);
-                if retail_log.exists() {
-                    print_log_tail(&retail_log, 20);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn start_position(path: &Path, from_end: bool) -> Option<u64> {
-    if from_end {
-        fs::metadata(path).map(|meta| meta.len()).ok()
-    } else {
-        Some(0)
-    }
-}
-
-fn read_new_lines(
-    path: &Path,
-    position: &mut Option<u64>,
-    from_end_on_reset: bool,
-) -> io::Result<(Vec<String>, bool)> {
-    let mut reader = BufReader::new(File::open(path)?);
-    let len = reader.get_ref().metadata()?.len();
-    let mut reset = false;
-    let mut pos = position.unwrap_or_else(|| if from_end_on_reset { len } else { 0 });
-    if len < pos {
-        pos = if from_end_on_reset { len } else { 0 };
-        reset = true;
-    }
-    reader.seek(SeekFrom::Start(pos))?;
-    let mut lines: Vec<String> = Vec::new();
-    let mut new_pos = pos;
-    loop {
-        let mut line = String::new();
-        let bytes = reader.read_line(&mut line)?;
-        if bytes == 0 {
-            break;
-        }
-        new_pos += bytes as u64;
-        let trimmed = line.trim_end_matches(&['\n', '\r'][..]).to_string();
-        lines.push(trimmed);
-    }
-    *position = Some(new_pos);
-    Ok((lines, reset))
-}
-
-fn print_log_tail(path: &Path, lines: usize) {
-    if let Ok(file) = File::open(path) {
-        let reader = BufReader::new(file);
-        let mut buffer: Vec<String> = Vec::with_capacity(lines);
-        for line in reader.lines().flatten() {
-            if buffer.len() == lines {
-                buffer.remove(0);
-            }
-            buffer.push(line);
-        }
-        for line in buffer {
-            println!("  {line}");
-        }
-    } else {
-        println!("  (log {} not readable)", path.display());
-    }
-}
-
-fn parse_intro_timeline_line(line: &str) -> Option<String> {
-    let start = line.find('{')?;
-    let value: Value = serde_json::from_str(&line[start..]).ok()?;
-    if value.get("label").and_then(|label| label.as_str()) != Some("intro.timeline") {
-        return None;
-    }
-    value
-        .get("data")
-        .and_then(|data| data.get("event"))
-        .and_then(|event| event.as_str())
-        .map(|event| event.to_string())
-}
-
-fn render_intro_snapshot(engine_events: &[String], retail_events: &[String]) -> String {
-    let missing_in_engine = missing_events(retail_events, engine_events);
-    let missing_in_retail = missing_events(engine_events, retail_events);
-    let order_matches = engine_events == retail_events;
-    format!(
-        "[grctl] intro.timeline: order_match={} missing_in_engine=[{}] missing_in_retail=[{}]\n  engine ({}): {}\n  retail ({}): {}",
-        order_matches,
-        missing_in_engine.join(", "),
-        missing_in_retail.join(", "),
-        engine_events.len(),
-        render_event_list(engine_events),
-        retail_events.len(),
-        render_event_list(retail_events),
-    )
-}
-
-fn render_event_list(events: &[String]) -> String {
-    if events.is_empty() {
-        "none".to_string()
-    } else {
-        events.join(", ")
-    }
-}
-
-fn missing_events(expected: &[String], actual: &[String]) -> Vec<String> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for event in actual {
-        *counts.entry(event).or_insert(0) += 1;
-    }
-    let mut missing = Vec::new();
-    for event in expected {
-        match counts.get_mut(event.as_str()) {
-            Some(count) if *count > 0 => *count -= 1,
-            _ => missing.push(event.clone()),
-        }
-    }
-    missing
-}
-
-fn resolve_repo_path(paths: &Paths, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        paths.repo_root.join(path)
-    }
-}
-
-fn stop_scenario(paths: &Paths) -> Result<()> {
-    stop_component(ComponentKind::Viewer, paths, false)?;
-    stop_component(ComponentKind::Engine, paths, false)
-}
-
-fn run_scenario(paths: &Paths, args: ScenarioArgs) -> Result<()> {
-    const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
-    let scenario_timeout = args.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
-
-    let mut command = Command::new("cargo");
-    command.arg("run");
-    command.arg("-p");
-    command.arg("grim_scenarios");
-    command.arg("--");
-    command.arg("run");
-    command.arg(args.scenario.as_cli());
-    command.arg("--timeout");
-    command.arg(scenario_timeout.to_string());
-    if args.hold_seconds > 0.0 {
-        command.arg("--hold-seconds");
-        command.arg(args.hold_seconds.to_string());
-    }
-    if args.detach {
-        command.arg("--detach");
-    }
-    if let Some(dir) = &args.artifacts_dir {
-        command.arg("--artifacts-dir");
-        command.arg(dir);
-    }
-    run_managed_command(
-        command,
-        paths,
-        scenario_timeout,
-        &format!("scenario:{}", args.scenario.as_cli()),
-        &format!("grim_scenarios {}", args.scenario.as_cli()),
-    )
-}
-
-fn run_managed_command(
-    mut command: Command,
-    paths: &Paths,
-    timeout_secs: u64,
-    session_label: &str,
-    description: &str,
-) -> Result<()> {
-    command.current_dir(&paths.repo_root);
-    let session_id = Uuid::new_v4().to_string();
-    command.env("GRCTL_MANAGED", "1");
-    command.env("GRCTL_SESSION_ID", &session_id);
-    command.env("GRCTL_COMPONENT", session_label);
-    command.env("GRCTL_STATE_DIR", &paths.state_dir);
-    if let Ok(bin_path) = std::env::current_exe() {
-        command.env("GRCTL_BIN", bin_path);
-    }
-
-    println!("[grctl] launching {description} (session {session_id})");
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawning {description}"))?;
-    let timeout = if timeout_secs == 0 {
-        None
-    } else {
-        Some(Duration::from_secs(timeout_secs))
-    };
-
-    let result = match timeout {
-        Some(limit) => wait_with_timeout(&mut child, limit),
-        None => child.wait().map(Some).map_err(Into::into),
-    }?;
-
-    match result {
-        Some(status) => {
-            if status.success() {
-                println!("[grctl] {description} completed successfully (session {session_id})");
-                Ok(())
-            } else {
-                Err(anyhow!("{description} exited with status {status}"))
-            }
-        }
-        None => {
-            println!(
-                "[grctl] timeout ({timeout_secs}s) reached for {description}; sending SIGTERM"
-            );
-            child.kill().context("terminating timed-out process")?;
-            let _ = child.wait();
-            Err(anyhow!("{description} timed out after {}s", timeout_secs))
-        }
-    }
-}
-
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    limit: Duration,
-) -> Result<Option<std::process::ExitStatus>> {
-    let mut elapsed = Duration::from_millis(0);
-    let poll = Duration::from_millis(200);
-    let start = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        if elapsed >= limit {
-            return Ok(None);
-        }
-        thread::sleep(poll);
-        elapsed = start.elapsed();
     }
 }

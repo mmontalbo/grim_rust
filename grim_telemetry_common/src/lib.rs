@@ -56,15 +56,26 @@ impl TelemetryLogger {
             .as_ref()
             .map(|value| value.as_str());
         let fields = event.finish();
-        let mut parts = Vec::with_capacity(fields.len() + 5);
+        let event_name = fields
+            .iter()
+            .find_map(|field| field.strip_prefix("event="))
+            .map(|value| value.to_string());
+        let mut parts = Vec::with_capacity(fields.len() + 6);
+        parts.push(format!("seq={seq:06}"));
+        parts.push(format!("ts={ts:08}"));
+        if let Some(event_name) = event_name {
+            parts.push(format!("event={event_name}"));
+        }
+        parts.extend(
+            fields
+                .into_iter()
+                .filter(|field| !field.starts_with("event=")),
+        );
         parts.push(format!("engine={}", self.config.engine_id));
         parts.push(format!("vm_id={}", self.config.vm_id));
-        parts.push(format!("seq={seq}"));
-        parts.push(format!("ts={ts}"));
         if let Some(run_id) = run_id {
             parts.push(format!("run_id={run_id}"));
         }
-        parts.extend(fields);
         self.log_line(&parts.join(" "));
     }
 }
@@ -139,7 +150,7 @@ impl LogSink {
             .target
             .lock()
             .expect("log sink mutex should never be poisoned");
-        let line = format!("[{prefix} ts={timestamp} pid={pid} tid={tid}] {message}\n");
+        let line = format!("[{prefix}] {message} | wall_ts={timestamp} pid={pid} tid={tid}\n");
         match &mut *guard {
             LogTarget::Stderr(stderr) => {
                 let _ = stderr.write_all(line.as_bytes());
