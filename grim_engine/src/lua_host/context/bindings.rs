@@ -222,9 +222,11 @@ pub(crate) fn install_globals(
     install_legacy_io(lua, &globals)?;
     set_global(lua, &globals, "_TRIGMODE", 1)?;
     log_set_tagmethod(-1, "pow");
+    lua.gc_collect()?;
 
     install_pi_constant(lua, &globals)?;
     install_system_table(lua, &globals, context.clone())?;
+    lua.gc_collect()?;
 
     install_basic_functions(lua, &globals, context.clone())?;
 
