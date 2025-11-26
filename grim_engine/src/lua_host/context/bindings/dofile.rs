@@ -74,10 +74,6 @@ pub(super) fn handle_special_dofile<'lua>(
         }
     }
 
-    if path.to_ascii_lowercase().contains("telemetry.lua") {
-        return Ok(Some(Value::Boolean(true)));
-    }
-
     Ok(None)
 }
 

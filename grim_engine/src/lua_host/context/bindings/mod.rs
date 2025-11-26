@@ -16,8 +16,8 @@ mod tests {
 
     use mlua::{Function, Lua, LuaOptions, Result as LuaResult, StdLib, Value, Variadic};
 
-    use crate::lua_host::context::EngineContext;
     use super::util::describe_value;
+    use crate::lua_host::context::EngineContext;
 
     use super::*;
 

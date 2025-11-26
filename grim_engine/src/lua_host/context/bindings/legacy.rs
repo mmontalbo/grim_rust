@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use mlua::{Error as LuaError, Function, Lua, RegistryKey, Result as LuaResult, Table, Value, Variadic};
+use mlua::{
+    Error as LuaError, Function, Lua, RegistryKey, Result as LuaResult, Table, Value, Variadic,
+};
 
 use crate::lua_host::telemetry::{log_set_tagmethod, log_store_ref};
 

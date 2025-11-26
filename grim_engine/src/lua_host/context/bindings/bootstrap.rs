@@ -415,15 +415,13 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
 }
 
 fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {
-    if let Ok(math_table) = globals.get::<_, Table>("math") {
-        if let Ok(pi_value) = math_table.get::<_, Value>("pi") {
-            set_global(lua, globals, "PI", pi_value)?;
-        } else {
-            set_global(lua, globals, "PI", 3.141592653589793)?;
-        }
-    } else {
-        set_global(lua, globals, "PI", 3.141592653589793)?;
-    }
+    let fallback = Value::Number(3.141592653589793);
+    let pi_value = globals
+        .get::<_, Table>("math")
+        .ok()
+        .and_then(|math| math.get::<_, Value>("pi").ok())
+        .unwrap_or(fallback);
+    set_global(lua, globals, "PI", pi_value)?;
     Ok(())
 }
 
