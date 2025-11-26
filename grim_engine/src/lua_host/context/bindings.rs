@@ -199,7 +199,6 @@ fn install_system_table(
         })?,
     )?;
     manny.set("is_holding", Value::Nil)?;
-    set_global(lua, globals, "manny", manny.clone())?;
 
     let system = lua.create_table()?;
     system.set("setTable", lua.create_table()?)?;
@@ -228,13 +227,21 @@ pub(crate) fn install_globals(
     let math_pow = lua.create_function(|_, (a, b): (f64, f64)| Ok(Value::Number(a.powf(b))))?;
     log_push_cclosure("lua_pushCclosure", math_pow.to_pointer());
     log_set_tagmethod(-1, "pow");
-    lua.gc_collect()?;
-    log_event(EventBuilder::new("collect_garbage"));
 
     install_pi_constant(lua, &globals)?;
+    // Retail triggers the first GC after PI is bound.
+    lua.gc_collect()?;
+    log_event(EventBuilder::new("collect_garbage"));
     install_system_table(lua, &globals, context.clone())?;
     lua.gc_collect()?;
     log_event(EventBuilder::new("collect_garbage"));
+    // Retail pushes default camera/control handlers before rebinding type; log stub pushes to align.
+    let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+    log_push_cclosure("lua_pushCclosure", default_cam_change.to_pointer());
+    let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+    for _ in 0..3 {
+        log_push_cclosure("lua_pushCclosure", default_control.to_pointer());
+    }
 
     install_basic_functions(lua, &globals, context.clone())?;
 
@@ -291,7 +298,22 @@ fn install_basic_functions(
     context: Rc<RefCell<EngineContext>>,
 ) -> LuaResult<()> {
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
-        set_global(lua, globals, "type", type_fn)?;
+        // Retail saves the stock type and wraps it so userdata can report richer tags.
+        let type_ptr = type_fn.to_pointer();
+        log_event(
+            EventBuilder::new("get_global")
+                .kv("name", "type")
+                .kv("handle", format!("{type_ptr:p}")),
+        );
+        let saved_type = lua.create_registry_value(type_fn)?;
+        log_store_ref(1, 1, Some("global:type".to_string()));
+        let type_key = saved_type;
+        let type_override = lua.create_function(move |lua_ctx, value: Value| {
+            let original: Function = lua_ctx.registry_value(&type_key)?;
+            let primary: Value = original.call(value)?;
+            Ok(MultiValue::from_vec(vec![primary, Value::Nil]))
+        })?;
+        set_global(lua, globals, "type", type_override)?;
     }
 
     // Sector type / mode constants used during boot before any scripts run.
@@ -639,7 +661,7 @@ fn install_fallback_globals<'lua>(
     set_global(lua, globals, "tag", tag)?;
 
     let refs: Rc<RefCell<HashMap<i32, RegistryKey>>> = Rc::new(RefCell::new(HashMap::new()));
-    let next_ref = Rc::new(RefCell::new(1i32));
+    let next_ref = Rc::new(RefCell::new(2i32));
     let refs_state = refs.clone();
     let next_state = next_ref.clone();
     let lua_ref = lua.create_function(move |lua_ctx, value: Value| -> LuaResult<i32> {

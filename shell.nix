@@ -91,6 +91,9 @@ in pkgs.mkShell {
     p7zip             # archive handling when spelunking assets
     ripgrep           # fast code/asset search
     jq                # lightweight JSON inspection for reports
+    binutils          # objdump/readelf/strings for RE digs
+    radare2           # quick disassembly/inspection
+    ghidra            # full-featured static RE suite
     git
     rsync
     rustup            # manage the Rust toolchain (incl. i686 target)
