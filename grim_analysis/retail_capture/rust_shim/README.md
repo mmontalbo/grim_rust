@@ -8,26 +8,49 @@ helper the engine installs into the Lua VM and track which scripts are loaded
 without modifying the game's assets.
 
 ## Trace schema (shared across retail + Rust engines)
+- Event names and fields live in `grim_telemetry_common::LuaEvent` (serde-tagged enum); add variants/fields there so both emitters stay in sync.
 - Every line is `engine=retail vm_id=lua32 seq=<counter> event=<name> ...` with
   key/value pairs; values containing whitespace are quoted and escaped. A
   monotonic `ts=<millis>` is included for temporal alignment.
-- Default output is compact to match the Rust engine trace: only the
-  event-specific essentials (`name`, `func`, `handle`, etc.). Set
-  `GRIM_SHIM_VERBOSE_FIELDS=1` to also emit provenance details like
-  `label`, `origin`, `module`, `symbol`, `demangled`, `symbol_source=map`,
-  and per-event extras (`push_seq`, `upvalues`, `calls`, `ref`, `lock`).
+- Output now always includes provenance details like `label`, `origin`, `module`,
+  `symbol`, `demangled`, `symbol_source=map`, and per-event extras
+  (`push_seq`, `upvalues`, `calls`, `ref`, `lock`) to match the Rust engine
+  trace.
 - The retail shim always emits `engine=retail` and `vm_id=lua32`; instrument the
   Rust engine side to emit `engine=rust` and reuse the same field names so
   traces align 1:1.
-- Verbosity toggles: `GRIM_SHIM_GETGLOBAL_VERBOSE=1` logs every `lua_getglobal`;
-  `GRIM_SHIM_CALLFUNCTION_VERBOSE=1` logs every `lua_callfunction` instead of
-  milestone counts only. `GRIM_SHIM_VERBOSE_FIELDS=1` re-enables the full
-  provenance fields described above. `GRIM_SHIM_LOG=/path` redirects output to a
-  file.
+- `lua_getglobal` and `lua_callfunction` logs are always per-call and include
+  the running count. `GRIM_SHIM_LOG=/path` redirects output to a file.
 - A quick diff helper lives at `tools/trace_diff.py`:
   `./tools/trace_diff.py retail.log rust.log [--ignore field] [--context N]`
   reports the first mismatch and prints ±N lines of context (defaults ignore
   `seq`/`ts` since they diverge across runs).
+
+## Event reference (raw Lua VM surface)
+- Common envelope on every line: `seq`, `ts`, `event=<name>`, followed by event
+  fields, then `engine=retail vm_id=lua32` (and optional `run_id` if set).
+- Origin fields appear when available: `origin`, `module`, `symbol`, `demangled`,
+  `symbol_source`, `map_source`.
+- Value fields (when a value is inspected): `value_type`, `value`, `value_len`,
+  `value_preview`, `tag`, `func`, `payload`.
+- Pushes: `push_cclosure` (name, func, push_seq, upvalues, origin), `push_number`
+  (value), `push_nil`, `push_string`/`push_lstring` (len/preview), `push_usertag`
+  (id, tag).
+- Globals: `bind_global` (name, handle, label, value fields, origin) and
+  `get_global` (name, handle, label, count milestone).
+- Calls: `call_func` (handle, label, calls milestone, origin), `call`
+  (name), `dofile`/`dostring`/`dobuffer` (path/snippet/name + size).
+- Refs: `store_ref` (lock, ref, handle/label), `fetch_ref` (ref, handle,
+  label, note when missing).
+- Tag plumbing: `set_tag`, `copy_tagmethods` (to/from/result), `set_tagmethod`
+  (tag, event_name), `setfallback` (event, handle + value fields). The shared
+  schema still includes `tag_state`, but the retail shim no longer emits it.
+- Cutscenes (retail shim only): `cutscene` (movie/movie_label/phase/playing/elapsed_ms/polls/result),
+  `cutscene_skip` (phase/movie/movie_label/elapsed_ms/polls), and `post_intro_room`
+  (source/set/setup/after_movie) are typed in the shared schema and emitted
+  only by the retail shim.
+- Other: `collect_garbage`, `lua_error` (message), `setglobal`/`rawset`/`rawget`
+  variants, userdata/table/number string inspection via value fields.
 
 ## How It Works
 - Build a `cdylib` that exports the same symbols as libLua (`lua_pushCclosure`
@@ -35,25 +58,22 @@ without modifying the game's assets.
 - Preload the shim via `LD_PRELOAD` so our exports are resolved before the
   engine's copy of libLua.
 - When the engine calls `lua_pushCclosure`, we log the function pointer being
-  wrapped and the closure name; set `GRIM_SHIM_VERBOSE_FIELDS=1` to also emit a
-  push sequence number, upvalue count, and symbol provenance. `lua_setglobal`
-  looks up the bound Lua handle and tracks the global name -> C target mapping
-  so subsequent call tracing can show provenance. `lua_getglobal` logs milestone
-  reads (set `GRIM_SHIM_GETGLOBAL_VERBOSE=1` for per-call logs) to reveal which
-  globals scripts actually touch at runtime. `lua_ref` / `lua_getref` track
-  anonymous handles stored in the registry so `lua_callfunction` can emit labels
-  even when functions never receive globals. `lua_callfunction` emits milestone
-  call counts per handle (set `GRIM_SHIM_CALLFUNCTION_VERBOSE=1` for per-call
-  logs), resolving targets via `lua_getobjname` and the mappings collected from
+  wrapped and the closure name, along with a push sequence number, upvalue
+  count, and symbol provenance. `lua_setglobal` looks up the bound Lua handle
+  and tracks the global name -> C target mapping so subsequent call tracing can
+  show provenance. `lua_getglobal` logs every read to reveal which globals
+  scripts actually touch at runtime. `lua_ref` / `lua_getref` track anonymous
+  handles stored in the registry so `lua_callfunction` can emit labels even when
+  functions never receive globals. `lua_callfunction` emits call counts per
+  handle, resolving targets via `lua_getobjname` and the mappings collected from
   globals/refs.
 - `lua_dofile`/`lua_dostring` and friends log the chunk or function being
   executed before forwarding the call to the real libLua export via
   `dlsym(RTLD_NEXT, ...)`.
 - `lua_settagmethod` logs tag-method registrations to capture VM hook setup.
 - All shim lines use a consistent `event=` schema (e.g.
-  `event=bind_global name=X handle=0x...` with optional `label`/`origin` when
-  verbose fields are enabled), keeping `handle=0x...` stable so later
-  calls/refetches match.
+  `event=bind_global name=X handle=0x...` with `label`/`origin` when available),
+  keeping `handle=0x...` stable so later calls/refetches match.
 - Logs include pid/tid/timestamps. Set `GRIM_SHIM_LOG=/path/to/file` to capture
   them to disk; otherwise they emit to stderr.
 
@@ -95,7 +115,5 @@ LD_PRELOAD=/path/to/libgrim_telemetry_shim.so ./GrimFandango.exe
 
 On startup you should see log lines that look like
 `[grim-rust-shim] engine=retail vm_id=lua32 seq=123 ts=456 event=push_cclosure name=lua_pushCclosure func=0xf7e31234`
-in compact mode, or the verbose form with symbol/module fields if
-`GRIM_SHIM_VERBOSE_FIELDS=1` is set. Each line is a direct observation of the
-engine pushing a C closure into Lua.
-Each line is a direct observation of the engine pushing a C closure into Lua.
+with symbol/module fields included when discoverable. Each line is a direct
+observation of the engine pushing a C closure into Lua.

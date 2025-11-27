@@ -1,4 +1,6 @@
-pub(crate) use grim_telemetry_common::EventBuilder;
+pub(crate) use grim_telemetry_common::{
+    EventBuilder, LuaEvent, OriginFields, ValueFields, ValueType,
+};
 use grim_telemetry_common::{TelemetryConfig, TelemetryLogger};
 
 pub(crate) const ENGINE_ID: &str = "retail";
@@ -16,6 +18,6 @@ pub(crate) fn log_line(message: &str) {
     LOGGER.log_line(message);
 }
 
-pub(crate) fn log_event(event: EventBuilder) {
+pub(crate) fn log_event(event: impl Into<EventBuilder>) {
     LOGGER.log_event(event);
 }

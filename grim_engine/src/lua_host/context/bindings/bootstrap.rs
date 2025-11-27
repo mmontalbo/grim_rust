@@ -5,9 +5,8 @@ use std::rc::Rc;
 use anyhow::{Context, Result};
 use mlua::{Function, Lua, MultiValue, Result as LuaResult, Table, Value, Variadic};
 
-use crate::lua_host::telemetry::{
-    log_event, log_push_cclosure, log_set_tagmethod, log_store_ref, EventBuilder,
-};
+use crate::lua_host::telemetry::{log_event, log_push_cclosure, log_set_tagmethod, log_store_ref};
+use grim_telemetry_common::LuaEvent;
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::install_legacy_compat;
@@ -51,10 +50,10 @@ pub(crate) fn install_globals(
     install_pi_constant(lua, &globals)?;
     // Retail triggers the first GC after PI is bound.
     lua.gc_collect()?;
-    log_event(EventBuilder::new("collect_garbage"));
+    log_event(LuaEvent::CollectGarbage {});
     install_system_table(lua, &globals, context.clone())?;
     lua.gc_collect()?;
-    log_event(EventBuilder::new("collect_garbage"));
+    log_event(LuaEvent::CollectGarbage {});
     // Retail pushes default camera/control handlers before rebinding type; log stub pushes to align.
     let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     log_push_cclosure("lua_pushCclosure", default_cam_change.to_pointer());
@@ -120,11 +119,12 @@ fn install_basic_functions(
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
         // Retail saves the stock type and wraps it so userdata can report richer tags.
         let type_ptr = type_fn.to_pointer();
-        log_event(
-            EventBuilder::new("get_global")
-                .kv("name", "type")
-                .kv("handle", format!("{type_ptr:p}")),
-        );
+        log_event(LuaEvent::GetGlobal {
+            name: "type".to_string(),
+            handle: format!("0x{:08x}", type_ptr as usize),
+            label: "global:type".to_string(),
+            count: 1,
+        });
         let saved_type = lua.create_registry_value(type_fn)?;
         log_store_ref(1, 1, Some("global:type".to_string()));
         let type_key = saved_type;

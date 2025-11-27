@@ -1,10 +1,16 @@
-use std::ffi::c_void;
+use std::{
+    ffi::c_void,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-pub(crate) use grim_telemetry_common::EventBuilder;
-use grim_telemetry_common::{TelemetryConfig, TelemetryLogger};
+use grim_telemetry_common::{
+    EventBuilder, LuaEvent, OriginFields, TelemetryConfig, TelemetryLogger, ValueFields,
+};
 
 const ENGINE_ID: &str = "grim_engine";
 const VM_ID: &str = "lua";
+
+static PUSH_SEQ: AtomicU64 = AtomicU64::new(0);
 
 static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     engine_id: ENGINE_ID,
@@ -14,40 +20,45 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     run_id_env: None,
 });
 
-pub(crate) fn log_event(event: EventBuilder) {
+pub(crate) fn log_event(event: impl Into<EventBuilder>) {
     LOGGER.log_event(event);
 }
 
 pub(crate) fn log_push_cclosure(label: &str, func: *const c_void) {
-    log_event(
-        EventBuilder::new("push_cclosure")
-            .kv("name", label)
-            .kv("func", format!("{func:p}")),
-    );
+    let seq = PUSH_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    log_event(LuaEvent::PushCclosure {
+        name: label.to_string(),
+        func: format!("0x{:08x}", func as usize),
+        push_seq: seq,
+        upvalues: 0,
+        origin: OriginFields::default(),
+    });
 }
 
 pub(crate) fn log_bind_global(name: &str, func: *const c_void) {
-    log_event(
-        EventBuilder::new("bind_global")
-            .kv("name", name)
-            .kv("handle", format!("{func:p}")),
-    );
+    log_event(LuaEvent::BindGlobal {
+        name: name.to_string(),
+        handle: format!("0x{:08x}", func as usize),
+        label: None,
+        values: ValueFields::default(),
+        origin: OriginFields::default(),
+    });
 }
 
 pub(crate) fn log_store_ref(lock: i32, reference: i32, label: Option<String>) {
-    let mut event = EventBuilder::new("store_ref")
-        .kv("lock", lock)
-        .kv("ref", reference);
-    if let Some(label) = label {
-        event = event.kv("label", label);
-    }
-    log_event(event);
+    log_event(LuaEvent::StoreRef {
+        lock,
+        reference,
+        handle: None,
+        label,
+        note: None,
+        origin: OriginFields::default(),
+    });
 }
 
 pub(crate) fn log_set_tagmethod(tag: i64, event: &str) {
-    log_event(
-        EventBuilder::new("set_tagmethod")
-            .kv("tag", tag)
-            .kv("event_name", event),
-    );
+    log_event(LuaEvent::SetTagmethod {
+        tag: tag as i32,
+        event_name: event.to_string(),
+    });
 }

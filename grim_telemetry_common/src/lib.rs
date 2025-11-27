@@ -1,4 +1,6 @@
 use libc::pid_t;
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::{
     env,
     fmt::Display,
@@ -47,7 +49,8 @@ impl TelemetryLogger {
         sink.write_line(self.config.line_prefix, message);
     }
 
-    pub fn log_event(&self, event: EventBuilder) {
+    pub fn log_event(&self, event: impl Into<EventBuilder>) {
+        let event = event.into();
         let seq = self.event_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let ts = elapsed_millis();
         let run_id = self
@@ -92,6 +95,11 @@ impl EventBuilder {
     }
 
     pub fn kv(mut self, key: &str, value: impl Display) -> Self {
+        self.kv_mut(key, value);
+        self
+    }
+
+    pub fn kv_mut(&mut self, key: &str, value: impl Display) {
         let mut value = value.to_string();
         let needs_quotes = value.contains(|c: char| c.is_whitespace());
         if needs_quotes {
@@ -100,7 +108,6 @@ impl EventBuilder {
         } else {
             self.fields.push(format!("{key}={value}"));
         }
-        self
     }
 
     pub fn finish(self) -> Vec<String> {
@@ -209,5 +216,421 @@ pub fn default_fullscreen_duration_ms(movie: &str) -> u128 {
         Some("movie.intro") => DEFAULT_FULLSCREEN_DURATION_MS,
         Some("movie.mo_ts") => DEFAULT_FULLSCREEN_DURATION_MS,
         _ => DEFAULT_FULLSCREEN_DURATION_MS,
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OriginFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demangled: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueType {
+    Number,
+    String,
+    Nil,
+    Table,
+    Function,
+    Cfunction,
+    Userdata,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutscenePhase {
+    Start,
+    Poll,
+    End,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutsceneSkipPhase {
+    Request,
+    Complete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutscenePlaying {
+    Playing,
+    Stopped,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutsceneResult {
+    PollStopped,
+    StopCalled,
+    Replaced,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ValueFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<ValueType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_len: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub func: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum LuaEvent {
+    #[serde(rename = "bind_global")]
+    BindGlobal {
+        name: String,
+        handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    Call {
+        name: String,
+    },
+    #[serde(rename = "call_func")]
+    CallFunc {
+        handle: String,
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        calls: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "collect_garbage")]
+    CollectGarbage {},
+    #[serde(rename = "copy_tagmethods")]
+    CopyTagmethods {
+        to: i32,
+        from: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<i32>,
+    },
+    #[serde(rename = "create_table")]
+    CreateTable {
+        handle: String,
+        #[serde(flatten)]
+        values: ValueFields,
+    },
+    #[serde(rename = "dobuffer")]
+    Dobuffer {
+        name: String,
+        size: usize,
+    },
+    Dofile {
+        path: String,
+    },
+    Dostring {
+        snippet: String,
+    },
+    #[serde(rename = "cutscene")]
+    Cutscene {
+        movie: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        movie_label: Option<String>,
+        phase: CutscenePhase,
+        playing: CutscenePlaying,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u128>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        polls: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<CutsceneResult>,
+    },
+    #[serde(rename = "cutscene_skip")]
+    CutsceneSkip {
+        phase: CutsceneSkipPhase,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        movie: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        movie_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u128>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        polls: Option<u64>,
+    },
+    #[serde(rename = "fetch_ref")]
+    FetchRef {
+        #[serde(rename = "ref")]
+        reference: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "get_global")]
+    GetGlobal {
+        name: String,
+        handle: String,
+        label: String,
+        count: u64,
+    },
+    #[serde(rename = "get_table")]
+    GetTable {
+        handle: String,
+        #[serde(flatten)]
+        values: ValueFields,
+    },
+    #[serde(rename = "lua_error")]
+    LuaError {
+        message: String,
+    },
+    #[serde(rename = "push_cclosure")]
+    PushCclosure {
+        name: String,
+        func: String,
+        push_seq: u64,
+        upvalues: i32,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "push_lstring")]
+    PushLstring {
+        len: usize,
+        preview: String,
+    },
+    #[serde(rename = "push_nil")]
+    PushNil {},
+    #[serde(rename = "push_number")]
+    PushNumber {
+        value: String,
+    },
+    #[serde(rename = "push_object")]
+    PushObject {
+        handle: String,
+        #[serde(flatten)]
+        values: ValueFields,
+    },
+    #[serde(rename = "push_string")]
+    PushString {
+        len: usize,
+        preview: String,
+    },
+    #[serde(rename = "push_usertag")]
+    PushUsertag {
+        id: i32,
+        tag: i32,
+    },
+    #[serde(rename = "raw_get_global")]
+    RawGetGlobal {
+        name: String,
+        handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+    },
+    #[serde(rename = "raw_set_global")]
+    RawSetGlobal {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    #[serde(rename = "rawget_table")]
+    RawgetTable {
+        handle: String,
+        #[serde(flatten)]
+        values: ValueFields,
+    },
+    #[serde(rename = "rawset_table")]
+    RawsetTable {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    #[serde(rename = "register_native")]
+    RegisterNative {
+        name: String,
+        handle: String,
+        func: String,
+        upvalues: i32,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "set_constant")]
+    SetConstant {
+        name: String,
+        handle: String,
+        #[serde(flatten)]
+        values: ValueFields,
+    },
+    #[serde(rename = "set_fallback")]
+    SetFallback {
+        fallback: String,
+        handle: String,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "set_table")]
+    SetTable {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    #[serde(rename = "set_tag")]
+    SetTag {
+        tag: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    #[serde(rename = "set_tagmethod")]
+    SetTagmethod {
+        tag: i32,
+        event_name: String,
+    },
+    #[serde(rename = "post_intro_room")]
+    PostIntroRoom {
+        source: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        set: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        setup: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_movie: Option<String>,
+    },
+    #[serde(rename = "store_ref")]
+    StoreRef {
+        lock: i32,
+        #[serde(rename = "ref")]
+        reference: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "tag_state")]
+    TagState {
+        tag: i32,
+        uses: u64,
+        changed: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        methods: Option<String>,
+    },
+    Unref {
+        #[serde(rename = "ref")]
+        reference: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+}
+
+impl From<LuaEvent> for EventBuilder {
+    fn from(event: LuaEvent) -> Self {
+        let value = serde_json::to_value(event).expect("serialize LuaEvent");
+        let obj = value
+            .as_object()
+            .expect("LuaEvent should serialize to an object");
+        let Some(event_name) = obj.get("event").and_then(|v| v.as_str()) else {
+            panic!("LuaEvent serialized without event tag");
+        };
+
+        let mut builder = EventBuilder::new(event_name);
+        // Use a stable order for deterministic logs.
+        let mut keys: Vec<_> = obj.keys().filter(|k| k.as_str() != "event").collect();
+        keys.sort();
+        for key in keys {
+            if let Some(value) = obj.get(key) {
+                let rendered = render_json_value(value);
+                builder.kv_mut(key, rendered);
+            }
+        }
+        builder
+    }
+}
+
+fn render_json_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::String(s) => s.clone(),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cutscene_serializes_with_tag_and_fields() {
+        let event = LuaEvent::Cutscene {
+            movie: "intro.snm".to_string(),
+            movie_label: Some("movie.intro".to_string()),
+            phase: CutscenePhase::Start,
+            playing: CutscenePlaying::Playing,
+            elapsed_ms: Some(0),
+            polls: Some(0),
+            result: None,
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=cutscene"));
+        assert!(fields.iter().any(|f| f == "movie=intro.snm"));
+        assert!(fields.iter().any(|f| f == "movie_label=movie.intro"));
+        assert!(fields.iter().any(|f| f == "phase=start"));
+        assert!(fields.iter().any(|f| f == "playing=playing"));
+        assert!(fields.iter().any(|f| f == "elapsed_ms=0"));
+        assert!(fields.iter().any(|f| f == "polls=0"));
+    }
+
+    #[test]
+    fn cutscene_skip_serializes_with_optional_fields() {
+        let event = LuaEvent::CutsceneSkip {
+            phase: CutsceneSkipPhase::Complete,
+            movie: None,
+            movie_label: Some("movie.intro".to_string()),
+            elapsed_ms: Some(123),
+            polls: None,
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=cutscene_skip"));
+        assert!(fields.iter().any(|f| f == "phase=complete"));
+        assert!(fields.iter().any(|f| f == "movie_label=movie.intro"));
+        assert!(fields.iter().any(|f| f == "elapsed_ms=123"));
+        assert!(fields.iter().any(|f| f == "polls=0") == false);
     }
 }

@@ -1,5 +1,5 @@
 use crate::{
-    logging::{log_event, log_line, EventBuilder},
+    logging::{log_event, log_line, LuaEvent},
     lua_api::{
         call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getnumber,
         call_real_lua_getparam, call_real_lua_getstring, call_real_lua_isnumber,
@@ -7,7 +7,9 @@ use crate::{
         LuaCFunction,
     },
 };
-use grim_telemetry_common::normalized_movie_label;
+use grim_telemetry_common::{
+    normalized_movie_label, CutscenePhase, CutscenePlaying, CutsceneResult, CutsceneSkipPhase,
+};
 use std::{
     cell::Cell,
     collections::HashSet,
@@ -165,7 +167,7 @@ impl TelemetryHooks {
             self.emit_intro_timeline_event(&format!("{label}.start"));
         }
         self.emit_cutscene_event(
-            "start",
+            CutscenePhase::Start,
             PlayingState::Known(true),
             CutsceneMeta {
                 elapsed_ms: Some(0),
@@ -179,7 +181,7 @@ impl TelemetryHooks {
         self.poll_count = self.poll_count.saturating_add(1);
         let elapsed = self.elapsed_ms();
         self.emit_cutscene_event(
-            "poll",
+            CutscenePhase::Poll,
             playing,
             CutsceneMeta {
                 elapsed_ms: elapsed,
@@ -216,7 +218,7 @@ impl TelemetryHooks {
             poll_count: Some(self.poll_count),
             result: reason,
         };
-        self.emit_cutscene_event("end", playing, meta);
+        self.emit_cutscene_event(CutscenePhase::End, playing, meta);
         self.active_movie_name = None;
         self.start_instant = None;
         self.poll_count = 0;
@@ -266,72 +268,66 @@ impl TelemetryHooks {
         self.writer.as_mut()
     }
 
-    fn emit_cutscene_event(&self, phase: &str, playing: PlayingState, meta: CutsceneMeta) {
+    fn emit_cutscene_event(&self, phase: CutscenePhase, playing: PlayingState, meta: CutsceneMeta) {
         let movie = self
             .active_movie_name
             .as_deref()
             .or_else(|| self.active_movie_label.as_deref())
-            .unwrap_or("<unknown>");
-        let mut event = EventBuilder::new("cutscene")
-            .kv("movie", movie)
-            .kv("phase", phase);
-        if let Some(label) = self.active_movie_label.as_deref() {
-            event = event.kv("movie_label", label);
-        }
-        event = event.kv("playing", playing);
-        if let Some(elapsed) = meta.elapsed_ms {
-            event = event.kv("elapsed_ms", elapsed);
-        }
-        if let Some(count) = meta.poll_count {
-            event = event.kv("polls", count);
-        }
-        if let Some(result) = meta.result {
-            event = event.kv("result", result);
-        }
-        log_event(event);
+            .unwrap_or("<unknown>")
+            .to_string();
+        let movie_label = self.active_movie_label.clone();
+        let playing = match playing {
+            PlayingState::Known(true) => CutscenePlaying::Playing,
+            PlayingState::Known(false) => CutscenePlaying::Stopped,
+            PlayingState::Unknown => CutscenePlaying::Unknown,
+        };
+        let result = meta.result.map(|reason| match reason {
+            EndReason::PollStopped => CutsceneResult::PollStopped,
+            EndReason::StopCalled => CutsceneResult::StopCalled,
+            EndReason::Replaced => CutsceneResult::Replaced,
+        });
+        log_event(LuaEvent::Cutscene {
+            movie,
+            movie_label,
+            phase,
+            playing,
+            elapsed_ms: meta.elapsed_ms,
+            polls: meta.poll_count,
+            result,
+        });
     }
 
     fn record_cutscene_skip_request(&mut self) {
         self.skip_requested = true;
-        let mut event = EventBuilder::new("cutscene_skip").kv("phase", "request");
-        if let Some(movie) = self
-            .active_movie_name
-            .as_deref()
-            .or_else(|| self.active_movie_label.as_deref())
-        {
-            event = event.kv("movie", movie);
-        }
-        if let Some(label) = self.active_movie_label.as_deref() {
-            event = event.kv("movie_label", label);
-        }
-        if let Some(elapsed) = self.elapsed_ms() {
-            event = event.kv("elapsed_ms", elapsed);
-        }
-        event = event.kv("polls", self.poll_count);
-        log_event(event);
+        log_event(LuaEvent::CutsceneSkip {
+            phase: CutsceneSkipPhase::Request,
+            movie: self
+                .active_movie_name
+                .as_deref()
+                .or_else(|| self.active_movie_label.as_deref())
+                .map(str::to_string),
+            movie_label: self.active_movie_label.clone(),
+            elapsed_ms: self.elapsed_ms(),
+            polls: Some(self.poll_count),
+        });
     }
 
     fn record_cutscene_skip_complete(&mut self) {
-        let mut event = EventBuilder::new("cutscene_skip").kv("phase", "complete");
-        if let Some(movie) = self
-            .active_movie_name
-            .as_deref()
-            .or_else(|| self.last_finished_movie_label.as_deref())
-        {
-            event = event.kv("movie", movie);
-        }
-        if let Some(label) = self
-            .active_movie_label
-            .as_deref()
-            .or_else(|| self.last_finished_movie_label.as_deref())
-        {
-            event = event.kv("movie_label", label);
-        }
-        if let Some(elapsed) = self.elapsed_ms() {
-            event = event.kv("elapsed_ms", elapsed);
-        }
-        event = event.kv("polls", self.poll_count);
-        log_event(event);
+        log_event(LuaEvent::CutsceneSkip {
+            phase: CutsceneSkipPhase::Complete,
+            movie: self
+                .active_movie_name
+                .as_deref()
+                .or_else(|| self.last_finished_movie_label.as_deref())
+                .map(str::to_string),
+            movie_label: self
+                .active_movie_label
+                .as_deref()
+                .or_else(|| self.last_finished_movie_label.as_deref())
+                .map(str::to_string),
+            elapsed_ms: self.elapsed_ms(),
+            polls: Some(self.poll_count),
+        });
     }
 
     fn elapsed_ms(&self) -> Option<u128> {
@@ -355,17 +351,12 @@ impl TelemetryHooks {
             self.post_intro_pending_setup.get_or_insert(value);
         }
 
-        let mut event = EventBuilder::new("post_intro_room").kv("source", source);
-        if let Some(set) = self.post_intro_pending_set.as_deref() {
-            event = event.kv("set", set);
-        }
-        if let Some(setup) = self.post_intro_pending_setup.as_deref() {
-            event = event.kv("setup", setup);
-        }
-        if let Some(label) = self.last_finished_movie_label.as_deref() {
-            event = event.kv("after_movie", label);
-        }
-        log_event(event);
+        log_event(LuaEvent::PostIntroRoom {
+            source: source.to_string(),
+            set: self.post_intro_pending_set.as_deref().map(str::to_string),
+            setup: self.post_intro_pending_setup.as_deref().map(str::to_string),
+            after_movie: self.last_finished_movie_label.clone(),
+        });
         self.post_intro_room_reported = true;
         self.post_intro_room_pending = false;
     }
