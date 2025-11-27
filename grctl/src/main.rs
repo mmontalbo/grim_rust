@@ -138,7 +138,7 @@ struct RetailCopy {
 #[derive(Args, Debug, Clone)]
 struct LogArgs {
     /// Number of lines to display from the end of the log (0 prints the entire file).
-    #[arg(long, default_value_t = 80)]
+    #[arg(long, default_value_t = 0)]
     tail: usize,
     /// Continuously stream log updates after the initial tail.
     #[arg(long, short = 'f')]
