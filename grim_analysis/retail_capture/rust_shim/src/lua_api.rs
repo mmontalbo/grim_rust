@@ -18,10 +18,32 @@ type LuaGetCFunctionFn = unsafe extern "C" fn(LuaObject) -> Option<LuaCFunction>
 type LuaLua2CFn = unsafe extern "C" fn(c_int) -> LuaObject;
 type LuaIsNumberFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaIsStringFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaIsTableFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaIsFunctionFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaIsCFunctionFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaIsUserdataFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaGetNumberFn = unsafe extern "C" fn(LuaObject) -> c_double;
 type LuaGetStringFn = unsafe extern "C" fn(LuaObject) -> *const c_char;
+type LuaGetUserdataFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaTagFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaPushNumberFn = unsafe extern "C" fn(c_double);
+type LuaPushStringFn = unsafe extern "C" fn(*const c_char);
+type LuaPushLStringFn = unsafe extern "C" fn(*const c_char, size_t);
 type LuaPushNilFn = unsafe extern "C" fn();
+type LuaPushUsertagFn = unsafe extern "C" fn(c_int, c_int);
+type LuaPushObjectFn = unsafe extern "C" fn(LuaObject);
+type LuaCreateTableFn = unsafe extern "C" fn() -> LuaObject;
+type LuaSetTableFn = unsafe extern "C" fn();
+type LuaRawSetTableFn = unsafe extern "C" fn();
+type LuaGetTableFn = unsafe extern "C" fn() -> LuaObject;
+type LuaRawGetTableFn = unsafe extern "C" fn() -> LuaObject;
+type LuaRawGetGlobalFn = unsafe extern "C" fn(*const c_char) -> LuaObject;
+type LuaRawSetGlobalFn = unsafe extern "C" fn(*const c_char);
+type LuaUnrefFn = unsafe extern "C" fn(c_int);
+type LuaSetFallbackFn = unsafe extern "C" fn(*const c_char, LuaCFunction) -> LuaObject;
+type LuaNewTagFn = unsafe extern "C" fn() -> c_int;
+type LuaCopyTagMethodsFn = unsafe extern "C" fn(c_int, c_int) -> c_int;
+type LuaSetTagFn = unsafe extern "C" fn(c_int);
 type LuaRefFn = unsafe extern "C" fn(c_int) -> c_int;
 type LuaGetRefFn = unsafe extern "C" fn(c_int) -> LuaObject;
 type LuaSetTagMethodFn = unsafe extern "C" fn(c_int, *const c_char);
@@ -41,10 +63,32 @@ static LUA_GETCFUNCTION: OnceLock<Option<LuaGetCFunctionFn>> = OnceLock::new();
 static LUA_LUA2C: OnceLock<Option<LuaLua2CFn>> = OnceLock::new();
 static LUA_ISNUMBER: OnceLock<Option<LuaIsNumberFn>> = OnceLock::new();
 static LUA_ISSTRING: OnceLock<Option<LuaIsStringFn>> = OnceLock::new();
+static LUA_ISTABLE: OnceLock<Option<LuaIsTableFn>> = OnceLock::new();
+static LUA_ISFUNCTION: OnceLock<Option<LuaIsFunctionFn>> = OnceLock::new();
+static LUA_ISCFUNCTION: OnceLock<Option<LuaIsCFunctionFn>> = OnceLock::new();
+static LUA_ISUSERDATA: OnceLock<Option<LuaIsUserdataFn>> = OnceLock::new();
 static LUA_GETNUMBER: OnceLock<Option<LuaGetNumberFn>> = OnceLock::new();
 static LUA_GETSTRING: OnceLock<Option<LuaGetStringFn>> = OnceLock::new();
+static LUA_GETUSERDATA: OnceLock<Option<LuaGetUserdataFn>> = OnceLock::new();
+static LUA_TAG: OnceLock<Option<LuaTagFn>> = OnceLock::new();
 static LUA_PUSHNUMBER: OnceLock<Option<LuaPushNumberFn>> = OnceLock::new();
+static LUA_PUSHSTRING: OnceLock<Option<LuaPushStringFn>> = OnceLock::new();
+static LUA_PUSHLSTRING: OnceLock<Option<LuaPushLStringFn>> = OnceLock::new();
 static LUA_PUSHNIL: OnceLock<Option<LuaPushNilFn>> = OnceLock::new();
+static LUA_PUSHUSERTAG: OnceLock<Option<LuaPushUsertagFn>> = OnceLock::new();
+static LUA_PUSHOBJECT: OnceLock<Option<LuaPushObjectFn>> = OnceLock::new();
+static LUA_CREATETABLE: OnceLock<Option<LuaCreateTableFn>> = OnceLock::new();
+static LUA_SETTABLE: OnceLock<Option<LuaSetTableFn>> = OnceLock::new();
+static LUA_RAWSETTABLE: OnceLock<Option<LuaRawSetTableFn>> = OnceLock::new();
+static LUA_GETTABLE: OnceLock<Option<LuaGetTableFn>> = OnceLock::new();
+static LUA_RAWGETTABLE: OnceLock<Option<LuaRawGetTableFn>> = OnceLock::new();
+static LUA_RAWGETGLOBAL: OnceLock<Option<LuaRawGetGlobalFn>> = OnceLock::new();
+static LUA_RAWSETGLOBAL: OnceLock<Option<LuaRawSetGlobalFn>> = OnceLock::new();
+static LUA_UNREF: OnceLock<Option<LuaUnrefFn>> = OnceLock::new();
+static LUA_SETFALLBACK: OnceLock<Option<LuaSetFallbackFn>> = OnceLock::new();
+static LUA_NEWTAG: OnceLock<Option<LuaNewTagFn>> = OnceLock::new();
+static LUA_COPYTAGMETHODS: OnceLock<Option<LuaCopyTagMethodsFn>> = OnceLock::new();
+static LUA_SETTAG: OnceLock<Option<LuaSetTagFn>> = OnceLock::new();
 static LUA_REF: OnceLock<Option<LuaRefFn>> = OnceLock::new();
 static LUA_GETREF: OnceLock<Option<LuaGetRefFn>> = OnceLock::new();
 static LUA_SETTAGMETHOD: OnceLock<Option<LuaSetTagMethodFn>> = OnceLock::new();
@@ -149,6 +193,38 @@ pub(crate) fn call_real_lua_isstring(object: LuaObject) -> bool {
     }
 }
 
+pub(crate) fn call_real_lua_istable(object: LuaObject) -> bool {
+    unsafe {
+        lua_istable_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn call_real_lua_isfunction(object: LuaObject) -> bool {
+    unsafe {
+        lua_isfunction_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn call_real_lua_iscfunction(object: LuaObject) -> bool {
+    unsafe {
+        lua_iscfunction_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn call_real_lua_isuserdata(object: LuaObject) -> bool {
+    unsafe {
+        lua_isuserdata_symbol()
+            .map(|symbol| symbol(object) != 0)
+            .unwrap_or(false)
+    }
+}
+
 pub(crate) fn call_real_lua_getnumber(object: LuaObject) -> Option<c_double> {
     unsafe {
         lua_getnumber_symbol().and_then(|symbol| {
@@ -171,6 +247,14 @@ pub(crate) fn call_real_lua_getstring(object: LuaObject) -> Option<String> {
     }
 }
 
+pub(crate) fn call_real_lua_getuserdata(object: LuaObject) -> Option<c_int> {
+    unsafe { lua_getuserdata_symbol().map(|symbol| symbol(object)) }
+}
+
+pub(crate) fn call_real_lua_tag(object: LuaObject) -> Option<c_int> {
+    unsafe { lua_tag_symbol().map(|symbol| symbol(object)) }
+}
+
 pub(crate) fn call_real_lua_pushnumber(value: c_double) -> bool {
     unsafe {
         match lua_pushnumber_symbol() {
@@ -186,6 +270,36 @@ pub(crate) fn call_real_lua_pushnumber(value: c_double) -> bool {
     }
 }
 
+pub(crate) fn call_real_lua_pushstring(value: *const c_char) -> bool {
+    unsafe {
+        match lua_pushstring_symbol() {
+            Some(symbol) => {
+                symbol(value);
+                true
+            }
+            None => {
+                log_line("lua_pushstring symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_pushlstring(value: *const c_char, len: size_t) -> bool {
+    unsafe {
+        match lua_pushlstring_symbol() {
+            Some(symbol) => {
+                symbol(value, len);
+                true
+            }
+            None => {
+                log_line("lua_pushlstring symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
 pub(crate) fn call_real_lua_pushnil() -> bool {
     unsafe {
         match lua_pushnil_symbol() {
@@ -195,6 +309,142 @@ pub(crate) fn call_real_lua_pushnil() -> bool {
             }
             None => {
                 log_line("lua_pushnil symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_pushusertag(id: c_int, tag: c_int) -> bool {
+    unsafe {
+        match lua_pushusertag_symbol() {
+            Some(symbol) => {
+                symbol(id, tag);
+                true
+            }
+            None => {
+                log_line("lua_pushusertag symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_pushobject(object: LuaObject) -> bool {
+    unsafe {
+        match lua_pushobject_symbol() {
+            Some(symbol) => {
+                symbol(object);
+                true
+            }
+            None => {
+                log_line("lua_pushobject symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_createtable() -> Option<LuaObject> {
+    unsafe { lua_createtable_symbol().map(|symbol| symbol()) }
+}
+
+pub(crate) fn call_real_lua_settable() -> bool {
+    unsafe {
+        match lua_settable_symbol() {
+            Some(symbol) => {
+                symbol();
+                true
+            }
+            None => {
+                log_line("lua_settable symbol missing; skipping trace");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_rawsettable() -> bool {
+    unsafe {
+        match lua_rawsettable_symbol() {
+            Some(symbol) => {
+                symbol();
+                true
+            }
+            None => {
+                log_line("lua_rawsettable symbol missing; skipping trace");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_gettable() -> Option<LuaObject> {
+    unsafe { lua_gettable_symbol().map(|symbol| symbol()) }
+}
+
+pub(crate) fn call_real_lua_rawgettable() -> Option<LuaObject> {
+    unsafe { lua_rawgettable_symbol().map(|symbol| symbol()) }
+}
+
+pub(crate) fn call_real_lua_rawgetglobal(name: *const c_char) -> Option<LuaObject> {
+    unsafe { lua_rawgetglobal_symbol().map(|symbol| symbol(name)) }
+}
+
+pub(crate) fn call_real_lua_rawsetglobal(name: *const c_char) -> bool {
+    unsafe {
+        match lua_rawsetglobal_symbol() {
+            Some(symbol) => {
+                symbol(name);
+                true
+            }
+            None => {
+                log_line("lua_rawsetglobal symbol missing; skipping trace");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_unref(reference: c_int) -> bool {
+    unsafe {
+        match lua_unref_symbol() {
+            Some(symbol) => {
+                symbol(reference);
+                true
+            }
+            None => {
+                log_line("lua_unref symbol missing; skipping trace");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_setfallback(
+    event: *const c_char,
+    func: LuaCFunction,
+) -> Option<LuaObject> {
+    unsafe { lua_setfallback_symbol().map(|symbol| symbol(event, func)) }
+}
+
+pub(crate) fn call_real_lua_newtag() -> Option<c_int> {
+    unsafe { lua_newtag_symbol().map(|symbol| symbol()) }
+}
+
+pub(crate) fn call_real_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> Option<c_int> {
+    unsafe { lua_copytagmethods_symbol().map(|symbol| symbol(tagto, tagfrom)) }
+}
+
+pub(crate) fn call_real_lua_settag(tag: c_int) -> bool {
+    unsafe {
+        match lua_settag_symbol() {
+            Some(symbol) => {
+                symbol(tag);
+                true
+            }
+            None => {
+                log_line("lua_settag symbol missing; skipping trace");
                 false
             }
         }
@@ -384,6 +634,46 @@ fn lua_isstring_symbol() -> Option<LuaIsStringFn> {
     })
 }
 
+fn lua_istable_symbol() -> Option<LuaIsTableFn> {
+    *LUA_ISTABLE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_istable\0",
+            label: "lua_istable",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsTableFn>(ptr))
+    })
+}
+
+fn lua_isfunction_symbol() -> Option<LuaIsFunctionFn> {
+    *LUA_ISFUNCTION.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_isfunction\0",
+            label: "lua_isfunction",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsFunctionFn>(ptr))
+    })
+}
+
+fn lua_iscfunction_symbol() -> Option<LuaIsCFunctionFn> {
+    *LUA_ISCFUNCTION.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_iscfunction\0",
+            label: "lua_iscfunction",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsCFunctionFn>(ptr))
+    })
+}
+
+fn lua_isuserdata_symbol() -> Option<LuaIsUserdataFn> {
+    *LUA_ISUSERDATA.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_isuserdata\0",
+            label: "lua_isuserdata",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsUserdataFn>(ptr))
+    })
+}
+
 fn lua_getnumber_symbol() -> Option<LuaGetNumberFn> {
     *LUA_GETNUMBER.get_or_init(|| unsafe {
         resolve_symbol_with_variants(&[SymbolVariant {
@@ -404,6 +694,26 @@ fn lua_getstring_symbol() -> Option<LuaGetStringFn> {
     })
 }
 
+fn lua_getuserdata_symbol() -> Option<LuaGetUserdataFn> {
+    *LUA_GETUSERDATA.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_getuserdata\0",
+            label: "lua_getuserdata",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetUserdataFn>(ptr))
+    })
+}
+
+fn lua_tag_symbol() -> Option<LuaTagFn> {
+    *LUA_TAG.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_tag\0",
+            label: "lua_tag",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaTagFn>(ptr))
+    })
+}
+
 fn lua_pushnumber_symbol() -> Option<LuaPushNumberFn> {
     *LUA_PUSHNUMBER.get_or_init(|| unsafe {
         resolve_symbol_with_variants(&[SymbolVariant {
@@ -411,6 +721,46 @@ fn lua_pushnumber_symbol() -> Option<LuaPushNumberFn> {
             label: "lua_pushnumber",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushNumberFn>(ptr))
+    })
+}
+
+fn lua_pushstring_symbol() -> Option<LuaPushStringFn> {
+    *LUA_PUSHSTRING.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushstring\0",
+            label: "lua_pushstring",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushStringFn>(ptr))
+    })
+}
+
+fn lua_pushlstring_symbol() -> Option<LuaPushLStringFn> {
+    *LUA_PUSHLSTRING.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushlstring\0",
+            label: "lua_pushlstring",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushLStringFn>(ptr))
+    })
+}
+
+fn lua_pushusertag_symbol() -> Option<LuaPushUsertagFn> {
+    *LUA_PUSHUSERTAG.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushusertag\0",
+            label: "lua_pushusertag",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushUsertagFn>(ptr))
+    })
+}
+
+fn lua_pushobject_symbol() -> Option<LuaPushObjectFn> {
+    *LUA_PUSHOBJECT.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushobject\0",
+            label: "lua_pushobject",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushObjectFn>(ptr))
     })
 }
 
@@ -444,6 +794,16 @@ fn lua_getref_symbol() -> Option<LuaGetRefFn> {
     })
 }
 
+fn lua_unref_symbol() -> Option<LuaUnrefFn> {
+    *LUA_UNREF.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_unref\0",
+            label: "lua_unref",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaUnrefFn>(ptr))
+    })
+}
+
 fn lua_settagmethod_symbol() -> Option<LuaSetTagMethodFn> {
     *LUA_SETTAGMETHOD.get_or_init(|| unsafe {
         resolve_symbol_with_variants(&[SymbolVariant {
@@ -471,6 +831,116 @@ fn lua_error_symbol() -> Option<LuaErrorFn> {
             label: "lua_error",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaErrorFn>(ptr))
+    })
+}
+
+fn lua_createtable_symbol() -> Option<LuaCreateTableFn> {
+    *LUA_CREATETABLE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_createtable\0",
+            label: "lua_createtable",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCreateTableFn>(ptr))
+    })
+}
+
+fn lua_settable_symbol() -> Option<LuaSetTableFn> {
+    *LUA_SETTABLE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_settable\0",
+            label: "lua_settable",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetTableFn>(ptr))
+    })
+}
+
+fn lua_rawsettable_symbol() -> Option<LuaRawSetTableFn> {
+    *LUA_RAWSETTABLE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_rawsettable\0",
+            label: "lua_rawsettable",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawSetTableFn>(ptr))
+    })
+}
+
+fn lua_gettable_symbol() -> Option<LuaGetTableFn> {
+    *LUA_GETTABLE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_gettable\0",
+            label: "lua_gettable",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetTableFn>(ptr))
+    })
+}
+
+fn lua_rawgettable_symbol() -> Option<LuaRawGetTableFn> {
+    *LUA_RAWGETTABLE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_rawgettable\0",
+            label: "lua_rawgettable",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawGetTableFn>(ptr))
+    })
+}
+
+fn lua_rawgetglobal_symbol() -> Option<LuaRawGetGlobalFn> {
+    *LUA_RAWGETGLOBAL.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_rawgetglobal\0",
+            label: "lua_rawgetglobal",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawGetGlobalFn>(ptr))
+    })
+}
+
+fn lua_rawsetglobal_symbol() -> Option<LuaRawSetGlobalFn> {
+    *LUA_RAWSETGLOBAL.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_rawsetglobal\0",
+            label: "lua_rawsetglobal",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawSetGlobalFn>(ptr))
+    })
+}
+
+fn lua_setfallback_symbol() -> Option<LuaSetFallbackFn> {
+    *LUA_SETFALLBACK.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_setfallback\0",
+            label: "lua_setfallback",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetFallbackFn>(ptr))
+    })
+}
+
+fn lua_newtag_symbol() -> Option<LuaNewTagFn> {
+    *LUA_NEWTAG.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_newtag\0",
+            label: "lua_newtag",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewTagFn>(ptr))
+    })
+}
+
+fn lua_copytagmethods_symbol() -> Option<LuaCopyTagMethodsFn> {
+    *LUA_COPYTAGMETHODS.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_copytagmethods\0",
+            label: "lua_copytagmethods",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCopyTagMethodsFn>(ptr))
+    })
+}
+
+fn lua_settag_symbol() -> Option<LuaSetTagFn> {
+    *LUA_SETTAG.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_settag\0",
+            label: "lua_settag",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetTagFn>(ptr))
     })
 }
 
