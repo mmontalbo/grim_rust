@@ -37,6 +37,8 @@ without modifying the game's assets.
   `tag_label` comes from built-in tags and cached `settagmethod` names).
 - Handles gain a `handle_label` once they've been named via globals/refs or
   fallback registrations; subsequent events touching that handle will echo it.
+- Caller origin is included on table creation/mutator/tag-method operations to
+  tie writes and tag setup back to the native sites that performed them.
 - Pushes: `push_cclosure` (name, func, push_seq, upvalues, origin), `push_number`
   (value), `push_nil`, `push_string`/`push_lstring` (len/preview), `push_usertag`
   (id logged as a hex pointer, value fields include `value_type=userdata`,
@@ -57,8 +59,8 @@ without modifying the game's assets.
   only by the retail shim.
 - Other: `collect_garbage`, `lua_error` (message), `setglobal`/`rawset`/`rawget`
   variants, userdata/table/number string inspection via value fields. Mutators
-  like `set_table` / `rawset_table` / `raw_set_global` now include caller origin
-  fields.
+  like `create_table`, `set_table` / `rawset_table` / `raw_set_global`, and
+  tag plumbing (`copy_tagmethods`) include caller origin fields.
 
 ## How It Works
 - Build a `cdylib` that exports the same symbols as libLua (`lua_pushCclosure`

@@ -149,6 +149,7 @@ pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
 pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
     match call_real_lua_createtable() {
         Some(handle) => {
+            let caller = caller_origin_fields();
             let values = describe_lua_value(handle)
                 .map(|value| value_fields_from_details(&value))
                 .unwrap_or_default();
@@ -156,6 +157,7 @@ pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
                 handle: format!("0x{handle:08x}"),
                 handle_label: handle_label_for(handle),
                 values,
+                caller,
             });
             handle
         }
@@ -299,6 +301,7 @@ pub(crate) unsafe fn trace_lua_setfallback(
 ) -> LuaObject {
     let name = cstr_opt(event_name).unwrap_or_else(|| "<null>".to_string());
     let origin = ClosureOrigin::new(func as *const c_void);
+    let caller = caller_origin_fields();
     match call_real_lua_setfallback(event_name, func) {
         Some(handle) => {
             let values = describe_lua_value(handle)
@@ -312,6 +315,7 @@ pub(crate) unsafe fn trace_lua_setfallback(
                 handle_label: Some(handle_label),
                 values,
                 origin: origin_fields(Some(&origin)),
+                caller,
             });
             handle
         }
@@ -335,6 +339,7 @@ pub(crate) unsafe fn trace_lua_newtag() -> c_int {
 pub(crate) unsafe fn trace_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> c_int {
     match call_real_lua_copytagmethods(tagto, tagfrom) {
         Some(result) => {
+            let caller = caller_origin_fields();
             let from_label = tag_label_for(tagfrom);
             if let Some(label) = &from_label {
                 remember_tag_label_if_missing(tagto, label.clone());
@@ -346,6 +351,7 @@ pub(crate) unsafe fn trace_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> c
                 to_label,
                 from_label,
                 result: Some(result),
+                caller,
             });
             result
         }

@@ -416,6 +416,8 @@ pub enum LuaEvent {
         from_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<i32>,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "create_table")]
     CreateTable {
@@ -424,6 +426,8 @@ pub enum LuaEvent {
         handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "dobuffer")]
     Dobuffer {
@@ -595,6 +599,8 @@ pub enum LuaEvent {
         upvalues: i32,
         #[serde(flatten)]
         origin: OriginFields,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "set_constant")]
     SetConstant {
@@ -604,6 +610,8 @@ pub enum LuaEvent {
         handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "set_fallback")]
     SetFallback {
@@ -615,6 +623,8 @@ pub enum LuaEvent {
         values: ValueFields,
         #[serde(flatten)]
         origin: OriginFields,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "set_table")]
     SetTable {
