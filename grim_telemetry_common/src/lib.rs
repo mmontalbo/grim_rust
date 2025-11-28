@@ -54,8 +54,25 @@ impl TelemetryLogger {
     }
 
     pub fn log_event(&self, event: impl Into<EventBuilder>) {
+        let _ = self.log_event_with_seq(event);
+    }
+
+    pub fn log_event_with_seq(&self, event: impl Into<EventBuilder>) -> u64 {
         let event = event.into();
         let seq = self.event_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.log_event_with_seq_display(event, format!("{seq:06}"));
+        seq
+    }
+
+    pub fn log_event_with_seq_display(
+        &self,
+        event: impl Into<EventBuilder>,
+        seq_display: impl Into<String>,
+    ) {
+        self.log_event_inner(event.into(), seq_display.into());
+    }
+
+    fn log_event_inner(&self, event: EventBuilder, seq_display: String) {
         let ts = elapsed_millis();
         let run_id = self
             .run_id
@@ -68,7 +85,7 @@ impl TelemetryLogger {
             .find_map(|field| field.strip_prefix("event="))
             .map(|value| value.to_string());
         let mut parts = Vec::with_capacity(fields.len() + 6);
-        parts.push(format!("seq={seq:06}"));
+        parts.push(format!("seq={seq_display}"));
         parts.push(format!("ts={ts:08}"));
         if let Some(event_name) = event_name {
             parts.push(format!("event={event_name}"));
@@ -373,6 +390,19 @@ pub struct ValueFields {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpvaluePreview {
+    pub kind: ValueType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_len: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LuaEvent {
     #[serde(rename = "bind_global")]
@@ -383,6 +413,24 @@ pub enum LuaEvent {
         handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "registered_global")]
+    RegisteredGlobal {
+        name: String,
+        handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        push_seq: u64,
+        func: String,
+        upvalues: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        upvalue_previews: Option<Vec<UpvaluePreview>>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -815,5 +863,40 @@ mod tests {
         let fields = EventBuilder::from(event).finish();
         assert!(fields.iter().any(|f| f == "handle_label=global:foo"));
         assert!(fields.iter().any(|f| f == "label=global:foo"));
+    }
+
+    #[test]
+    fn registered_global_serializes_with_upvalues() {
+        let event = LuaEvent::RegisteredGlobal {
+            name: "foo".to_string(),
+            handle: "0x00000001".to_string(),
+            handle_label: Some("global:foo".to_string()),
+            label: Some("global:foo".to_string()),
+            push_seq: 3,
+            func: "0x0000abcd".to_string(),
+            upvalues: 2,
+            upvalue_previews: Some(vec![UpvaluePreview {
+                kind: ValueType::Number,
+                value: Some("7".to_string()),
+                value_len: None,
+                preview: None,
+                tag: None,
+            }]),
+            values: ValueFields {
+                value_type: Some(ValueType::Cfunction),
+                ..Default::default()
+            },
+            origin: OriginFields {
+                origin: Some("0x0000dead".to_string()),
+                ..Default::default()
+            },
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=registered_global"));
+        assert!(fields.iter().any(|f| f == "push_seq=3"));
+        assert!(fields.iter().any(|f| f == "upvalues=2"));
+        assert!(fields
+            .iter()
+            .any(|f| f.starts_with("upvalue_previews=[{\"kind\":\"number\"")));
     }
 }
