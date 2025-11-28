@@ -32,25 +32,33 @@ without modifying the game's assets.
 - Origin fields appear when available: `origin`, `module`, `symbol`, `demangled`,
   `symbol_source`, `map_source`.
 - Value fields (when a value is inspected): `value_type`, `value`, `value_len`,
-  `value_preview`, `tag`, `func`, `payload`.
+  `value_preview`, `tag`, `tag_label`, `func`, `payload`, `payload_hex`
+  (pointers are emitted as hex; decimal payload is omitted for userdata pushes;
+  `tag_label` comes from built-in tags and cached `settagmethod` names).
+- Handles gain a `handle_label` once they've been named via globals/refs or
+  fallback registrations; subsequent events touching that handle will echo it.
 - Pushes: `push_cclosure` (name, func, push_seq, upvalues, origin), `push_number`
   (value), `push_nil`, `push_string`/`push_lstring` (len/preview), `push_usertag`
-  (id, tag).
-- Globals: `bind_global` (name, handle, label, value fields, origin) and
-  `get_global` (name, handle, label, count milestone).
+  (id logged as a hex pointer, value fields include `value_type=userdata`,
+  `tag`, plus caller origin fields when available).
+- Globals: `bind_global` (name, handle, handle_label, label, value fields,
+  origin) and `get_global` (name, handle, label, handle_label, count milestone).
 - Calls: `call_func` (handle, label, calls milestone, origin), `call`
   (name), `dofile`/`dostring`/`dobuffer` (path/snippet/name + size).
-- Refs: `store_ref` (lock, ref, handle/label), `fetch_ref` (ref, handle,
-  label, note when missing).
+- Refs: `store_ref` (lock, ref, handle/handle_label/label), `fetch_ref` (ref,
+  handle/handle_label/label, note when missing).
 - Tag plumbing: `set_tag`, `copy_tagmethods` (to/from/result), `set_tagmethod`
-  (tag, event_name), `setfallback` (event, handle + value fields). The shared
-  schema still includes `tag_state`, but the retail shim no longer emits it.
+  (tag, event_name), `setfallback` (event, handle + value fields). Tagged values
+  now carry `tag_label` when known. The shared schema still includes `tag_state`,
+  but the retail shim no longer emits it.
 - Cutscenes (retail shim only): `cutscene` (movie/movie_label/phase/playing/elapsed_ms/polls/result),
   `cutscene_skip` (phase/movie/movie_label/elapsed_ms/polls), and `post_intro_room`
   (source/set/setup/after_movie) are typed in the shared schema and emitted
   only by the retail shim.
 - Other: `collect_garbage`, `lua_error` (message), `setglobal`/`rawset`/`rawget`
-  variants, userdata/table/number string inspection via value fields.
+  variants, userdata/table/number string inspection via value fields. Mutators
+  like `set_table` / `rawset_table` / `raw_set_global` now include caller origin
+  fields.
 
 ## How It Works
 - Build a `cdylib` that exports the same symbols as libLua (`lua_pushCclosure`

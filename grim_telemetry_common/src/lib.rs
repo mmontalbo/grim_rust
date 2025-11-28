@@ -1,9 +1,13 @@
 use libc::pid_t;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, Deserializer, Visitor},
+    ser::Serializer,
+    Deserialize, Serialize,
+};
 use serde_json::Value as JsonValue;
 use std::{
     env,
-    fmt::Display,
+    fmt::{self, Display},
     fs::OpenOptions,
     io::{self, BufWriter, Write},
     sync::{
@@ -279,6 +283,73 @@ pub enum CutsceneResult {
     Replaced,
 }
 
+fn serialize_pointer_hex<S>(value: &i32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("0x{addr:08x}", addr = *value as u32))
+}
+
+fn deserialize_pointer_hex<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct PointerVisitor;
+
+    impl<'de> Visitor<'de> for PointerVisitor {
+        type Value = i32;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("hex pointer string or integer")
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value as i32)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value as i32)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            parse_pointer_string(value)
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+    }
+
+    fn parse_pointer_string<'de, E>(value: &str) -> Result<i32, E>
+    where
+        E: de::Error,
+    {
+        let trimmed = value.trim();
+        let no_prefix = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+        u32::from_str_radix(no_prefix, 16)
+            .map(|num| num as i32)
+            .or_else(|_| trimmed.parse::<i32>())
+            .map_err(|_| E::custom(format!("invalid pointer value: {value}")))
+    }
+
+    deserializer.deserialize_any(PointerVisitor)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ValueFields {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -292,9 +363,13 @@ pub struct ValueFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub func: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +379,8 @@ pub enum LuaEvent {
     BindGlobal {
         name: String,
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
@@ -319,6 +396,8 @@ pub enum LuaEvent {
         handle: String,
         label: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         calls: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -332,11 +411,17 @@ pub enum LuaEvent {
         to: i32,
         from: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
+        to_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<i32>,
     },
     #[serde(rename = "create_table")]
     CreateTable {
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -384,6 +469,8 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -395,11 +482,15 @@ pub enum LuaEvent {
         name: String,
         handle: String,
         label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         count: u64,
     },
     #[serde(rename = "get_table")]
     GetTable {
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -430,6 +521,8 @@ pub enum LuaEvent {
     #[serde(rename = "push_object")]
     PushObject {
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -440,13 +533,22 @@ pub enum LuaEvent {
     },
     #[serde(rename = "push_usertag")]
     PushUsertag {
+        #[serde(
+            serialize_with = "serialize_pointer_hex",
+            deserialize_with = "deserialize_pointer_hex"
+        )]
         id: i32,
-        tag: i32,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "raw_get_global")]
     RawGetGlobal {
         name: String,
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
@@ -458,15 +560,21 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "rawget_table")]
     RawgetTable {
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -474,11 +582,15 @@ pub enum LuaEvent {
     RawsetTable {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "register_native")]
     RegisterNative {
         name: String,
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         func: String,
         upvalues: i32,
         #[serde(flatten)]
@@ -488,6 +600,8 @@ pub enum LuaEvent {
     SetConstant {
         name: String,
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -495,6 +609,8 @@ pub enum LuaEvent {
     SetFallback {
         fallback: String,
         handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -504,17 +620,23 @@ pub enum LuaEvent {
     SetTable {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(flatten)]
+        caller: OriginFields,
     },
     #[serde(rename = "set_tag")]
     SetTag {
         tag: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag_label: Option<String>,
     },
     #[serde(rename = "set_tagmethod")]
     SetTagmethod {
         tag: i32,
         event_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag_label: Option<String>,
     },
     #[serde(rename = "post_intro_room")]
     PostIntroRoom {
@@ -534,6 +656,8 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -543,6 +667,8 @@ pub enum LuaEvent {
     #[serde(rename = "tag_state")]
     TagState {
         tag: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag_label: Option<String>,
         uses: u64,
         changed: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -632,5 +758,52 @@ mod tests {
         assert!(fields.iter().any(|f| f == "movie_label=movie.intro"));
         assert!(fields.iter().any(|f| f == "elapsed_ms=123"));
         assert!(fields.iter().any(|f| f == "polls=0") == false);
+    }
+
+    #[test]
+    fn push_usertag_serializes_value_fields() {
+        let event = LuaEvent::PushUsertag {
+            id: 7,
+            values: ValueFields {
+                value_type: Some(ValueType::Userdata),
+                tag: Some(42),
+                ..Default::default()
+            },
+            caller: OriginFields::default(),
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=push_usertag"));
+        assert!(fields.iter().any(|f| f == "id=0x00000007"));
+        assert!(fields.iter().any(|f| f == "tag=42"));
+        assert!(fields.iter().any(|f| f == "value_type=userdata"));
+        assert!(fields
+            .iter()
+            .all(|f| f.starts_with("payload_hex=") == false));
+    }
+
+    #[test]
+    fn set_tag_includes_label_when_present() {
+        let event = LuaEvent::SetTag {
+            tag: 9,
+            note: None,
+            tag_label: Some("example".to_string()),
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "tag=9"));
+        assert!(fields.iter().any(|f| f == "tag_label=example"));
+    }
+
+    #[test]
+    fn get_global_carries_handle_label() {
+        let event = LuaEvent::GetGlobal {
+            name: "foo".to_string(),
+            handle: "0x00000001".to_string(),
+            handle_label: Some("global:foo".to_string()),
+            label: "global:foo".to_string(),
+            count: 2,
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "handle_label=global:foo"));
+        assert!(fields.iter().any(|f| f == "label=global:foo"));
     }
 }

@@ -25,6 +25,7 @@ use std::{
     collections::HashMap,
     ffi::{c_void, CStr, CString},
     mem::MaybeUninit,
+    ptr,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -34,6 +35,12 @@ use std::{
 static CLOSURE_PUSH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CALLFUNCTION_TRACKER: OnceLock<Mutex<CallfunctionTracker>> = OnceLock::new();
 static GLOBAL_ACCESS_TRACKER: OnceLock<Mutex<GlobalAccessTracker>> = OnceLock::new();
+static TAG_LABELS: OnceLock<Mutex<TagLabelTracker>> = OnceLock::new();
+static HANDLE_LABELS: OnceLock<Mutex<HandleLabelTracker>> = OnceLock::new();
+
+extern "C" {
+    fn backtrace(buffer: *mut *mut c_void, size: c_int) -> c_int;
+}
 
 macro_rules! forward_int_result {
     ($label:literal, $result:expr) => {{
@@ -68,10 +75,10 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
     }
 }
 
-pub(crate) unsafe fn trace_lua_pushnumber(value: f64) {
-    telemetry::record_pushed_number(value);
+pub(crate) unsafe fn trace_lua_pushnumber(value: f32) {
+    telemetry::record_pushed_number(value.into());
     log_event(LuaEvent::PushNumber {
-        value: format_number_for_log(value),
+        value: format_number_for_log(value as f64),
     });
     if !call_real_lua_pushnumber(value) {
         log_line("lua_pushnumber symbol missing; skipping push");
@@ -114,7 +121,12 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
 }
 
 pub(crate) unsafe fn trace_lua_pushusertag(id: c_int, tag: c_int) {
-    log_event(LuaEvent::PushUsertag { id, tag });
+    let mut values = ValueFields::default();
+    values.value_type = Some(ValueType::Userdata);
+    values.tag = Some(tag);
+    attach_tag_label(&mut values);
+    let caller = caller_origin_fields();
+    log_event(LuaEvent::PushUsertag { id, values, caller });
     if !call_real_lua_pushusertag(id, tag) {
         log_line("lua_pushusertag symbol missing; skipping push");
     }
@@ -126,6 +138,7 @@ pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
         .unwrap_or_default();
     log_event(LuaEvent::PushObject {
         handle: format!("0x{object:08x}"),
+        handle_label: handle_label_for(object),
         values,
     });
     if !call_real_lua_pushobject(object) {
@@ -141,6 +154,7 @@ pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
                 .unwrap_or_default();
             log_event(LuaEvent::CreateTable {
                 handle: format!("0x{handle:08x}"),
+                handle_label: handle_label_for(handle),
                 values,
             });
             handle
@@ -153,21 +167,23 @@ pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
 }
 
 pub(crate) unsafe fn trace_lua_settable() {
+    let caller = caller_origin_fields();
     let note = if call_real_lua_settable() {
         None
     } else {
         Some("lua_settable_missing".to_string())
     };
-    log_event(LuaEvent::SetTable { note });
+    log_event(LuaEvent::SetTable { note, caller });
 }
 
 pub(crate) unsafe fn trace_lua_rawsettable() {
+    let caller = caller_origin_fields();
     let note = if call_real_lua_rawsettable() {
         None
     } else {
         Some("lua_rawsettable_missing".to_string())
     };
-    log_event(LuaEvent::RawsetTable { note });
+    log_event(LuaEvent::RawsetTable { note, caller });
 }
 
 pub(crate) unsafe fn trace_lua_gettable() -> LuaObject {
@@ -178,6 +194,7 @@ pub(crate) unsafe fn trace_lua_gettable() -> LuaObject {
                 .unwrap_or_default();
             log_event(LuaEvent::GetTable {
                 handle: format!("0x{handle:08x}"),
+                handle_label: handle_label_for(handle),
                 values,
             });
             handle
@@ -197,6 +214,7 @@ pub(crate) unsafe fn trace_lua_rawgettable() -> LuaObject {
                 .unwrap_or_default();
             log_event(LuaEvent::RawgetTable {
                 handle: format!("0x{handle:08x}"),
+                handle_label: handle_label_for(handle),
                 values,
             });
             handle
@@ -212,13 +230,16 @@ pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     match call_real_lua_rawgetglobal(name) {
         Some(handle) => {
+            let handle_label = format!("global:{label}");
+            remember_handle_label(handle, handle_label.clone());
             let values = describe_lua_value(handle)
                 .map(|value| value_fields_from_details(&value))
                 .unwrap_or_default();
             log_event(LuaEvent::RawGetGlobal {
                 name: label.clone(),
                 handle: format!("0x{handle:08x}"),
-                label: Some(format!("global:{label}")),
+                handle_label: Some(handle_label.clone()),
+                label: Some(handle_label),
                 values,
             });
             handle
@@ -233,13 +254,18 @@ pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
 pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     let mut handle_field = None;
+    let mut handle_label = None;
     let mut values = ValueFields::default();
     let mut note = None;
     let mut computed_label = None;
+    let caller = caller_origin_fields();
     if call_real_lua_rawsetglobal(name) {
         if let Some(handle) = call_real_lua_rawgetglobal(name) {
             handle_field = Some(format!("0x{handle:08x}"));
-            computed_label = Some(format!("global:{label}"));
+            let resolved_label = format!("global:{label}");
+            computed_label = Some(resolved_label.clone());
+            handle_label = Some(resolved_label.clone());
+            remember_handle_label(handle, resolved_label);
             if let Some(details) = describe_lua_value(handle) {
                 values = value_fields_from_details(&details);
             }
@@ -250,9 +276,11 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     log_event(LuaEvent::RawSetGlobal {
         name: label,
         handle: handle_field,
+        handle_label,
         label: computed_label,
         values,
         note,
+        caller,
     });
 }
 
@@ -276,9 +304,12 @@ pub(crate) unsafe fn trace_lua_setfallback(
             let values = describe_lua_value(handle)
                 .map(|value| value_fields_from_details(&value))
                 .unwrap_or_default();
+            let handle_label = format!("fallback:{name}");
+            remember_handle_label(handle, handle_label.clone());
             log_event(LuaEvent::SetFallback {
                 fallback: name,
                 handle: format!("0x{handle:08x}"),
+                handle_label: Some(handle_label),
                 values,
                 origin: origin_fields(Some(&origin)),
             });
@@ -304,9 +335,16 @@ pub(crate) unsafe fn trace_lua_newtag() -> c_int {
 pub(crate) unsafe fn trace_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> c_int {
     match call_real_lua_copytagmethods(tagto, tagfrom) {
         Some(result) => {
+            let from_label = tag_label_for(tagfrom);
+            if let Some(label) = &from_label {
+                remember_tag_label_if_missing(tagto, label.clone());
+            }
+            let to_label = tag_label_for(tagto);
             log_event(LuaEvent::CopyTagmethods {
                 to: tagto,
                 from: tagfrom,
+                to_label,
+                from_label,
                 result: Some(result),
             });
             result
@@ -324,7 +362,11 @@ pub(crate) unsafe fn trace_lua_settag(tag: c_int) {
     } else {
         Some("lua_settag_missing".to_string())
     };
-    log_event(LuaEvent::SetTag { tag, note });
+    log_event(LuaEvent::SetTag {
+        tag,
+        note,
+        tag_label: tag_label_for(tag),
+    });
 }
 pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
     let label = cstr_opt(path).unwrap_or_else(|| "<null>".to_string());
@@ -370,15 +412,17 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
             let origin = call_real_lua_getcfunction(handle)
                 .map(|func| ClosureOrigin::new(func as *const c_void));
             let value_fields = describe_lua_value(handle);
+            let handle_label = format!("global:{label}");
 
             if let Ok(mut tracker) = callfunction_tracker().lock() {
-                tracker.remember_label(handle, format!("global:{label}"));
+                tracker.remember_label(handle, handle_label.clone());
                 if let Some(origin) = origin.clone() {
                     tracker.remember_origin(handle, origin);
                 }
             } else {
                 log_line("lua_setglobal tracker mutex poisoned; skipping cache update");
             }
+            remember_handle_label(handle, handle_label.clone());
 
             let values = value_fields
                 .as_ref()
@@ -387,7 +431,8 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
             log_event(LuaEvent::BindGlobal {
                 name: label.clone(),
                 handle: format!("0x{handle:08x}"),
-                label: Some(format!("global:{label}")),
+                handle_label: Some(handle_label.clone()),
+                label: Some(handle_label),
                 values,
                 origin: origin_fields(origin.as_ref()),
             });
@@ -408,10 +453,13 @@ pub(crate) unsafe fn trace_lua_getglobal(name: *const c_char) -> LuaObject {
 
     if let Ok(mut tracker) = global_access_tracker().lock() {
         let count = tracker.record(&label);
+        let handle_label = format!("global:{label}");
+        remember_handle_label(handle, handle_label.clone());
         log_event(LuaEvent::GetGlobal {
             name: label.clone(),
             handle: format!("0x{handle:08x}"),
-            label: format!("global:{label}"),
+            handle_label: Some(handle_label.clone()),
+            label: handle_label,
             count,
         });
     } else {
@@ -438,10 +486,12 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                     } else {
                         log_line("lua_ref tracker mutex poisoned; skipping cache update");
                     }
+                    remember_handle_label_if_missing(handle, label.clone());
                     log_event(LuaEvent::StoreRef {
                         lock,
                         reference,
                         handle: Some(format!("0x{handle:08x}")),
+                        handle_label: Some(label.clone()),
                         label: Some(label),
                         note: None,
                         origin: origin_fields(origin.as_ref()),
@@ -452,6 +502,7 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         lock,
                         reference,
                         handle: Some("<unknown>".to_string()),
+                        handle_label: Some(format!("ref:{reference}")),
                         label: Some(format!("ref:{reference}")),
                         note: Some("lua_getref_missing".to_string()),
                         origin: OriginFields::default(),
@@ -481,9 +532,11 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             } else {
                 log_line("lua_getref tracker mutex poisoned; skipping cache update");
             }
+            remember_handle_label_if_missing(handle, label.clone());
             log_event(LuaEvent::FetchRef {
                 reference,
                 handle: Some(format!("0x{handle:08x}")),
+                handle_label: Some(label.clone()),
                 label: Some(label),
                 note: None,
                 origin: origin_fields(origin.as_ref()),
@@ -494,6 +547,7 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             log_event(LuaEvent::FetchRef {
                 reference,
                 handle: Some("<unknown>".to_string()),
+                handle_label: None,
                 label: None,
                 note: Some("lua_getref_symbol_missing".to_string()),
                 origin: OriginFields::default(),
@@ -506,9 +560,11 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
 pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
     let event_label = cstr_opt(event).unwrap_or_else(|| "<null>".to_string());
     if call_real_lua_settagmethod(tag, event) {
+        remember_tag_label_if_missing(tag, event_label.clone());
         log_event(LuaEvent::SetTagmethod {
             tag,
             event_name: event_label.clone(),
+            tag_label: tag_label_for(tag),
         });
     }
 }
@@ -532,12 +588,14 @@ pub(crate) unsafe fn trace_lua_error(message: *const c_char) {
 pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
     let handle = func as usize as LuaObject;
     let label = resolve_lua_function_label(handle);
+    remember_handle_label_if_missing(handle, label.clone());
 
     if let Ok(mut tracker) = callfunction_tracker().lock() {
         let sample = tracker.record(handle, &label);
         log_event(LuaEvent::CallFunc {
             handle: format!("0x{handle:08x}"),
             label: label.clone(),
+            handle_label: Some(handle_label_for(handle).unwrap_or_else(|| label.clone())),
             calls: Some(sample.count),
             note: None,
             origin: origin_fields(sample.origin.as_ref()),
@@ -547,6 +605,7 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
         log_event(LuaEvent::CallFunc {
             handle: format!("0x{handle:08x}"),
             label: label.clone(),
+            handle_label: Some(label.clone()),
             calls: None,
             note: Some("tracker_poisoned".to_string()),
             origin: OriginFields::default(),
@@ -564,6 +623,10 @@ fn format_number_for_log(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+fn format_pointer_hex(value: c_int) -> String {
+    format!("0x{addr:08x}", addr = value as u32)
 }
 
 fn truncate_for_log(text: &str, max_len: usize) -> String {
@@ -640,14 +703,23 @@ fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
         ValueDetails::Userdata { tag, payload } => {
             fields.value_type = Some(ValueType::Userdata);
             fields.tag = *tag;
-            fields.payload = *payload;
+            fields.payload_hex = payload.map(|value| format_pointer_hex(value));
         }
         ValueDetails::Unknown { tag } => {
             fields.value_type = Some(ValueType::Unknown);
             fields.tag = *tag;
         }
     }
+    attach_tag_label(&mut fields);
     fields
+}
+
+fn attach_tag_label(fields: &mut ValueFields) {
+    if let Some(tag) = fields.tag {
+        if let Some(label) = tag_label_for(tag) {
+            fields.tag_label = Some(label);
+        }
+    }
 }
 
 enum ValueDetails {
@@ -707,6 +779,30 @@ fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
         }
     }
     fields
+}
+
+fn caller_origin_fields() -> OriginFields {
+    let mut frames: [*mut c_void; 32] = [ptr::null_mut(); 32];
+    let depth = unsafe { backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
+    if depth <= 0 {
+        return OriginFields::default();
+    }
+    for addr in frames.iter().take(depth as usize).skip(1) {
+        if addr.is_null() {
+            continue;
+        }
+        let origin = ClosureOrigin::new(*addr as *const c_void);
+        if origin
+            .module
+            .as_deref()
+            .map(|module| module.contains("grim_telemetry_shim"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        return origin_fields(Some(&origin));
+    }
+    OriginFields::default()
 }
 
 struct ClosureDetails {
@@ -867,6 +963,52 @@ impl GlobalAccessTracker {
     }
 }
 
+struct TagLabelTracker {
+    labels: HashMap<i32, String>,
+}
+
+impl TagLabelTracker {
+    fn new() -> Self {
+        let mut labels = HashMap::new();
+        labels.insert(-3, "table".to_string());
+        labels.insert(-4, "function".to_string());
+        labels.insert(-5, "cfunction".to_string());
+        Self { labels }
+    }
+
+    fn remember_label_if_missing(&mut self, tag: i32, label: String) {
+        self.labels.entry(tag).or_insert(label);
+    }
+
+    fn label_for(&self, tag: i32) -> Option<String> {
+        self.labels.get(&tag).cloned()
+    }
+}
+
+struct HandleLabelTracker {
+    labels: HashMap<LuaObject, String>,
+}
+
+impl HandleLabelTracker {
+    fn new() -> Self {
+        Self {
+            labels: HashMap::new(),
+        }
+    }
+
+    fn remember_label(&mut self, handle: LuaObject, label: String) {
+        self.labels.insert(handle, label);
+    }
+
+    fn remember_label_if_missing(&mut self, handle: LuaObject, label: String) {
+        self.labels.entry(handle).or_insert(label);
+    }
+
+    fn label_for(&self, handle: LuaObject) -> Option<String> {
+        self.labels.get(&handle).cloned()
+    }
+}
+
 fn resolve_lua_function_label(handle: LuaObject) -> String {
     if let Ok(tracker) = callfunction_tracker().lock() {
         if let Some(label) = tracker.label_for(handle) {
@@ -897,6 +1039,61 @@ fn callfunction_tracker() -> &'static Mutex<CallfunctionTracker> {
 
 fn global_access_tracker() -> &'static Mutex<GlobalAccessTracker> {
     GLOBAL_ACCESS_TRACKER.get_or_init(|| Mutex::new(GlobalAccessTracker::new()))
+}
+
+fn tag_label_tracker() -> &'static Mutex<TagLabelTracker> {
+    TAG_LABELS.get_or_init(|| Mutex::new(TagLabelTracker::new()))
+}
+
+fn handle_label_tracker() -> &'static Mutex<HandleLabelTracker> {
+    HANDLE_LABELS.get_or_init(|| Mutex::new(HandleLabelTracker::new()))
+}
+
+fn tag_label_for(tag: i32) -> Option<String> {
+    tag_label_tracker()
+        .lock()
+        .ok()
+        .and_then(|tracker| tracker.label_for(tag))
+}
+
+fn remember_tag_label_if_missing(tag: i32, label: impl Into<String>) {
+    if let Ok(mut tracker) = tag_label_tracker().lock() {
+        tracker.remember_label_if_missing(tag, label.into());
+    } else {
+        log_line("tag label tracker mutex poisoned; skipping label update");
+    }
+}
+
+fn remember_handle_label(handle: LuaObject, label: impl Into<String>) {
+    if handle == 0 {
+        return;
+    }
+    if let Ok(mut tracker) = handle_label_tracker().lock() {
+        tracker.remember_label(handle, label.into());
+    } else {
+        log_line("handle label tracker mutex poisoned; skipping label update");
+    }
+}
+
+fn remember_handle_label_if_missing(handle: LuaObject, label: impl Into<String>) {
+    if handle == 0 {
+        return;
+    }
+    if let Ok(mut tracker) = handle_label_tracker().lock() {
+        tracker.remember_label_if_missing(handle, label.into());
+    } else {
+        log_line("handle label tracker mutex poisoned; skipping label update");
+    }
+}
+
+fn handle_label_for(handle: LuaObject) -> Option<String> {
+    if handle == 0 {
+        return None;
+    }
+    handle_label_tracker()
+        .lock()
+        .ok()
+        .and_then(|tracker| tracker.label_for(handle))
 }
 
 #[derive(Clone)]

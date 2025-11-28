@@ -123,6 +123,7 @@ fn install_basic_functions(
             name: "type".to_string(),
             handle: format!("0x{:08x}", type_ptr as usize),
             label: "global:type".to_string(),
+            handle_label: Some("global:type".to_string()),
             count: 1,
         });
         let saved_type = lua.create_registry_value(type_fn)?;

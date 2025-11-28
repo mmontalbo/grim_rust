@@ -87,7 +87,7 @@ pub unsafe extern "C" fn lua_error(message: *const libc::c_char) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lua_pushnumber(value: libc::c_double) {
+pub unsafe extern "C" fn lua_pushnumber(value: libc::c_float) {
     trace_lua_pushnumber(value);
 }
 

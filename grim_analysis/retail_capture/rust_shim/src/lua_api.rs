@@ -1,5 +1,5 @@
 use crate::logging::log_line;
-use libc::{c_char, c_double, c_int, c_void, size_t};
+use libc::{c_char, c_double, c_float, c_int, c_void, size_t};
 use std::{ffi::CStr, sync::OnceLock};
 
 /// Retail Lua 3.2 uses a `void (*)(void)` callback type for C functions.
@@ -26,7 +26,7 @@ type LuaGetNumberFn = unsafe extern "C" fn(LuaObject) -> c_double;
 type LuaGetStringFn = unsafe extern "C" fn(LuaObject) -> *const c_char;
 type LuaGetUserdataFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaTagFn = unsafe extern "C" fn(LuaObject) -> c_int;
-type LuaPushNumberFn = unsafe extern "C" fn(c_double);
+type LuaPushNumberFn = unsafe extern "C" fn(c_float);
 type LuaPushStringFn = unsafe extern "C" fn(*const c_char);
 type LuaPushLStringFn = unsafe extern "C" fn(*const c_char, size_t);
 type LuaPushNilFn = unsafe extern "C" fn();
@@ -255,7 +255,7 @@ pub(crate) fn call_real_lua_tag(object: LuaObject) -> Option<c_int> {
     unsafe { lua_tag_symbol().map(|symbol| symbol(object)) }
 }
 
-pub(crate) fn call_real_lua_pushnumber(value: c_double) -> bool {
+pub(crate) fn call_real_lua_pushnumber(value: c_float) -> bool {
     unsafe {
         match lua_pushnumber_symbol() {
             Some(symbol) => {
