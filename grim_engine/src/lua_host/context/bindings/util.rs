@@ -2,7 +2,7 @@ use std::ptr;
 
 use mlua::{IntoLua, Lua, Result as LuaResult, Table, Value};
 
-use crate::lua_host::telemetry::{log_bind_global, log_push_cclosure};
+use crate::lua_host::telemetry::{log_lua_setglobal, log_push_cclosure};
 
 pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     lua: &'lua Lua,
@@ -14,9 +14,9 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     if let Value::Function(ref func) = value {
         let ptr = func.to_pointer();
         log_push_cclosure("lua_pushCclosure", ptr);
-        log_bind_global(name, ptr);
+        log_lua_setglobal(name, ptr);
     } else {
-        log_bind_global(name, ptr::null());
+        log_lua_setglobal(name, ptr::null());
     }
     globals.set(name, value)
 }

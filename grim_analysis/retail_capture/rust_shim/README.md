@@ -39,28 +39,28 @@ without modifying the game's assets.
   fallback registrations; subsequent events touching that handle will echo it.
 - Caller origin is included on table creation/mutator/tag-method operations to
   tie writes and tag setup back to the native sites that performed them.
-- Pushes: `push_cclosure` (name, func, push_seq, upvalues, origin), `push_number`
-  (value), `push_nil`, `push_string`/`push_lstring` (len/preview), `push_usertag`
+- Pushes: `lua_pushcclosure` (name, func, push_seq, upvalues, origin), `lua_pushnumber`
+  (value), `lua_pushnil`, `lua_pushstring`/`lua_pushlstring` (len/preview), `lua_pushusertag`
   (id logged as a hex pointer, value fields include `value_type=userdata`,
   `tag`, plus caller origin fields when available).
-- Globals: `bind_global` (name, handle, handle_label, label, value fields,
-  origin) and `get_global` (name, handle, label, handle_label, count milestone).
-- Calls: `call_func` (handle, label, calls milestone, origin), `call`
-  (name), `dofile`/`dostring`/`dobuffer` (path/snippet/name + size).
-- Refs: `store_ref` (lock, ref, handle/handle_label/label), `fetch_ref` (ref,
+- Globals: `lua_setglobal` (name, handle, handle_label, label, value fields,
+  origin) and `lua_getglobal` (name, handle, label, handle_label, count milestone).
+- Calls: `lua_callfunction` (handle, label, calls milestone, origin), `lua_call`
+  (name), `lua_dofile`/`lua_dostring`/`lua_dobuffer` (path/snippet/name + size).
+- Refs: `lua_ref` (lock, ref, handle/handle_label/label), `lua_getref` (ref,
   handle/handle_label/label, note when missing).
-- Tag plumbing: `set_tag`, `copy_tagmethods` (to/from/result), `set_tagmethod`
-  (tag, event_name), `setfallback` (event, handle + value fields). Tagged values
+- Tag plumbing: `lua_settag`, `lua_copytagmethods` (to/from/result), `lua_settagmethod`
+  (tag, event_name), `lua_setfallback` (event, handle + value fields). Tagged values
   now carry `tag_label` when known. The shared schema still includes `tag_state`,
   but the retail shim no longer emits it.
 - Cutscenes (retail shim only): `cutscene` (movie/movie_label/phase/playing/elapsed_ms/polls/result),
   `cutscene_skip` (phase/movie/movie_label/elapsed_ms/polls), and `post_intro_room`
   (source/set/setup/after_movie) are typed in the shared schema and emitted
   only by the retail shim.
-- Other: `collect_garbage`, `lua_error` (message), `setglobal`/`rawset`/`rawget`
+- Other: `lua_collectgarbage`, `lua_error` (message), `lua_setglobal`/`lua_rawsetglobal`/`lua_rawgetglobal`
   variants, userdata/table/number string inspection via value fields. Mutators
-  like `create_table`, `set_table` / `rawset_table` / `raw_set_global`, and
-  tag plumbing (`copy_tagmethods`) include caller origin fields.
+  like `lua_createtable`, `lua_settable` / `lua_rawsettable` / `lua_rawsetglobal`, and
+  tag plumbing (`lua_copytagmethods`) include caller origin fields.
 
 ## How It Works
 - Build a `cdylib` that exports the same symbols as libLua (`lua_pushCclosure`
@@ -82,7 +82,7 @@ without modifying the game's assets.
   `dlsym(RTLD_NEXT, ...)`.
 - `lua_settagmethod` logs tag-method registrations to capture VM hook setup.
 - All shim lines use a consistent `event=` schema (e.g.
-  `event=bind_global name=X handle=0x...` with `label`/`origin` when available),
+  `event=lua_setglobal name=X handle=0x...` with `label`/`origin` when available),
   keeping `handle=0x...` stable so later calls/refetches match.
 - Logs include pid/tid/timestamps. Set `GRIM_SHIM_LOG=/path/to/file` to capture
   them to disk; otherwise they emit to stderr.
@@ -124,6 +124,6 @@ LD_PRELOAD=/path/to/libgrim_telemetry_shim.so ./GrimFandango.exe
 ```
 
 On startup you should see log lines that look like
-`[grim-rust-shim] engine=retail vm_id=lua32 seq=123 ts=456 event=push_cclosure name=lua_pushCclosure func=0xf7e31234`
+`[grim-rust-shim] engine=retail vm_id=lua32 seq=123 ts=456 event=lua_pushcclosure name=lua_pushCclosure func=0xf7e31234`
 with symbol/module fields included when discoverable. Each line is a direct
 observation of the engine pushing a C closure into Lua.

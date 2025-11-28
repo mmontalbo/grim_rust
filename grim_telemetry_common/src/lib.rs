@@ -405,7 +405,7 @@ pub struct UpvaluePreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LuaEvent {
-    #[serde(rename = "bind_global")]
+    #[serde(rename = "lua_setglobal")]
     BindGlobal {
         name: String,
         handle: String,
@@ -436,10 +436,11 @@ pub enum LuaEvent {
         #[serde(flatten)]
         origin: OriginFields,
     },
+    #[serde(rename = "lua_call")]
     Call {
         name: String,
     },
-    #[serde(rename = "call_func")]
+    #[serde(rename = "lua_callfunction")]
     CallFunc {
         handle: String,
         label: String,
@@ -452,9 +453,9 @@ pub enum LuaEvent {
         #[serde(flatten)]
         origin: OriginFields,
     },
-    #[serde(rename = "collect_garbage")]
+    #[serde(rename = "lua_collectgarbage")]
     CollectGarbage {},
-    #[serde(rename = "copy_tagmethods")]
+    #[serde(rename = "lua_copytagmethods")]
     CopyTagmethods {
         to: i32,
         from: i32,
@@ -467,7 +468,7 @@ pub enum LuaEvent {
         #[serde(flatten)]
         caller: OriginFields,
     },
-    #[serde(rename = "create_table")]
+    #[serde(rename = "lua_createtable")]
     CreateTable {
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -477,14 +478,16 @@ pub enum LuaEvent {
         #[serde(flatten)]
         caller: OriginFields,
     },
-    #[serde(rename = "dobuffer")]
+    #[serde(rename = "lua_dobuffer")]
     Dobuffer {
         name: String,
         size: usize,
     },
+    #[serde(rename = "lua_dofile")]
     Dofile {
         path: String,
     },
+    #[serde(rename = "lua_dostring")]
     Dostring {
         snippet: String,
     },
@@ -514,7 +517,7 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         polls: Option<u64>,
     },
-    #[serde(rename = "fetch_ref")]
+    #[serde(rename = "lua_getref")]
     FetchRef {
         #[serde(rename = "ref")]
         reference: i32,
@@ -529,7 +532,7 @@ pub enum LuaEvent {
         #[serde(flatten)]
         origin: OriginFields,
     },
-    #[serde(rename = "get_global")]
+    #[serde(rename = "lua_getglobal")]
     GetGlobal {
         name: String,
         handle: String,
@@ -538,7 +541,7 @@ pub enum LuaEvent {
         handle_label: Option<String>,
         count: u64,
     },
-    #[serde(rename = "get_table")]
+    #[serde(rename = "lua_gettable")]
     GetTable {
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -550,7 +553,7 @@ pub enum LuaEvent {
     LuaError {
         message: String,
     },
-    #[serde(rename = "push_cclosure")]
+    #[serde(rename = "lua_pushcclosure")]
     PushCclosure {
         name: String,
         func: String,
@@ -559,18 +562,18 @@ pub enum LuaEvent {
         #[serde(flatten)]
         origin: OriginFields,
     },
-    #[serde(rename = "push_lstring")]
+    #[serde(rename = "lua_pushlstring")]
     PushLstring {
         len: usize,
         preview: String,
     },
-    #[serde(rename = "push_nil")]
+    #[serde(rename = "lua_pushnil")]
     PushNil {},
-    #[serde(rename = "push_number")]
+    #[serde(rename = "lua_pushnumber")]
     PushNumber {
         value: String,
     },
-    #[serde(rename = "push_object")]
+    #[serde(rename = "lua_pushobject")]
     PushObject {
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -578,12 +581,12 @@ pub enum LuaEvent {
         #[serde(flatten)]
         values: ValueFields,
     },
-    #[serde(rename = "push_string")]
+    #[serde(rename = "lua_pushstring")]
     PushString {
         len: usize,
         preview: String,
     },
-    #[serde(rename = "push_usertag")]
+    #[serde(rename = "lua_pushusertag")]
     PushUsertag {
         #[serde(
             serialize_with = "serialize_pointer_hex",
@@ -595,7 +598,7 @@ pub enum LuaEvent {
         #[serde(flatten)]
         caller: OriginFields,
     },
-    #[serde(rename = "raw_get_global")]
+    #[serde(rename = "lua_rawgetglobal")]
     RawGetGlobal {
         name: String,
         handle: String,
@@ -606,7 +609,7 @@ pub enum LuaEvent {
         #[serde(flatten)]
         values: ValueFields,
     },
-    #[serde(rename = "raw_set_global")]
+    #[serde(rename = "lua_rawsetglobal")]
     RawSetGlobal {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -622,7 +625,7 @@ pub enum LuaEvent {
         #[serde(flatten)]
         caller: OriginFields,
     },
-    #[serde(rename = "rawget_table")]
+    #[serde(rename = "lua_rawgettable")]
     RawgetTable {
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -630,7 +633,7 @@ pub enum LuaEvent {
         #[serde(flatten)]
         values: ValueFields,
     },
-    #[serde(rename = "rawset_table")]
+    #[serde(rename = "lua_rawsettable")]
     RawsetTable {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -661,7 +664,7 @@ pub enum LuaEvent {
         #[serde(flatten)]
         caller: OriginFields,
     },
-    #[serde(rename = "set_fallback")]
+    #[serde(rename = "lua_setfallback")]
     SetFallback {
         fallback: String,
         handle: String,
@@ -674,14 +677,14 @@ pub enum LuaEvent {
         #[serde(flatten)]
         caller: OriginFields,
     },
-    #[serde(rename = "set_table")]
+    #[serde(rename = "lua_settable")]
     SetTable {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         #[serde(flatten)]
         caller: OriginFields,
     },
-    #[serde(rename = "set_tag")]
+    #[serde(rename = "lua_settag")]
     SetTag {
         tag: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -689,7 +692,7 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tag_label: Option<String>,
     },
-    #[serde(rename = "set_tagmethod")]
+    #[serde(rename = "lua_settagmethod")]
     SetTagmethod {
         tag: i32,
         event_name: String,
@@ -706,7 +709,7 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         after_movie: Option<String>,
     },
-    #[serde(rename = "store_ref")]
+    #[serde(rename = "lua_ref")]
     StoreRef {
         lock: i32,
         #[serde(rename = "ref")]
@@ -732,6 +735,7 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         methods: Option<String>,
     },
+    #[serde(rename = "lua_unref")]
     Unref {
         #[serde(rename = "ref")]
         reference: i32,
@@ -830,7 +834,7 @@ mod tests {
             caller: OriginFields::default(),
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=push_usertag"));
+        assert!(fields.iter().any(|f| f == "event=lua_pushusertag"));
         assert!(fields.iter().any(|f| f == "id=0x00000007"));
         assert!(fields.iter().any(|f| f == "tag=42"));
         assert!(fields.iter().any(|f| f == "value_type=userdata"));
@@ -861,6 +865,7 @@ mod tests {
             count: 2,
         };
         let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=lua_getglobal"));
         assert!(fields.iter().any(|f| f == "handle_label=global:foo"));
         assert!(fields.iter().any(|f| f == "label=global:foo"));
     }

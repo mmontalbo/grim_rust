@@ -35,7 +35,7 @@ pub(crate) fn log_push_cclosure(label: &str, func: *const c_void) {
     });
 }
 
-pub(crate) fn log_bind_global(name: &str, func: *const c_void) {
+pub(crate) fn log_lua_setglobal(name: &str, func: *const c_void) {
     log_event(LuaEvent::BindGlobal {
         name: name.to_string(),
         handle: format!("0x{:08x}", func as usize),
