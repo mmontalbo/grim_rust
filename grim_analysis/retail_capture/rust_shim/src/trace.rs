@@ -8,17 +8,18 @@ use crate::{
         call_real_lua_copytagmethods, call_real_lua_createtable, call_real_lua_dobuffer,
         call_real_lua_dofile, call_real_lua_dostring, call_real_lua_error,
         call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getnumber,
-        call_real_lua_getobjname, call_real_lua_getref, call_real_lua_getstring,
-        call_real_lua_gettable, call_real_lua_getuserdata, call_real_lua_iscfunction,
-        call_real_lua_isfunction, call_real_lua_isnumber, call_real_lua_isstring,
-        call_real_lua_istable, call_real_lua_isuserdata, call_real_lua_newtag,
-        call_real_lua_push_c_closure, call_real_lua_pushlstring, call_real_lua_pushnil,
-        call_real_lua_pushnumber, call_real_lua_pushobject, call_real_lua_pushstring,
-        call_real_lua_pushusertag, call_real_lua_rawgetglobal, call_real_lua_rawgettable,
-        call_real_lua_rawsetglobal, call_real_lua_rawsettable, call_real_lua_ref,
-        call_real_lua_setfallback, call_real_lua_setglobal, call_real_lua_settable,
-        call_real_lua_settag, call_real_lua_settagmethod, call_real_lua_tag, call_real_lua_unref,
-        LuaCFunction, LuaObject,
+        call_real_lua_getobjname, call_real_lua_getparam, call_real_lua_getref,
+        call_real_lua_getstring, call_real_lua_gettable, call_real_lua_getuserdata,
+        call_real_lua_iscfunction, call_real_lua_isfunction, call_real_lua_isnumber,
+        call_real_lua_isstring, call_real_lua_istable, call_real_lua_isuserdata,
+        call_real_lua_newtag, call_real_lua_push_c_closure, call_real_lua_pushlstring,
+        call_real_lua_pushnil, call_real_lua_pushnumber, call_real_lua_pushobject,
+        call_real_lua_pushstring, call_real_lua_pushusertag, call_real_lua_pushvalue,
+        call_real_lua_rawgetglobal, call_real_lua_rawgettable, call_real_lua_rawsetglobal,
+        call_real_lua_rawsettable, call_real_lua_ref, call_real_lua_setfallback,
+        call_real_lua_setglobal, call_real_lua_settable, call_real_lua_settag,
+        call_real_lua_settagmethod, call_real_lua_tag, call_real_lua_unref, LuaCFunction,
+        LuaObject,
     },
     symbol_map::lookup_symbol_from_map,
     telemetry,
@@ -43,8 +44,7 @@ static GLOBAL_ACCESS_TRACKER: OnceLock<Mutex<GlobalAccessTracker>> = OnceLock::n
 static TAG_LABELS: OnceLock<Mutex<TagLabelTracker>> = OnceLock::new();
 static HANDLE_LABELS: OnceLock<Mutex<HandleLabelTracker>> = OnceLock::new();
 static PUSH_EVENT_TRACKER: OnceLock<Mutex<PushEventTracker>> = OnceLock::new();
-static REGISTERED_GLOBAL_CANDIDATES: OnceLock<Mutex<RegisteredGlobalTracker>> =
-    OnceLock::new();
+static REGISTERED_GLOBAL_CANDIDATES: OnceLock<Mutex<RegisteredGlobalTracker>> = OnceLock::new();
 
 extern "C" {
     fn backtrace(buffer: *mut *mut c_void, size: c_int) -> c_int;
@@ -78,6 +78,17 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
         origin: origin_fields(origin.as_ref()),
     };
     let closure_log_seq = log_event_with_seq(event);
+    record_push_preview(
+        closure_log_seq,
+        UpvaluePreview {
+            kind: ValueType::Cfunction,
+            value: Some(format!("0x{func_addr:08x}")),
+            value_len: None,
+            preview: None,
+            tag: None,
+        },
+        None,
+    );
     if let Some(previews) = upvalue_snapshot {
         let mut seqs = Vec::with_capacity(previews.len());
         let mut previews_only = Vec::with_capacity(previews.len());
@@ -86,12 +97,17 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
             previews_only.push(item.preview);
         }
         let seq_display = seq_range_display(&seqs, Some(closure_log_seq));
+        let seq_bounds = if let Some(display) = seq_display.as_ref() {
+            parse_seq_range(display)
+        } else {
+            None
+        };
         remember_registered_global_candidate(
             func_addr,
             sequence,
             upvalues,
             previews_only,
-            seq_display,
+            seq_bounds,
             origin.clone(),
         );
     }
@@ -117,6 +133,7 @@ pub(crate) unsafe fn trace_lua_pushnumber(value: f32) {
             preview: None,
             tag: None,
         },
+        None,
     );
     if !call_real_lua_pushnumber(value) {
         log_line("lua_pushnumber symbol missing; skipping push");
@@ -135,6 +152,7 @@ pub(crate) unsafe fn trace_lua_pushnil() {
             preview: None,
             tag: None,
         },
+        None,
     );
     if !call_real_lua_pushnil() {
         log_line("lua_pushnil symbol missing; skipping push");
@@ -156,6 +174,7 @@ pub(crate) unsafe fn trace_lua_pushstring(value: *const c_char) {
             preview: Some(truncate_for_log(&text, 80)),
             tag: None,
         },
+        None,
     );
     if !call_real_lua_pushstring(value) {
         log_line("lua_pushstring symbol missing; skipping push");
@@ -182,6 +201,7 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
             preview: Some(truncate_for_log(&text, 80)),
             tag: None,
         },
+        None,
     );
     if !call_real_lua_pushlstring(value, len) {
         log_line("lua_pushlstring symbol missing; skipping push");
@@ -204,6 +224,7 @@ pub(crate) unsafe fn trace_lua_pushusertag(id: c_int, tag: c_int) {
             preview: None,
             tag: Some(tag),
         },
+        None,
     );
     if !call_real_lua_pushusertag(id, tag) {
         log_line("lua_pushusertag symbol missing; skipping push");
@@ -225,10 +246,47 @@ pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
         .as_ref()
         .map(|value| upvalue_preview_from_details(value))
     {
-        record_push_preview(log_seq, preview);
+        record_push_preview(log_seq, preview, Some(object));
     }
     if !call_real_lua_pushobject(object) {
         log_line("lua_pushobject symbol missing; skipping push");
+    }
+}
+
+pub(crate) unsafe fn trace_lua_pushvalue(index: c_int) {
+    let source = call_real_lua_getparam(index);
+    let mut values = ValueFields::default();
+    let mut preview = None;
+    let mut note = None;
+    if let Some(handle) = source {
+        if let Some(details) = describe_lua_value(handle) {
+            values = value_fields_from_details(&details);
+            preview = Some(upvalue_preview_from_details(&details));
+        } else {
+            note = Some("value_unknown".to_string());
+        }
+    } else {
+        note = Some(if index < 0 {
+            "source_missing_or_out_of_range".to_string()
+        } else {
+            "source_missing".to_string()
+        });
+    }
+    let log_seq = log_event_with_seq(LuaEvent::PushValue {
+        index,
+        note: note.clone(),
+        values: values.clone(),
+    });
+    let effective_preview = preview.unwrap_or(UpvaluePreview {
+        kind: ValueType::Unknown,
+        value: None,
+        value_len: None,
+        preview: None,
+        tag: None,
+    });
+    record_push_preview(log_seq, effective_preview, source);
+    if !call_real_lua_pushvalue(index) {
+        log_line("lua_pushvalue symbol missing; skipping push");
     }
 }
 
@@ -256,25 +314,49 @@ pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
 }
 
 pub(crate) unsafe fn trace_lua_settable() {
-    record_non_push_event();
+    let pushes = take_recent_pushes(3);
+    let table_handle = call_real_lua_getparam(-3);
     let caller = caller_origin_fields();
-    let note = if call_real_lua_settable() {
+    let succeeded = call_real_lua_settable();
+    let note = if succeeded {
         None
     } else {
         Some("lua_settable_missing".to_string())
     };
-    log_event(LuaEvent::SetTable { note, caller });
+    let raw_seq = log_event_with_seq(LuaEvent::SetTable {
+        note: note.clone(),
+        caller: caller.clone(),
+    });
+    if succeeded {
+        emit_set_table_entry(table_handle, pushes, raw_seq, caller, None);
+    }
+    record_non_push_event();
 }
 
 pub(crate) unsafe fn trace_lua_rawsettable() {
-    record_non_push_event();
+    let pushes = take_recent_pushes(3);
+    let table_handle = call_real_lua_getparam(-3);
     let caller = caller_origin_fields();
-    let note = if call_real_lua_rawsettable() {
+    let succeeded = call_real_lua_rawsettable();
+    let note = if succeeded {
         None
     } else {
         Some("lua_rawsettable_missing".to_string())
     };
-    log_event(LuaEvent::RawsetTable { note, caller });
+    let raw_seq = log_event_with_seq(LuaEvent::RawsetTable {
+        note: note.clone(),
+        caller: caller.clone(),
+    });
+    if succeeded {
+        emit_set_table_entry(
+            table_handle,
+            pushes,
+            raw_seq,
+            caller,
+            Some("via_rawsettable".to_string()),
+        );
+    }
+    record_non_push_event();
 }
 
 pub(crate) unsafe fn trace_lua_gettable() -> LuaObject {
@@ -513,7 +595,7 @@ pub(crate) unsafe fn trace_lua_call(name: *const c_char) -> c_int {
 }
 
 pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
-    record_non_push_event();
+    let last_push_seq = take_last_push_seq();
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
 
     if call_real_lua_setglobal(name) {
@@ -537,32 +619,57 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                 .as_ref()
                 .map(value_fields_from_details)
                 .unwrap_or_default();
-            if let Some(func_addr) = func_ptr.map(|func| func as *const c_void as usize) {
-                if let Some(mut candidate) = take_registered_global_candidate(func_addr) {
-                    let merged_origin = candidate.origin.take().or(origin.clone());
-                    emit_registered_global(
-                        &label,
-                        handle,
-                        handle_label,
-                        func_addr,
-                        candidate.push_seq,
-                        candidate.upvalues,
-                        candidate.upvalue_previews,
-                        values,
-                        merged_origin,
-                        candidate.seq_display,
-                    );
-                    return;
-                }
-            }
-            log_event(LuaEvent::BindGlobal {
+            let is_closure = matches!(
+                values.value_type,
+                Some(ValueType::Cfunction | ValueType::Function)
+            );
+
+            let raw_seq = log_event_with_seq(LuaEvent::BindGlobal {
                 name: label.clone(),
                 handle: format!("0x{handle:08x}"),
                 handle_label: Some(handle_label.clone()),
-                label: Some(handle_label),
-                values,
+                label: Some(handle_label.clone()),
+                values: values.clone(),
                 origin: origin_fields(origin.as_ref()),
             });
+
+            if is_closure {
+                if let Some(func_addr) = func_ptr.map(|func| func as *const c_void as usize) {
+                    if let Some(mut candidate) = take_registered_global_candidate(func_addr) {
+                        let merged_origin = candidate.origin.take().or(origin.clone());
+                        emit_registered_global(
+                            &label,
+                            handle,
+                            handle_label.clone(),
+                            func_addr,
+                            candidate.push_seq,
+                            candidate.upvalues,
+                            candidate.upvalue_previews,
+                            values,
+                            merged_origin,
+                            candidate.seq_range,
+                            raw_seq,
+                        );
+                        return;
+                    }
+                }
+            }
+
+            emit_registered_constant(
+                &label,
+                handle,
+                handle_label,
+                values,
+                origin,
+                seq_range_display(
+                    last_push_seq
+                        .as_ref()
+                        .map(|seq| vec![*seq])
+                        .unwrap_or_default()
+                        .as_slice(),
+                    Some(raw_seq),
+                ),
+            );
         }
     }
 }
@@ -688,18 +795,35 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
 }
 
 pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
-    record_non_push_event();
     let event_label = cstr_opt(event).unwrap_or_else(|| "<null>".to_string());
+    let top_handle = call_real_lua_getparam(-1);
+    let mut values = ValueFields::default();
+    let mut handle_field = None;
+    let mut handle_label = None;
+    let mut origin = None;
+    if let Some(handle) = top_handle {
+        handle_field = Some(format!("0x{handle:08x}"));
+        handle_label = handle_label_for(handle);
+        if let Some(details) = describe_lua_value(handle) {
+            values = value_fields_from_details(&details);
+            if let Some(addr) = call_real_lua_getcfunction(handle) {
+                origin = Some(ClosureOrigin::new(addr as *const c_void));
+            }
+        }
+    }
     if call_real_lua_settagmethod(tag, event) {
         remember_tag_label_if_missing(tag, event_label.clone());
         log_event(LuaEvent::SetTagmethod {
             tag,
             event_name: event_label.clone(),
             tag_label: tag_label_for(tag),
+            handle: handle_field.clone(),
+            handle_label: handle_label.clone(),
+            values: values.clone(),
+            origin: origin_fields(origin.as_ref()),
         });
     }
 }
-
 pub(crate) unsafe fn trace_lua_collectgarbage() {
     record_non_push_event();
     if call_real_lua_collectgarbage() {
@@ -751,9 +875,9 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
     result
 }
 
-fn record_push_preview(log_seq: u64, preview: UpvaluePreview) {
+fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
     if let Ok(mut tracker) = push_event_tracker().lock() {
-        tracker.record_push(log_seq, preview);
+        tracker.record_push(log_seq, preview, handle);
     } else {
         log_line("push event tracker mutex poisoned; skipping push capture");
     }
@@ -786,6 +910,88 @@ fn seq_range_display(upvalue_seqs: &[u64], closure_seq: Option<u64>) -> Option<S
     }
 }
 
+fn parse_seq_range(text: &str) -> Option<(u64, u64)> {
+    if let Some((min, max)) = text.split_once('-') {
+        let seq_min = min.parse::<u64>().ok()?;
+        let seq_max = max.parse::<u64>().ok()?;
+        Some((seq_min, seq_max))
+    } else {
+        let value = text.parse::<u64>().ok()?;
+        Some((value, value))
+    }
+}
+
+fn take_recent_pushes(count: usize) -> Option<Vec<TrackedPush>> {
+    match push_event_tracker().lock() {
+        Ok(mut tracker) => {
+            let pushes = tracker.snapshot_recent(count);
+            tracker.clear();
+            pushes
+        }
+        Err(_) => {
+            log_line("push event tracker mutex poisoned; skipping push capture");
+            None
+        }
+    }
+}
+
+fn emit_set_table_entry(
+    table_handle: Option<LuaObject>,
+    pushes: Option<Vec<TrackedPush>>,
+    raw_seq: u64,
+    caller: OriginFields,
+    note: Option<String>,
+) {
+    let pushes = match pushes {
+        Some(pushes) if pushes.len() >= 2 => pushes,
+        _ => return,
+    };
+    let handle = match table_handle
+        .or_else(|| table_handle_from_pushes(&pushes))
+    {
+        Some(handle) => handle,
+        None => return,
+    };
+    let table_push_seq = pushes
+        .iter()
+        .rev()
+        .find(|push| push.handle == Some(handle))
+        .map(|push| push.log_seq);
+    let key_push = &pushes[pushes.len() - 2];
+    let value_push = pushes.last().unwrap();
+    let mut seqs = vec![key_push.log_seq, value_push.log_seq];
+    if let Some(seq) = table_push_seq {
+        seqs.push(seq);
+    }
+    let seq_display = seq_range_display(&seqs, Some(raw_seq));
+    let seq_range = seq_display
+        .as_ref()
+        .and_then(|display| parse_seq_range(display));
+    if let Some(display) = seq_display {
+        log_event_with_seq_display(
+            LuaEvent::SetTableEntry {
+                table_handle: format!("0x{handle:08x}"),
+                table_handle_label: handle_label_for(handle),
+                key: key_push.preview.clone(),
+                value: value_push.preview.clone(),
+                note,
+                seq_min: seq_range.map(|(min, _)| min),
+                seq_max: seq_range.map(|(_, max)| max),
+                caller,
+            },
+            display,
+        );
+    }
+}
+
+fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
+    pushes
+        .iter()
+        .rev()
+        .find(|push| matches!(push.preview.kind, ValueType::Table) && push.handle.is_some())
+        .and_then(|push| push.handle)
+}
+
 fn emit_registered_global(
     name: &str,
     handle: LuaObject,
@@ -796,8 +1002,18 @@ fn emit_registered_global(
     upvalue_previews: Vec<UpvaluePreview>,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
-    seq_display: Option<String>,
+    seq_range: Option<(u64, u64)>,
+    raw_setglobal_seq: u64,
 ) {
+    let (seq_min, seq_max) = match seq_range {
+        Some((min, max)) => (min.min(raw_setglobal_seq), max.max(raw_setglobal_seq)),
+        None => (raw_setglobal_seq, raw_setglobal_seq),
+    };
+    let seq_display = if seq_min == seq_max {
+        format!("{seq_min:06}")
+    } else {
+        format!("{:06}-{:06}", seq_min, seq_max)
+    };
     let event = LuaEvent::RegisteredGlobal {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
@@ -810,7 +1026,30 @@ fn emit_registered_global(
         values,
         origin: origin_fields(origin.as_ref()),
     };
-    log_event_with_seq_display(event, seq_display.unwrap_or_else(|| "composite".to_string()));
+    log_event_with_seq_display(event, seq_display);
+}
+
+fn emit_registered_constant(
+    name: &str,
+    handle: LuaObject,
+    handle_label: String,
+    values: ValueFields,
+    origin: Option<ClosureOrigin>,
+    seq_display: Option<String>,
+) {
+    let constant_event = LuaEvent::RegisteredConstant {
+        name: name.to_string(),
+        handle: format!("0x{handle:08x}"),
+        handle_label: Some(handle_label.clone()),
+        label: Some(handle_label),
+        values,
+        origin: origin_fields(origin.as_ref()),
+    };
+    if let Some(display) = seq_display {
+        log_event_with_seq_display(constant_event, display);
+    } else {
+        log_event(constant_event);
+    }
 }
 
 fn snapshot_upvalue_previews(upvalues: c_int) -> Option<Vec<TrackedPush>> {
@@ -831,12 +1070,28 @@ fn snapshot_upvalue_previews(upvalues: c_int) -> Option<Vec<TrackedPush>> {
     }
 }
 
+fn take_last_push_seq() -> Option<u64> {
+    match push_event_tracker().lock() {
+        Ok(mut tracker) => {
+            let seq = tracker
+                .snapshot_recent(1)
+                .and_then(|pushes| pushes.into_iter().last().map(|p| p.log_seq));
+            tracker.clear();
+            seq
+        }
+        Err(_) => {
+            log_line("push event tracker mutex poisoned; skipping push capture");
+            None
+        }
+    }
+}
+
 fn remember_registered_global_candidate(
     func_addr: usize,
     push_seq: u64,
     upvalues: c_int,
     previews: Vec<UpvaluePreview>,
-    seq_display: Option<String>,
+    seq_range: Option<(u64, u64)>,
     origin: Option<ClosureOrigin>,
 ) {
     match registered_global_tracker().lock() {
@@ -846,7 +1101,7 @@ fn remember_registered_global_candidate(
                 push_seq,
                 upvalues,
                 upvalue_previews: previews,
-                seq_display,
+                seq_range,
                 origin,
             });
         }
@@ -865,7 +1120,6 @@ fn take_registered_global_candidate(func_addr: usize) -> Option<PendingRegistere
         }
     }
 }
-
 fn push_event_tracker() -> &'static Mutex<PushEventTracker> {
     PUSH_EVENT_TRACKER.get_or_init(|| Mutex::new(PushEventTracker::new(PUSH_RING_CAPACITY)))
 }
@@ -1216,11 +1470,12 @@ impl PushEventTracker {
         }
     }
 
-    fn record_push(&mut self, log_seq: u64, preview: UpvaluePreview) {
+    fn record_push(&mut self, log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
         if self.pushes.len() == self.capacity {
             self.pushes.pop_front();
         }
-        self.pushes.push_back(TrackedPush { log_seq, preview });
+        self.pushes
+            .push_back(TrackedPush { log_seq, preview, handle });
     }
 
     fn record_non_push(&mut self) {
@@ -1247,6 +1502,7 @@ impl PushEventTracker {
 struct TrackedPush {
     log_seq: u64,
     preview: UpvaluePreview,
+    handle: Option<LuaObject>,
 }
 
 struct PendingRegisteredGlobal {
@@ -1254,7 +1510,7 @@ struct PendingRegisteredGlobal {
     push_seq: u64,
     upvalues: c_int,
     upvalue_previews: Vec<UpvaluePreview>,
-    seq_display: Option<String>,
+    seq_range: Option<(u64, u64)>,
     origin: Option<ClosureOrigin>,
 }
 

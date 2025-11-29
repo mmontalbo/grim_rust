@@ -418,6 +418,19 @@ pub enum LuaEvent {
         #[serde(flatten)]
         origin: OriginFields,
     },
+    #[serde(rename = "registered_constant")]
+    RegisteredConstant {
+        name: String,
+        handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
     #[serde(rename = "registered_global")]
     RegisteredGlobal {
         name: String,
@@ -437,9 +450,7 @@ pub enum LuaEvent {
         origin: OriginFields,
     },
     #[serde(rename = "lua_call")]
-    Call {
-        name: String,
-    },
+    Call { name: String },
     #[serde(rename = "lua_callfunction")]
     CallFunc {
         handle: String,
@@ -479,18 +490,11 @@ pub enum LuaEvent {
         caller: OriginFields,
     },
     #[serde(rename = "lua_dobuffer")]
-    Dobuffer {
-        name: String,
-        size: usize,
-    },
+    Dobuffer { name: String, size: usize },
     #[serde(rename = "lua_dofile")]
-    Dofile {
-        path: String,
-    },
+    Dofile { path: String },
     #[serde(rename = "lua_dostring")]
-    Dostring {
-        snippet: String,
-    },
+    Dostring { snippet: String },
     #[serde(rename = "cutscene")]
     Cutscene {
         movie: String,
@@ -550,9 +554,7 @@ pub enum LuaEvent {
         values: ValueFields,
     },
     #[serde(rename = "lua_error")]
-    LuaError {
-        message: String,
-    },
+    LuaError { message: String },
     #[serde(rename = "lua_pushcclosure")]
     PushCclosure {
         name: String,
@@ -563,16 +565,11 @@ pub enum LuaEvent {
         origin: OriginFields,
     },
     #[serde(rename = "lua_pushlstring")]
-    PushLstring {
-        len: usize,
-        preview: String,
-    },
+    PushLstring { len: usize, preview: String },
     #[serde(rename = "lua_pushnil")]
     PushNil {},
     #[serde(rename = "lua_pushnumber")]
-    PushNumber {
-        value: String,
-    },
+    PushNumber { value: String },
     #[serde(rename = "lua_pushobject")]
     PushObject {
         handle: String,
@@ -582,9 +579,14 @@ pub enum LuaEvent {
         values: ValueFields,
     },
     #[serde(rename = "lua_pushstring")]
-    PushString {
-        len: usize,
-        preview: String,
+    PushString { len: usize, preview: String },
+    #[serde(rename = "lua_pushvalue")]
+    PushValue {
+        index: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
     },
     #[serde(rename = "lua_pushusertag")]
     PushUsertag {
@@ -637,6 +639,22 @@ pub enum LuaEvent {
     RawsetTable {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(flatten)]
+        caller: OriginFields,
+    },
+    #[serde(rename = "set_table_entry")]
+    SetTableEntry {
+        table_handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        table_handle_label: Option<String>,
+        key: UpvaluePreview,
+        value: UpvaluePreview,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seq_min: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seq_max: Option<u64>,
         #[serde(flatten)]
         caller: OriginFields,
     },
@@ -698,6 +716,14 @@ pub enum LuaEvent {
         event_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         tag_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
     },
     #[serde(rename = "post_intro_room")]
     PostIntroRoom {
@@ -903,5 +929,70 @@ mod tests {
         assert!(fields
             .iter()
             .any(|f| f.starts_with("upvalue_previews=[{\"kind\":\"number\"")));
+    }
+
+    #[test]
+    fn registered_constant_serializes_value_fields() {
+        let event = LuaEvent::RegisteredConstant {
+            name: "foo".to_string(),
+            handle: "0x00000001".to_string(),
+            handle_label: Some("global:foo".to_string()),
+            label: Some("global:foo".to_string()),
+            values: ValueFields {
+                value_type: Some(ValueType::String),
+                value_len: Some(3),
+                value_preview: Some("bar".to_string()),
+                ..Default::default()
+            },
+            origin: OriginFields::default(),
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=registered_constant"));
+        assert!(fields.iter().any(|f| f == "value_type=string"));
+        assert!(fields.iter().any(|f| f == "value_len=3"));
+        assert!(fields.iter().any(|f| f == "value_preview=bar"));
+    }
+
+    #[test]
+    fn set_table_entry_serializes_with_key_and_value() {
+        let event = LuaEvent::SetTableEntry {
+            table_handle: "0x0000000a".to_string(),
+            table_handle_label: Some("table:example".to_string()),
+            key: UpvaluePreview {
+                kind: ValueType::String,
+                value: None,
+                value_len: Some(3),
+                preview: Some("key".to_string()),
+                tag: None,
+            },
+            value: UpvaluePreview {
+                kind: ValueType::Number,
+                value: Some("42".to_string()),
+                value_len: None,
+                preview: None,
+                tag: None,
+            },
+            note: Some("via_rawsettable".to_string()),
+            seq_min: Some(3),
+            seq_max: Some(7),
+            caller: OriginFields {
+                origin: Some("0x0000cafe".to_string()),
+                ..Default::default()
+            },
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=set_table_entry"));
+        assert!(fields.iter().any(|f| f == "table_handle=0x0000000a"));
+        assert!(fields.iter().any(|f| f == "table_handle_label=table:example"));
+        assert!(fields
+            .iter()
+            .any(|f| f.starts_with("key={\"kind\":\"string\"")));
+        assert!(fields
+            .iter()
+            .any(|f| f.starts_with("value={\"kind\":\"number\"")));
+        assert!(fields.iter().any(|f| f == "seq_min=3"));
+        assert!(fields.iter().any(|f| f == "seq_max=7"));
+        assert!(fields.iter().any(|f| f == "origin=0x0000cafe"));
+        assert!(fields.iter().any(|f| f == "note=via_rawsettable"));
     }
 }
