@@ -45,7 +45,15 @@ def _load_workspace_members() -> set[str]:
     return members
 
 
-ALLOWED_COMPONENTS = _load_workspace_members().union({"tools", "docs"})
+def _expand_components(members: set[str]) -> set[str]:
+    components = set(members)
+    for member in members:
+        components.update(member.split("/"))
+    components.update({"tools", "docs"})
+    return components
+
+
+ALLOWED_COMPONENTS = _expand_components(_load_workspace_members())
 
 
 def validate_component(value: str) -> str:
