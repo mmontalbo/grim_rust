@@ -987,8 +987,8 @@ fn emit_set_table_entry(
 fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
     pushes
         .iter()
-        .rev()
-        .find(|push| matches!(push.preview.kind, ValueType::Table) && push.handle.is_some())
+        .filter(|push| matches!(push.preview.kind, ValueType::Table) && push.handle.is_some())
+        .min_by_key(|push| push.log_seq)
         .and_then(|push| push.handle)
 }
 
