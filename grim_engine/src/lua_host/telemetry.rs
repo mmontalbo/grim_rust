@@ -4,7 +4,7 @@ use std::{
 };
 
 use grim_telemetry_common::{
-    EventBuilder, LuaEvent, OriginFields, TelemetryConfig, TelemetryLogger, ValueFields,
+    EventBuilder, LuaEvent, OriginFields, TelemetryConfig, TelemetryLogger, ValueFields, ValueType,
 };
 
 const ENGINE_ID: &str = "grim_engine";
@@ -35,15 +35,29 @@ pub(crate) fn log_push_cclosure(label: &str, func: *const c_void) {
     });
 }
 
-pub(crate) fn log_lua_setglobal(name: &str, func: *const c_void) {
+pub(crate) fn log_lua_setglobal(name: &str, func: *const c_void, values: ValueFields) {
     log_event(LuaEvent::BindGlobal {
         name: name.to_string(),
         handle: format!("0x{:08x}", func as usize),
         handle_label: None,
         label: None,
-        values: ValueFields::default(),
+        values: values.clone(),
         origin: OriginFields::default(),
     });
+
+    if !matches!(
+        values.value_type,
+        Some(ValueType::Cfunction | ValueType::Function)
+    ) {
+        log_event(LuaEvent::RegisteredConstant {
+            name: name.to_string(),
+            handle: format!("0x{:08x}", func as usize),
+            handle_label: None,
+            label: None,
+            values,
+            origin: OriginFields::default(),
+        });
+    };
 }
 
 pub(crate) fn log_store_ref(lock: i32, reference: i32, label: Option<String>) {
@@ -63,5 +77,9 @@ pub(crate) fn log_set_tagmethod(tag: i64, event: &str) {
         tag: tag as i32,
         event_name: event.to_string(),
         tag_label: None,
+        handle: None,
+        handle_label: None,
+        values: ValueFields::default(),
+        origin: OriginFields::default(),
     });
 }
