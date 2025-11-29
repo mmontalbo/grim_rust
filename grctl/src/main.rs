@@ -143,6 +143,9 @@ struct LogArgs {
     /// Continuously stream log updates after the initial tail.
     #[arg(long, short = 'f')]
     follow: bool,
+    /// Open an interactive TUI viewer instead of printing to stdout.
+    #[arg(long)]
+    tui: bool,
     /// Select which run_id segment to display (defaults to latest run).
     #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
     run: RunSelection,
@@ -799,6 +802,7 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<LaunchInfo> {
         let log_args = LogArgs {
             tail: 200,
             follow: true,
+            tui: false,
             run: RunSelection::Id(run_id.clone()),
         };
         show_logs(paths, ComponentKind::Engine, &log_args)?;
@@ -872,6 +876,7 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
         let log_args = LogArgs {
             tail: 200,
             follow: true,
+            tui: false,
             run: RunSelection::Id(run_id.clone()),
         };
         show_logs(paths, ComponentKind::Retail, &log_args)?;
@@ -1646,6 +1651,16 @@ fn show_logs(paths: &Paths, component: ComponentKind, args: &LogArgs) -> Result<
     let (run_id, log_path) = resolve_run_path(paths, component, &args.run)?;
     println!("# {} (run {})", log_path.display(), run_id);
 
+    if args.tui {
+        if args.follow {
+            bail!("--tui currently does not support --follow (live tail)");
+        }
+        if args.tail > 0 {
+            println!("[grctl] --tail is ignored when --tui is set (viewer reads full log)");
+        }
+        return launch_trace_tui(paths, &log_path);
+    }
+
     if args.follow {
         follow_logs(&log_path, args.tail)
     } else {
@@ -1655,6 +1670,26 @@ fn show_logs(paths: &Paths, component: ComponentKind, args: &LogArgs) -> Result<
         }
         Ok(())
     }
+}
+
+fn launch_trace_tui(paths: &Paths, log_path: &Path) -> Result<()> {
+    println!("[grctl] launching trace_tui for {}", log_path.display());
+    let status = Command::new("cargo")
+        .arg("run")
+        .arg("-p")
+        .arg("trace_tui")
+        .arg("--")
+        .arg(log_path)
+        .current_dir(&paths.repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("spawning trace_tui")?;
+    if !status.success() {
+        bail!("trace_tui exited with status {}", status);
+    }
+    Ok(())
 }
 
 fn resolve_run_path(
