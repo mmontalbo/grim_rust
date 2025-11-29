@@ -45,6 +45,9 @@ without modifying the game's assets.
   `tag`, plus caller origin fields when available).
 - Globals: `lua_setglobal` (name, handle, handle_label, label, value fields,
   origin) and `lua_getglobal` (name, handle, label, handle_label, count milestone).
+- Composites: `registered_global` (name/handle/labels/push_seq/func/upvalues/upvalue_previews
+  plus value/origin fields, seq range display spans pushes+bind) for closure binds with a matching
+  push candidate.
 - Calls: `lua_callfunction` (handle, label, calls milestone, origin), `lua_call`
   (name), `lua_dofile`/`lua_dostring`/`lua_dobuffer` (path/snippet/name + size).
 - Refs: `lua_ref` (lock, ref, handle/handle_label/label), `lua_getref` (ref,

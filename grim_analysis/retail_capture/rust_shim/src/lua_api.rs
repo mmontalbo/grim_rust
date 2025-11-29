@@ -30,6 +30,7 @@ type LuaPushNumberFn = unsafe extern "C" fn(c_float);
 type LuaPushStringFn = unsafe extern "C" fn(*const c_char);
 type LuaPushLStringFn = unsafe extern "C" fn(*const c_char, size_t);
 type LuaPushNilFn = unsafe extern "C" fn();
+type LuaPushValueFn = unsafe extern "C" fn(c_int);
 type LuaPushUsertagFn = unsafe extern "C" fn(c_int, c_int);
 type LuaPushObjectFn = unsafe extern "C" fn(LuaObject);
 type LuaCreateTableFn = unsafe extern "C" fn() -> LuaObject;
@@ -75,6 +76,7 @@ static LUA_PUSHNUMBER: OnceLock<Option<LuaPushNumberFn>> = OnceLock::new();
 static LUA_PUSHSTRING: OnceLock<Option<LuaPushStringFn>> = OnceLock::new();
 static LUA_PUSHLSTRING: OnceLock<Option<LuaPushLStringFn>> = OnceLock::new();
 static LUA_PUSHNIL: OnceLock<Option<LuaPushNilFn>> = OnceLock::new();
+static LUA_PUSHVALUE: OnceLock<Option<LuaPushValueFn>> = OnceLock::new();
 static LUA_PUSHUSERTAG: OnceLock<Option<LuaPushUsertagFn>> = OnceLock::new();
 static LUA_PUSHOBJECT: OnceLock<Option<LuaPushObjectFn>> = OnceLock::new();
 static LUA_CREATETABLE: OnceLock<Option<LuaCreateTableFn>> = OnceLock::new();
@@ -309,6 +311,21 @@ pub(crate) fn call_real_lua_pushnil() -> bool {
             }
             None => {
                 log_line("lua_pushnil symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_pushvalue(index: c_int) -> bool {
+    unsafe {
+        match lua_pushvalue_symbol() {
+            Some(symbol) => {
+                symbol(index);
+                true
+            }
+            None => {
+                log_line("lua_pushvalue symbol missing; skipping push");
                 false
             }
         }
@@ -771,6 +788,16 @@ fn lua_pushnil_symbol() -> Option<LuaPushNilFn> {
             label: "lua_pushnil",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushNilFn>(ptr))
+    })
+}
+
+fn lua_pushvalue_symbol() -> Option<LuaPushValueFn> {
+    *LUA_PUSHVALUE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushvalue\0",
+            label: "lua_pushvalue",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushValueFn>(ptr))
     })
 }
 
