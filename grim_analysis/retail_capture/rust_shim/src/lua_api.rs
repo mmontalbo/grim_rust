@@ -229,9 +229,9 @@ pub(crate) fn call_real_lua_isuserdata(object: LuaObject) -> bool {
 
 pub(crate) fn call_real_lua_getnumber(object: LuaObject) -> Option<c_double> {
     unsafe {
-        lua_getnumber_symbol().and_then(|symbol| {
+        lua_getnumber_symbol().map(|symbol| {
             let value = symbol(object);
-            Some(value)
+            value
         })
     }
 }

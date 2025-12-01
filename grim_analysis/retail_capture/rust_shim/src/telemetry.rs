@@ -272,7 +272,7 @@ impl TelemetryHooks {
         let movie = self
             .active_movie_name
             .as_deref()
-            .or_else(|| self.active_movie_label.as_deref())
+            .or(self.active_movie_label.as_deref())
             .unwrap_or("<unknown>")
             .to_string();
         let movie_label = self.active_movie_label.clone();
@@ -304,7 +304,7 @@ impl TelemetryHooks {
             movie: self
                 .active_movie_name
                 .as_deref()
-                .or_else(|| self.active_movie_label.as_deref())
+                .or(self.active_movie_label.as_deref())
                 .map(str::to_string),
             movie_label: self.active_movie_label.clone(),
             elapsed_ms: self.elapsed_ms(),
@@ -318,12 +318,12 @@ impl TelemetryHooks {
             movie: self
                 .active_movie_name
                 .as_deref()
-                .or_else(|| self.last_finished_movie_label.as_deref())
+                .or(self.last_finished_movie_label.as_deref())
                 .map(str::to_string),
             movie_label: self
                 .active_movie_label
                 .as_deref()
-                .or_else(|| self.last_finished_movie_label.as_deref())
+                .or(self.last_finished_movie_label.as_deref())
                 .map(str::to_string),
             elapsed_ms: self.elapsed_ms(),
             polls: Some(self.poll_count),
@@ -362,20 +362,11 @@ impl TelemetryHooks {
     }
 }
 
+#[derive(Default)]
 struct CutsceneMeta {
     elapsed_ms: Option<u128>,
     poll_count: Option<u64>,
     result: Option<EndReason>,
-}
-
-impl Default for CutsceneMeta {
-    fn default() -> Self {
-        Self {
-            elapsed_ms: None,
-            poll_count: None,
-            result: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]

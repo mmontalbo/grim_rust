@@ -93,17 +93,18 @@ pub fn run_boot_pipeline(
         None
     };
 
-    let mut stages = Vec::new();
-    stages.push(BootStage::InitializeFonts);
-    stages.push(BootStage::PreloadCursors);
-    stages.push(BootStage::InitPreferences);
-    stages.push(BootStage::EnableControls);
-    stages.push(BootStage::DetermineDefaultSet {
-        set: default_set.clone(),
-        developer_shortcut_used,
-    });
-    stages.push(BootStage::LoadAchievements);
-    stages.push(BootStage::ShowLogo);
+    let mut stages = vec![
+        BootStage::InitializeFonts,
+        BootStage::PreloadCursors,
+        BootStage::InitPreferences,
+        BootStage::EnableControls,
+        BootStage::DetermineDefaultSet {
+            set: default_set.clone(),
+            developer_shortcut_used,
+        },
+        BootStage::LoadAchievements,
+        BootStage::ShowLogo,
+    ];
 
     if let Some(slot) = resume_slot {
         stages.push(BootStage::ResumeSave { slot });

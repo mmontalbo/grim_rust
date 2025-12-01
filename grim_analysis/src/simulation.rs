@@ -96,7 +96,7 @@ impl FunctionSimulationBuilder {
         let subsystem_entry = self
             .stateful_calls
             .entry(subsystem)
-            .or_insert_with(BTreeMap::new);
+            .or_default();
         let target_entry = subsystem_entry.entry(target.clone()).or_default();
         *target_entry.entry(method.clone()).or_insert(0) += 1;
 
@@ -414,14 +414,16 @@ fn function_call_arguments(call: &FunctionCall) -> Option<Vec<String>> {
 }
 
 fn first_argument_expression(call: &FunctionCall) -> Option<&Expression> {
-    for suffix in call.suffixes() {
-        if let Suffix::Call(Call::AnonymousCall(args)) = suffix {
-            if let FunctionArgs::Parentheses { arguments, .. } = args {
-                return arguments.iter().next();
-            }
+    call.suffixes().find_map(|suffix| {
+        if let Suffix::Call(Call::AnonymousCall(
+            FunctionArgs::Parentheses { arguments, .. },
+        )) = suffix
+        {
+            arguments.iter().next()
+        } else {
+            None
         }
-    }
-    None
+    })
 }
 
 fn expression_to_identifier(expr: &Expression) -> Option<String> {
@@ -517,7 +519,7 @@ fn function_args_to_strings(args: &FunctionArgs) -> Vec<String> {
     match args {
         FunctionArgs::Parentheses { arguments, .. } => arguments
             .iter()
-            .map(|expr| expression_to_argument_repr(expr))
+            .map(expression_to_argument_repr)
             .collect(),
         FunctionArgs::TableConstructor(_) => vec!["<table>".to_string()],
         FunctionArgs::String(token) => vec![strip_matching_quotes(token.token().to_string())],
@@ -911,10 +913,7 @@ fn is_actorish_method(target_lower: &str, method_lower: &str) -> bool {
         "work_idles",
     ];
 
-    if ACTOR_EXACT_METHODS
-        .iter()
-        .any(|candidate| method_lower == *candidate)
-    {
+    if ACTOR_EXACT_METHODS.contains(&method_lower) {
         return true;
     }
 
@@ -990,10 +989,7 @@ fn is_objectish_method(target_lower: &str, method_lower: &str) -> bool {
         "update_states",
     ];
 
-    if OBJECT_EXACT_METHODS
-        .iter()
-        .any(|candidate| method_lower == *candidate)
-    {
+    if OBJECT_EXACT_METHODS.contains(&method_lower) {
         return true;
     }
 
@@ -1012,17 +1008,13 @@ fn is_objectish_method(target_lower: &str, method_lower: &str) -> bool {
             "set_up_baster",
             "set_up_mechanic_objects",
         ];
-        return !ACTOR_SET_UP_METHODS
-            .iter()
-            .any(|candidate| method_lower == *candidate);
+        return !ACTOR_SET_UP_METHODS.contains(&method_lower);
     }
 
     if method_lower.starts_with("setup_") {
         const ACTOR_SETUP_METHODS: &[&str] =
             &["setup_actors", "setup_gatekeeper", "setup_velasco_idles"];
-        return !ACTOR_SETUP_METHODS
-            .iter()
-            .any(|candidate| method_lower == *candidate);
+        return !ACTOR_SETUP_METHODS.contains(&method_lower);
     }
 
     if method_lower.starts_with("activate_") || method_lower.ends_with("_boxes") {

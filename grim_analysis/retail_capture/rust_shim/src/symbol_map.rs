@@ -137,8 +137,7 @@ fn parse_symbol_line(line: &str) -> Option<SymbolEntry> {
     }
 
     let mut name_start = 0;
-    if remainder[0].len() == 1 && remainder.len() > 1 && remainder[0].chars().all(|c| c.is_ascii())
-    {
+    if remainder[0].len() == 1 && remainder.len() > 1 && remainder[0].is_ascii() {
         name_start = 1;
     }
     let name = remainder[name_start..].join(" ");

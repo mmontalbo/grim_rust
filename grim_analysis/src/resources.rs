@@ -401,7 +401,7 @@ fn expression_as_function_call(expr: &Expression) -> Option<&FunctionCall> {
     }
 }
 
-fn normalize_expression<'a>(expr: &'a Expression) -> &'a Expression {
+fn normalize_expression(expr: &Expression) -> &Expression {
     match expr {
         Expression::Parentheses { expression, .. } => normalize_expression(expression),
         _ => expr,
@@ -442,7 +442,7 @@ fn global_call_args<'a>(call: &'a FunctionCall, name: &str) -> Option<Vec<&'a Ex
     None
 }
 
-fn function_args_to_vec<'a>(args: &'a FunctionArgs) -> Option<Vec<&'a Expression>> {
+fn function_args_to_vec(args: &FunctionArgs) -> Option<Vec<&Expression>> {
     match args {
         FunctionArgs::Parentheses { arguments, .. } => Some(arguments.iter().collect()),
         _ => None,
