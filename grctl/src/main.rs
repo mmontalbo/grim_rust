@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -211,6 +211,10 @@ enum RunSelection {
     Id(String),
 }
 
+type AlignedRow = (u64, Option<String>, Option<String>);
+type EnvVars = Vec<(String, String)>;
+type EnvSetup = (EnvVars, Option<String>);
+
 fn parse_run_selection(value: &str) -> std::result::Result<RunSelection, String> {
     if value.eq_ignore_ascii_case("latest") {
         Ok(RunSelection::Latest)
@@ -290,6 +294,8 @@ fn parity_tail(args: ParityTailArgs, paths: &Paths) -> Result<()> {
 
     let poll = Duration::from_millis(args.poll_ms);
     loop {
+        let mut new_seqs: BTreeSet<u64> = BTreeSet::new();
+
         let engine_lines = match read_new_lines(&engine_log, &mut engine_pos) {
             Ok(lines) => lines,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -315,36 +321,28 @@ fn parity_tail(args: ParityTailArgs, paths: &Paths) -> Result<()> {
             Err(err) => return Err(err).context(format!("reading {}", retail_log.display())),
         };
 
-        let mut new_seqs: Vec<u64> = Vec::new();
         for line in engine_lines {
             if let Some(seq) = parse_seq_from_line(&line) {
                 let entry = printed.entry(seq).or_insert((None, None));
                 if entry.0.is_none() {
-                    entry.0 = Some(line.clone());
+                    entry.0 = Some(line);
                 }
-                if !new_seqs.contains(&seq) {
-                    new_seqs.push(seq);
-                }
+                new_seqs.insert(seq);
             }
         }
         for line in retail_lines {
             if let Some(seq) = parse_seq_from_line(&line) {
                 let entry = printed.entry(seq).or_insert((None, None));
                 if entry.1.is_none() {
-                    entry.1 = Some(line.clone());
+                    entry.1 = Some(line);
                 }
-                if !new_seqs.contains(&seq) {
-                    new_seqs.push(seq);
-                }
+                new_seqs.insert(seq);
             }
         }
 
-        if !new_seqs.is_empty() {
-            new_seqs.sort_unstable();
-            for seq in new_seqs {
-                if let Some((engine_line, retail_line)) = printed.get(&seq) {
-                    print_aligned_row(seq, engine_line.as_deref(), retail_line.as_deref());
-                }
+        for seq in new_seqs {
+            if let Some((engine_line, retail_line)) = printed.get(&seq) {
+                print_aligned_row(seq, engine_line.as_deref(), retail_line.as_deref());
             }
         }
 
@@ -388,6 +386,10 @@ fn parse_seq_from_line(line: &str) -> Option<u64> {
 }
 
 fn tail_lines_by_seq(path: &Path, limit: usize) -> Result<Vec<(u64, String)>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut buffer: VecDeque<(u64, String)> = VecDeque::with_capacity(limit.max(1));
@@ -408,7 +410,11 @@ fn backfill_pairs(
     engine_log: &Path,
     retail_log: &Path,
     limit: usize,
-) -> Result<Vec<(u64, Option<String>, Option<String>)>> {
+) -> Result<Vec<AlignedRow>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     let engine_events = tail_lines_by_seq(engine_log, limit)?;
     let retail_events = tail_lines_by_seq(retail_log, limit)?;
     let mut engine_map = HashMap::new();
@@ -419,16 +425,13 @@ fn backfill_pairs(
     for (seq, line) in retail_events {
         retail_map.insert(seq, line);
     }
-    let mut seqs: Vec<u64> = engine_map
+    let mut seqs: BTreeSet<u64> = engine_map
         .keys()
         .copied()
         .chain(retail_map.keys().copied())
         .collect();
-    seqs.sort_unstable();
-    seqs.dedup();
-    if seqs.len() > limit {
-        let keep_from = seqs.len().saturating_sub(limit);
-        seqs.drain(0..keep_from);
+    while seqs.len() > limit {
+        seqs.pop_first();
     }
     let mut rows = Vec::new();
     for seq in seqs {
@@ -1131,8 +1134,8 @@ fn assemble_retail_env(
     layout: &RetailLayout,
     mode: HookMode,
     extra_preloads: &[PathBuf],
-) -> Result<(Vec<(String, String)>, Option<String>)> {
-    let mut envs = Vec::new();
+) -> Result<EnvSetup> {
+    let mut envs: EnvVars = Vec::new();
     if let Some(value) = build_ld_library_path(layout) {
         envs.push(("LD_LIBRARY_PATH".to_string(), value));
     }

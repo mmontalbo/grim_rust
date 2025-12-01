@@ -133,15 +133,13 @@ impl LogTailer {
                     });
                 }
                 Err(err) if err.kind() == ErrorKind::NotFound => {
-                    if let Some(deadline) = deadline {
-                        if Instant::now() >= deadline {
-                            return Err(err).with_context(|| {
-                                format!(
-                                    "timed out waiting for log file to appear: {}",
-                                    path.display()
-                                )
-                            });
-                        }
+                    if let Some(deadline) = deadline && Instant::now() >= deadline {
+                        return Err(err).with_context(|| {
+                            format!(
+                                "timed out waiting for log file to appear: {}",
+                                path.display()
+                            )
+                        });
                     }
                     thread::sleep(Duration::from_millis(100));
                 }

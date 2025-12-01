@@ -210,12 +210,7 @@ impl RetailLayout {
             root.join("ubuntu12_32").join("steamclient.so"),
             root.join("linux32").join("steamclient.so"),
         ];
-        for candidate in candidates {
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        None
+        candidates.into_iter().find(|candidate| candidate.exists())
     }
 }
 

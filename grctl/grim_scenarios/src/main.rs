@@ -228,10 +228,8 @@ fn observe_markers(
             return Ok((observed, seen, false));
         }
 
-        if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
-                return Ok((observed, seen, true));
-            }
+        if let Some(deadline) = deadline && Instant::now() >= deadline {
+            return Ok((observed, seen, true));
         }
 
         match tailer.read_line()? {
@@ -271,11 +269,9 @@ fn hold_for_duration(
     }
 
     while Instant::now() < hold_deadline {
-        if let Some(limit) = deadline {
-            if Instant::now() >= limit {
-                timed_out = true;
-                break;
-            }
+        if let Some(limit) = deadline && Instant::now() >= limit {
+            timed_out = true;
+            break;
         }
 
         match tailer.read_line()? {
