@@ -8,7 +8,6 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use crossbeam_channel;
 use crossbeam_channel::{Receiver, Sender};
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder};
@@ -80,13 +79,13 @@ impl FrameDumpMode {
             // Capture a small burst of frames by default when wildcard requested.
             return FrameDumpMode::First(5);
         }
-        if !trimmed.contains(',') && !trimmed.contains('-') {
-            if let Ok(count) = trimmed.parse::<u64>() {
-                if count == 0 {
-                    return FrameDumpMode::Disabled;
-                }
-                return FrameDumpMode::First(count);
+        if !trimmed.contains(',') && !trimmed.contains('-')
+            && let Ok(count) = trimmed.parse::<u64>()
+        {
+            if count == 0 {
+                return FrameDumpMode::Disabled;
             }
+            return FrameDumpMode::First(count);
         }
 
         let mut frames = Vec::new();
@@ -95,20 +94,19 @@ impl FrameDumpMode {
             if token.is_empty() {
                 continue;
             }
-            if let Some((start, end)) = token.split_once('-') {
-                if let (Ok(start_idx), Ok(end_idx)) =
+            if let Some((start, end)) = token.split_once('-')
+                && let (Ok(start_idx), Ok(end_idx)) =
                     (start.trim().parse::<u64>(), end.trim().parse::<u64>())
-                {
-                    let (lo, hi) = if start_idx <= end_idx {
-                        (start_idx, end_idx)
-                    } else {
-                        (end_idx, start_idx)
-                    };
-                    for idx in lo..=hi {
-                        frames.push(idx);
-                    }
-                    continue;
+            {
+                let (lo, hi) = if start_idx <= end_idx {
+                    (start_idx, end_idx)
+                } else {
+                    (end_idx, start_idx)
+                };
+                for idx in lo..=hi {
+                    frames.push(idx);
                 }
+                continue;
             }
 
             if let Ok(idx) = token.parse::<u64>() {
@@ -154,14 +152,14 @@ fn maybe_dump_decoded_frame(
         return;
     };
 
-    if let Some(parent) = path.parent() {
-        if let Err(err) = fs::create_dir_all(parent) {
-            eprintln!(
-                "[grim_viewer] failed to create movie dump directory {}: {err:?}",
-                parent.display()
-            );
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "[grim_viewer] failed to create movie dump directory {}: {err:?}",
+            parent.display()
+        );
+        return;
     }
 
     match write_rgba_png(&path, width, height, stride_bytes, data) {

@@ -207,10 +207,8 @@ impl ViewerState {
 
         let pending_dump = self.maybe_prepare_frame_dump(&frame, &mut encoder);
         self.queue.submit(std::iter::once(encoder.finish()));
-        if let Some(dump) = pending_dump {
-            if let Err(err) = self.finish_frame_dump(dump) {
-                eprintln!("[grim_viewer] failed to dump frame: {err:?}");
-            }
+        if let Some(dump) = pending_dump && let Err(err) = self.finish_frame_dump(dump) {
+            eprintln!("[grim_viewer] failed to dump frame: {err:?}");
         }
         frame.present();
         Ok(())
@@ -224,9 +222,7 @@ impl ViewerState {
         if self.frame_dump_done {
             return None;
         }
-        let Some(path) = frame_dump_path() else {
-            return None;
-        };
+        let path = frame_dump_path()?;
         let width = self.config.width;
         let height = self.config.height;
         if width == 0 || height == 0 {
@@ -444,10 +440,11 @@ impl ViewerState {
             data,
         )?;
 
-        if mirror_movie_to_retail_enabled() && !MIRRORED_MOVIE_FRAME.swap(true, Ordering::SeqCst) {
-            if let Err(err) = self.debug_mirror_movie_to_retail(width, height, stride_bytes, data) {
-                eprintln!("[grim_viewer] failed to mirror movie frame into retail pane: {err:?}");
-            }
+        if mirror_movie_to_retail_enabled()
+            && !MIRRORED_MOVIE_FRAME.swap(true, Ordering::SeqCst)
+            && let Err(err) = self.debug_mirror_movie_to_retail(width, height, stride_bytes, data)
+        {
+            eprintln!("[grim_viewer] failed to mirror movie frame into retail pane: {err:?}");
         }
 
         Ok(())
@@ -548,6 +545,7 @@ impl ViewerState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create(
         window: std::sync::Arc<Window>,
         surface: wgpu::Surface<'static>,
@@ -969,7 +967,7 @@ fn align_to(value: u32, alignment: u32) -> u32 {
     if alignment == 0 {
         return value;
     }
-    ((value + alignment - 1) / alignment) * alignment
+    value.div_ceil(alignment) * alignment
 }
 
 struct MovieRenderer {
@@ -1014,6 +1012,7 @@ impl MovieRenderer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn upload_frame(
         &mut self,
         device: &wgpu::Device,

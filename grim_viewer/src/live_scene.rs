@@ -264,18 +264,18 @@ impl LiveSceneState {
     }
 
     fn draw_manny(&mut self, position: [f32; 3]) {
-        if let Some(bounds) = self.bounds {
-            if let Some((px, py)) = self.project(bounds, position) {
-                stamp_point(
-                    &mut self.buffer,
-                    self.width,
-                    self.height,
-                    px,
-                    py,
-                    MANNY_COLOR,
-                    4,
-                );
-            }
+        if let Some(bounds) = self.bounds
+            && let Some((px, py)) = self.project(bounds, position)
+        {
+            stamp_point(
+                &mut self.buffer,
+                self.width,
+                self.height,
+                px,
+                py,
+                MANNY_COLOR,
+                4,
+            );
         }
     }
 
@@ -328,10 +328,10 @@ fn collect_lab_paths(install_root: &Path) -> Vec<PathBuf> {
             if !path.is_file() {
                 continue;
             }
-            if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-                if ext.eq_ignore_ascii_case("lab") {
-                    labs.push(path);
-                }
+            if let Some(ext) = path.extension().and_then(|ext| ext.to_str())
+                && ext.eq_ignore_ascii_case("lab")
+            {
+                labs.push(path);
             }
         }
     }

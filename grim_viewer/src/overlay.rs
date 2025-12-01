@@ -374,14 +374,14 @@ fn prepare_rgba_upload<'a>(width: u32, height: u32, data: &'a [u8]) -> Result<Te
         row_bytes * height as usize
     );
 
-    if row_bytes % alignment == 0 && data.len() == row_bytes * height as usize {
+    if row_bytes.is_multiple_of(alignment) && data.len() == row_bytes * height as usize {
         return Ok(TextureUpload {
             data: Cow::Borrowed(data),
             bytes_per_row: row_bytes as u32,
         });
     }
 
-    let padded_row_bytes = ((row_bytes + alignment - 1) / alignment) * alignment;
+    let padded_row_bytes = row_bytes.div_ceil(alignment) * alignment;
     let mut buffer = vec![0u8; padded_row_bytes * height as usize];
     for row in 0..height as usize {
         let src_offset = row * row_bytes;
@@ -480,6 +480,7 @@ impl GlyphLayout {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn accumulate_metrics(
         font: &Font,
         size: f32,

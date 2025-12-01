@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use std::{
     collections::{HashSet, VecDeque},
     fs::File,
@@ -21,7 +23,6 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use crossbeam_channel::TryRecvError as CrossbeamTryRecvError;
 use display::ViewerState;
-use env_logger;
 use grim_stream::{Frame, Hello, MovieAction, MovieControl, MovieStart, StateUpdate, StreamConfig};
 use live_scene::LiveSceneState;
 use live_stream::{
@@ -161,7 +162,7 @@ impl EngineEventLog {
         self.preview
             .extend(update.events.iter().take(take).cloned());
         self.truncated = self.total_events > self.preview.len();
-        if let Some(first) = self.preview.get(0) {
+        if let Some(first) = self.preview.first() {
             println!(
                 "[grim_viewer] ingesting {} engine events for seq {} (first='{}')",
                 self.total_events, update.seq, first
@@ -207,15 +208,13 @@ struct EventDumpWriter {
 
 impl EventDumpWriter {
     fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create engine event dump directory {}",
-                        parent.display()
-                    )
-                })?;
-            }
+        if let Some(parent) = path.parent() && !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create engine event dump directory {}",
+                    parent.display()
+                )
+            })?;
         }
         let file = File::create(path)
             .with_context(|| format!("failed to create engine event dump at {}", path.display()))?;
@@ -523,7 +522,9 @@ impl ActiveMovieStatus {
 
     fn should_log_progress(&self, now: Instant) -> bool {
         self.frames_rendered == 1
-            || self.frames_rendered % MOVIE_PROGRESS_FRAME_INTERVAL == 0
+            || self
+                .frames_rendered
+                .is_multiple_of(MOVIE_PROGRESS_FRAME_INTERVAL)
             || now.duration_since(self.last_log_report) >= MOVIE_PROGRESS_TIME_INTERVAL
     }
 
@@ -550,17 +551,15 @@ impl ActiveMovieStatus {
     }
 
     fn poll_pending_ready(&mut self, now: Instant) -> Option<MovieFrame> {
-        if let Some(front) = self.pending.front() {
-            if now >= front.deadline {
-                let PendingMovieFrame {
-                    frame,
-                    pts,
-                    deadline,
-                    since,
-                } = self.pending.pop_front().unwrap();
-                self.log_pending_release(now, deadline, since, pts, self.pending.len());
-                return Some(frame);
-            }
+        if let Some(front) = self.pending.front() && now >= front.deadline {
+            let PendingMovieFrame {
+                frame,
+                pts,
+                deadline,
+                since,
+            } = self.pending.pop_front().unwrap();
+            self.log_pending_release(now, deadline, since, pts, self.pending.len());
+            return Some(frame);
         }
         None
     }
@@ -605,40 +604,38 @@ impl ActiveMovieStatus {
                         return FrameSchedule::Present(frame);
                     }
 
-                    if let Some(current_lead) = target.checked_duration_since(now) {
-                        if current_lead > MAX_PRESENTATION_LEAD {
-                            let desired_lead = TARGET_PRESENTATION_LEAD
-                                .min(current_lead)
-                                .max(MIN_PRESENTATION_LEAD);
-                            let desired_target = now
-                                .checked_add(desired_lead)
-                                .unwrap_or_else(|| now + TARGET_PRESENTATION_LEAD);
-                            let realigned = desired_target.checked_sub(pts).unwrap_or(now);
-                            movie_pacing_log(
-                                MovieLogLevel::Info,
-                                &self.name,
-                                "limit_lead",
-                                [
-                                    (
-                                        "lead_ms",
-                                        format!("{:.2}", current_lead.as_secs_f64() * 1000.0),
-                                    ),
-                                    ("pts_ms", format!("{:.2}", pts.as_secs_f64() * 1000.0)),
-                                    (
-                                        "desired_lead_ms",
-                                        format!("{:.2}", desired_lead.as_secs_f64() * 1000.0),
-                                    ),
-                                ],
-                            );
-                            self.timeline.realign_presentation_origin(realigned);
-                            self.reschedule_pending_deadlines(now);
-                            if let Some(adjusted) =
-                                self.timeline.ensure_presentation_origin(pts, now)
-                            {
-                                target = adjusted;
-                            } else {
-                                target = desired_target;
-                            }
+                    if let Some(current_lead) = target.checked_duration_since(now)
+                        && current_lead > MAX_PRESENTATION_LEAD
+                    {
+                        let desired_lead = TARGET_PRESENTATION_LEAD
+                            .min(current_lead)
+                            .max(MIN_PRESENTATION_LEAD);
+                        let desired_target = now
+                            .checked_add(desired_lead)
+                            .unwrap_or_else(|| now + TARGET_PRESENTATION_LEAD);
+                        let realigned = desired_target.checked_sub(pts).unwrap_or(now);
+                        movie_pacing_log(
+                            MovieLogLevel::Info,
+                            &self.name,
+                            "limit_lead",
+                            [
+                                (
+                                    "lead_ms",
+                                    format!("{:.2}", current_lead.as_secs_f64() * 1000.0),
+                                ),
+                                ("pts_ms", format!("{:.2}", pts.as_secs_f64() * 1000.0)),
+                                (
+                                    "desired_lead_ms",
+                                    format!("{:.2}", desired_lead.as_secs_f64() * 1000.0),
+                                ),
+                            ],
+                        );
+                        self.timeline.realign_presentation_origin(realigned);
+                        self.reschedule_pending_deadlines(now);
+                        if let Some(adjusted) = self.timeline.ensure_presentation_origin(pts, now) {
+                            target = adjusted;
+                        } else {
+                            target = desired_target;
                         }
                     }
 
@@ -682,7 +679,7 @@ impl ActiveMovieStatus {
                 }
                 if now
                     .checked_duration_since(target)
-                    .map_or(false, |lag| lag > MAX_FRAME_LAG)
+                    .is_some_and(|lag| lag > MAX_FRAME_LAG)
                 {
                     let realigned = now.checked_sub(pts).unwrap_or(now);
                     let mut fields = vec![
@@ -931,8 +928,10 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut controls = SyncControls::default();
-    controls.show_events = args.show_events || args.dump_debug_frame.is_some();
+    let mut controls = SyncControls {
+        show_events: args.show_events || args.dump_debug_frame.is_some(),
+        ..Default::default()
+    };
 
     event_loop.run(move |event, target| {
         match event {
@@ -957,12 +956,10 @@ fn main() -> Result<()> {
                             },
                         ..
                     } => {
-                        if handle_sync_key(&key_event, &mut controls) {
+                        if handle_sync_key(&key_event, &mut controls)
+                            || handle_movie_key(&key_event, engine_stream.as_mut())
+                        {
                             viewer.window().request_redraw();
-                        } else if handle_movie_key(&key_event, engine_stream.as_mut()) {
-                            viewer.window().request_redraw();
-                        } else {
-                            // no-op for now
                         }
                     }
                     WindowEvent::RedrawRequested => match viewer.render() {
@@ -1173,13 +1170,13 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                     } else {
                         false
                     };
-                    if let Some(dump) = stream.event_dump.as_mut() {
-                        if let Err(err) = dump.write(&update) {
-                            eprintln!(
-                                "[grim_viewer] engine event dump failed: {err:?}; disabling writer"
-                            );
-                            stream.event_dump = None;
-                        }
+                    if let Some(dump) = stream.event_dump.as_mut()
+                        && let Err(err) = dump.write(&update)
+                    {
+                        eprintln!(
+                            "[grim_viewer] engine event dump failed: {err:?}; disabling writer"
+                        );
+                        stream.event_dump = None;
                     }
                     if let Some(frame) = stream.scene.ingest_state_update(&update) {
                         if let Err(err) =
@@ -1209,13 +1206,13 @@ fn drain_engine_events(stream: Option<&mut EngineStreamState>, viewer: &mut View
                                 start.name,
                                 path.display()
                             );
-                            if stream.auto_skip_movies.contains(&start.name) {
-                                if request_movie_skip(stream) {
-                                    println!(
-                                        "[grim_viewer] auto-skip requested for movie {}",
-                                        start.name
-                                    );
-                                }
+                            if stream.auto_skip_movies.contains(&start.name)
+                                && request_movie_skip(stream)
+                            {
+                                println!(
+                                    "[grim_viewer] auto-skip requested for movie {}",
+                                    start.name
+                                );
                             }
                         }
                         Err(err) => {
@@ -1528,9 +1525,7 @@ fn handle_movie_key(event: &KeyEvent, engine_stream: Option<&mut EngineStreamSta
         return false;
     };
     match event.logical_key.as_ref() {
-        Key::Character(symbol) if matches!(symbol.as_ref(), "s" | "S") => {
-            request_movie_skip(stream)
-        }
+        Key::Character(symbol) if symbol.eq_ignore_ascii_case("s") => request_movie_skip(stream),
         _ => false,
     }
 }
@@ -1660,13 +1655,13 @@ fn update_debug_panel(
         if stream.hello.is_some() {
             if let Some(update) = stream.last_update.as_ref() {
                 lines.push(format!("Seq: {}", update.seq));
-                if controls.diff_enabled && retail.enabled {
-                    if let Some(frame) = retail.last_frame.as_ref() {
-                        let delta_ms = (update.host_time_ns as i128 - frame.host_time_ns as i128)
-                            as f64
-                            / 1_000_000.0;
-                        lines.push(format!("Frame Δt: {delta_ms:.2} ms"));
-                    }
+                if controls.diff_enabled
+                    && retail.enabled
+                    && let Some(frame) = retail.last_frame.as_ref()
+                {
+                    let delta_ms = (update.host_time_ns as i128 - frame.host_time_ns as i128) as f64
+                        / 1_000_000.0;
+                    lines.push(format!("Frame Δt: {delta_ms:.2} ms"));
                 }
                 lines.push(String::new());
                 lines.push("Scene State".to_string());
@@ -1677,13 +1672,10 @@ fn update_debug_panel(
                     .unwrap_or_else(|| "(none)".to_string());
                 lines.push(format!("Hotspot: {hotspot_label}"));
                 if let Some(commentary) = update.commentary.as_ref() {
-                    let label = commentary.label.as_deref().unwrap_or_else(|| {
-                        if commentary.active {
-                            "(active)"
-                        } else {
-                            "(idle)"
-                        }
-                    });
+                    let label = commentary
+                        .label
+                        .as_deref()
+                        .unwrap_or(if commentary.active { "(active)" } else { "(idle)" });
                     let status = if commentary.active { "ACTIVE" } else { "idle" };
                     let mut line = format!("Commentary: {status} {label}");
                     if let Some(reason) = commentary.suppressed_reason.as_ref() {
@@ -1746,7 +1738,7 @@ fn append_engine_events(lines: &mut Vec<String>, stream: Option<&EngineStreamSta
 }
 
 fn update_deadline(slot: &mut Option<Instant>, candidate: Instant) {
-    if slot.map_or(true, |current| candidate < current) {
+    if slot.is_none_or(|current| candidate < current) {
         *slot = Some(candidate);
     }
 }
@@ -1824,7 +1816,7 @@ fn handle_sync_key(event: &KeyEvent, controls: &mut SyncControls) -> bool {
             }
             true
         }
-        Key::Character(symbol) => match symbol.as_ref() {
+        Key::Character(symbol) => match symbol {
             " " => {
                 controls.paused = !controls.paused;
                 if !controls.paused {

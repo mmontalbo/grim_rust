@@ -355,7 +355,7 @@ fn send_viewer_ready(stream: &mut TcpStream) -> Result<(), std::io::Error> {
         protocol: PROTOCOL_VERSION,
         features: Vec::new(),
     };
-    let bytes = encode_message(MessageKind::Control, &message)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+    let bytes =
+        encode_message(MessageKind::Control, &message).map_err(std::io::Error::other)?;
     stream.write_all(&bytes)
 }
