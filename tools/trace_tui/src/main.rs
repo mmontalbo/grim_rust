@@ -42,6 +42,8 @@ struct LogEntry {
     event: String,
     fields: Vec<Field>,
     hidden_by: Option<usize>,
+    summary: String,
+    display: String,
 }
 
 impl LogEntry {
@@ -52,7 +54,7 @@ impl LogEntry {
         )
     }
 
-    fn summary(&self) -> String {
+    fn compute_summary(&self) -> String {
         if self.event == "set_table_entry" {
             if let Some(text) = set_table_entry_summary(self) {
                 return text;
@@ -69,6 +71,10 @@ impl LogEntry {
             }
         }
         parts.join(" ")
+    }
+
+    fn rebuild_display(&mut self) {
+        self.display = render_display_line(self);
     }
 }
 
@@ -94,6 +100,7 @@ impl App {
             selected: 0,
         };
         build_composites(&mut app.entries);
+        rebuild_display_lines(&mut app.entries);
         app.rebuild_visible();
         app
     }
@@ -175,24 +182,33 @@ fn main() -> Result<()> {
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: App) -> Result<()> {
+    let mut needs_redraw = true;
     loop {
-        terminal.draw(|f| render(f, &app))?;
+        if needs_redraw {
+            terminal.draw(|f| render(f, &app))?;
+            needs_redraw = false;
+        }
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            match event::read()? {
+                Event::Key(key) => {
+                    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('c') => app.toggle_collapse(),
+                        KeyCode::Up => app.move_selection(-1),
+                        KeyCode::Down => app.move_selection(1),
+                        KeyCode::PageUp => app.move_selection(-20),
+                        KeyCode::PageDown => app.move_selection(20),
+                        KeyCode::Home | KeyCode::Char('g') => app.move_to_start(),
+                        KeyCode::End | KeyCode::Char('G') => app.move_to_end(),
+                        _ => {}
+                    }
+                    needs_redraw = true;
                 }
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') => app.toggle_collapse(),
-                    KeyCode::Up => app.move_selection(-1),
-                    KeyCode::Down => app.move_selection(1),
-                    KeyCode::PageUp => app.move_selection(-20),
-                    KeyCode::PageDown => app.move_selection(20),
-                    KeyCode::Home | KeyCode::Char('g') => app.move_to_start(),
-                    KeyCode::End | KeyCode::Char('G') => app.move_to_end(),
-                    _ => {}
-                }
+                Event::Resize(_, _) => needs_redraw = true,
+                _ => {}
             }
         }
     }
@@ -208,21 +224,7 @@ fn render(frame: &mut Frame, app: &App) {
     let items: Vec<ListItem> = app
         .visible_indices
         .iter()
-        .map(|idx| {
-            let entry = &app.entries[*idx];
-            let marker = if entry.is_composite() { "[C]" } else { "   " };
-            let mut text = format!(
-                "{} {:>10} {:<28} {}",
-                marker,
-                entry.seq_display,
-                entry.event,
-                entry.summary()
-            );
-            if let Some(hider) = entry.hidden_by {
-                text.push_str(&format!(" (covered by #{})", hider + 1));
-            }
-            ListItem::new(text)
-        })
+        .map(|idx| ListItem::new(app.entries[*idx].display.as_str()))
         .collect();
 
     let list = List::new(items)
@@ -251,6 +253,27 @@ fn render(frame: &mut Frame, app: &App) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(detail_widget, chunks[1]);
+}
+
+fn rebuild_display_lines(entries: &mut [LogEntry]) {
+    for entry in entries.iter_mut() {
+        entry.rebuild_display();
+    }
+}
+
+fn render_display_line(entry: &LogEntry) -> String {
+    let marker = if entry.is_composite() { "[C]" } else { "   " };
+    let mut text = format!(
+        "{} {:>10} {:<28} {}",
+        marker,
+        entry.seq_display,
+        entry.event,
+        entry.summary
+    );
+    if let Some(hider) = entry.hidden_by {
+        text.push_str(&format!(" (covered by #{})", hider + 1));
+    }
+    text
 }
 
 fn detail_lines(entry: &LogEntry) -> Line<'static> {
@@ -345,14 +368,18 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
     let event = event?;
     let (seq_min, seq_max) = parse_seq_range(&seq_display);
 
-    Some(LogEntry {
+    let mut entry = LogEntry {
         seq_display,
         seq_min,
         seq_max,
         event,
         fields,
         hidden_by: None,
-    })
+        summary: String::new(),
+        display: String::new(),
+    };
+    entry.summary = entry.compute_summary();
+    Some(entry)
 }
 
 fn parse_seq_range(text: &str) -> (u64, u64) {
