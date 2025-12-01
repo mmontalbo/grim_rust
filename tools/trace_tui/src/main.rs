@@ -243,7 +243,7 @@ fn render(frame: &mut Frame, app: &App) {
 
     let detail = app
         .selected_entry()
-        .map(|entry| detail_lines(entry))
+        .map(detail_lines)
         .unwrap_or_else(|| Line::raw("no selection"));
 
     let detail_widget = Paragraph::new(detail)
