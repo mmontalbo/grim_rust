@@ -349,7 +349,7 @@ where
         }
     }
 
-    fn parse_pointer_string<'de, E>(value: &str) -> Result<i32, E>
+    fn parse_pointer_string<E>(value: &str) -> Result<i32, E>
     where
         E: de::Error,
     {
@@ -845,7 +845,7 @@ mod tests {
         assert!(fields.iter().any(|f| f == "phase=complete"));
         assert!(fields.iter().any(|f| f == "movie_label=movie.intro"));
         assert!(fields.iter().any(|f| f == "elapsed_ms=123"));
-        assert!(fields.iter().any(|f| f == "polls=0") == false);
+        assert!(!fields.iter().any(|f| f == "polls=0"));
     }
 
     #[test]
@@ -866,7 +866,7 @@ mod tests {
         assert!(fields.iter().any(|f| f == "value_type=userdata"));
         assert!(fields
             .iter()
-            .all(|f| f.starts_with("payload_hex=") == false));
+            .all(|f| !f.starts_with("payload_hex=")));
     }
 
     #[test]
