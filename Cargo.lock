@@ -936,6 +936,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "tempfile",
  "uuid",
  "walkdir",
 ]

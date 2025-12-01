@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -117,6 +117,9 @@ struct RetailStart {
     /// Stream the retail stdout/stderr log to this terminal until you Ctrl-C.
     #[arg(long)]
     attach: bool,
+    /// Launch retail under gdb with the grctl-managed environment.
+    #[arg(long, value_enum)]
+    debugger: Option<RetailDebugger>,
     /// Override the GRIM_TRACE_RUN_ID for this launch.
     #[arg(long, value_parser = parse_run_id)]
     run_id: Option<String>,
@@ -477,6 +480,13 @@ enum ComponentKind {
     Retail,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab_case")]
+enum RetailDebugger {
+    /// Launch retail under gdb with the proper env (no gdbserver).
+    Gdb,
+}
+
 impl ComponentKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -514,6 +524,8 @@ impl ComponentState {
 struct LaunchInfo {
     run_id: String,
     log_path: PathBuf,
+    #[allow(dead_code)]
+    pid: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -619,6 +631,11 @@ impl Paths {
         self.launcher_dir.join(format!("retail_{session_id}.sh"))
     }
 
+    fn gdb_commands_path(&self, session_id: &str) -> PathBuf {
+        self.launcher_dir
+            .join(format!("retail_gdb_{session_id}.cmds"))
+    }
+
     fn retail_telemetry_path(&self) -> PathBuf {
         self.repo_root
             .join("dev-install")
@@ -711,6 +728,7 @@ fn parity_start(args: ParityStartArgs, paths: &Paths) -> Result<()> {
         no_timeout: args.retail_no_timeout,
         vanilla: args.retail_vanilla,
         attach: false,
+        debugger: None,
         run_id: Some(run_id.clone()),
         extra_args: Vec::new(),
     };
@@ -787,7 +805,7 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<LaunchInfo> {
         command_line.push(extra.clone());
     }
 
-    launch_component(
+    let pid = launch_component(
         ComponentKind::Engine,
         paths,
         session_id.clone(),
@@ -817,7 +835,7 @@ fn start_engine(args: EngineStart, paths: &Paths) -> Result<LaunchInfo> {
         );
     }
 
-    Ok(LaunchInfo { run_id, log_path })
+    Ok(LaunchInfo { run_id, log_path, pid })
 }
 
 fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
@@ -835,6 +853,9 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
     } else {
         HookMode::Instrumented
     };
+    if args.debugger.is_some() && !args.no_timeout && args.timeout.trim() != "0" {
+        println!("[grctl] debugger requested; disabling retail timeout");
+    }
     if matches!(mode, HookMode::Instrumented) {
         ensure_rust_shim_ready(paths, &layout)?;
         ensure_symbol_maps_ready(paths, &layout)?;
@@ -859,9 +880,20 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
         }
     }
 
-    let (command, command_line) = build_retail_command(&layout, &args, mode, paths, &session_id)?;
+    let runtime_preloads = gather_runtime_preloads(&layout);
+    let (env_pairs, ld_preload) = assemble_retail_env(&layout, mode, &runtime_preloads)?;
 
-    launch_component(
+    let script_path = write_retail_launcher_script(
+        paths,
+        &session_id,
+        &layout,
+        &env_pairs,
+        ld_preload.as_deref(),
+        None,
+    )?;
+    let (command, command_line) = build_retail_command(&layout, &args, &script_path)?;
+
+    let pid = launch_component(
         ComponentKind::Retail,
         paths,
         session_id.clone(),
@@ -870,6 +902,18 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
         command,
         command_line,
     )?;
+
+    if let Some(RetailDebugger::Gdb) = args.debugger {
+        let grim_pid = wait_for_grim_process(&session_id, &layout)
+            .context("waiting for retail process to attach")?;
+        launch_gdb(paths, &layout, &session_id, grim_pid)
+            .context("launching gdb for retail process")?;
+        return Ok(LaunchInfo {
+            run_id,
+            log_path,
+            pid: grim_pid,
+        });
+    }
 
     if args.attach {
         println!(
@@ -891,7 +935,7 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
         );
     }
 
-    Ok(LaunchInfo { run_id, log_path })
+    Ok(LaunchInfo { run_id, log_path, pid })
 }
 
 fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
@@ -1057,11 +1101,10 @@ fn describe_map_status(status: SymbolMapStatus) -> &'static str {
 fn build_retail_command(
     layout: &RetailLayout,
     args: &RetailStart,
-    mode: HookMode,
-    paths: &Paths,
-    session_id: &str,
+    script_path: &Path,
 ) -> Result<(Command, Vec<String>)> {
-    let use_timeout = !args.no_timeout && args.timeout.trim() != "0";
+    let debugging = args.debugger.is_some();
+    let use_timeout = !args.no_timeout && args.timeout.trim() != "0" && !debugging;
     let mut command_line = Vec::new();
     let mut command = if use_timeout {
         let mut cmd = Command::new("timeout");
@@ -1082,11 +1125,8 @@ fn build_retail_command(
             retail_bin.display()
         );
     }
-    let runtime_preloads = gather_runtime_preloads(layout);
-    let (env_pairs, ld_preload) = assemble_retail_env(layout, mode, &runtime_preloads)?;
-    let script_path =
-        write_retail_launcher_script(paths, session_id, layout, &env_pairs, ld_preload.as_deref())?;
     let script_str = script_path.to_string_lossy().into_owned();
+
     command.arg(&script_str);
     command_line.push(script_str);
     for extra in &args.extra_args {
@@ -1248,6 +1288,7 @@ fn write_retail_launcher_script(
     layout: &RetailLayout,
     env_pairs: &[(String, String)],
     ld_preload: Option<&str>,
+    extra_env: Option<&[(String, String)]>,
 ) -> Result<PathBuf> {
     let script_path = paths.launcher_script(session_id);
     let mut file = File::create(&script_path).with_context(|| {
@@ -1260,6 +1301,11 @@ fn write_retail_launcher_script(
     writeln!(file, "# Auto-generated by grctl")?;
     writeln!(file, "set -euo pipefail")?;
     writeln!(file)?;
+    if let Some(extra) = extra_env {
+        for (key, value) in extra {
+            writeln!(file, "export {}={}", key, shell_quote(value))?;
+        }
+    }
     for (key, value) in env_pairs {
         writeln!(file, "export {}={}", key, shell_quote(value))?;
     }
@@ -1280,6 +1326,246 @@ fn write_retail_launcher_script(
             .with_context(|| format!("setting permissions on {}", script_path.display()))?;
     }
     Ok(script_path)
+}
+
+fn gdb_solib_search_path(layout: &RetailLayout) -> Option<String> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    paths.push(layout.dev_install().to_path_buf());
+    let dev_install_x86 = layout.dev_install().join("x86");
+    if dev_install_x86.exists() {
+        paths.push(dev_install_x86);
+    }
+    if let Some(ld_path) = build_ld_library_path(layout) {
+        for entry in ld_path.split(':') {
+            if !entry.is_empty() {
+                paths.push(PathBuf::from(entry));
+            }
+        }
+    }
+    if let Some(shim) = layout.resolved_shim_path() {
+        if let Some(parent) = shim.parent() {
+            paths.push(parent.to_path_buf());
+        }
+    }
+    paths.retain(|p| p.exists());
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        None
+    } else {
+        let value = paths
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
+        Some(value)
+    }
+}
+
+fn wait_for_grim_process(session_id: &str, layout: &RetailLayout) -> Result<u32> {
+    wait_for_grim_process_in(session_id, layout, Path::new("/proc"))
+}
+
+fn wait_for_grim_process_in(
+    session_id: &str,
+    layout: &RetailLayout,
+    proc_root: &Path,
+) -> Result<u32> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let poll = Duration::from_millis(200);
+    let session_marker = format!("GRCTL_SESSION_ID={session_id}");
+    let target_name = layout
+        .retail_bin()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("GrimFandango")
+        .to_string();
+
+    while Instant::now() < deadline {
+        if let Some(pid) = find_retail_process(proc_root, &session_marker, &target_name) {
+            return Ok(pid);
+        }
+        thread::sleep(poll);
+    }
+
+    bail!(
+        "retail process for session {session_id} not found within timeout; check the retail log for startup errors"
+    );
+}
+
+fn find_retail_process(proc_root: &Path, session_marker: &str, target_name: &str) -> Option<u32> {
+    let entries = fs::read_dir(proc_root).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if !process_has_session(proc_root, pid, session_marker) {
+            continue;
+        }
+        if process_exe_matches(proc_root, pid, target_name) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn process_has_session(proc_root: &Path, pid: u32, session_marker: &str) -> bool {
+    let path = proc_root.join(pid.to_string()).join("environ");
+    let Ok(data) = fs::read(&path) else {
+        return false;
+    };
+    data.split(|b| *b == 0)
+        .any(|entry| entry == session_marker.as_bytes())
+}
+
+fn process_exe_matches(proc_root: &Path, pid: u32, target_name: &str) -> bool {
+    let path = proc_root.join(pid.to_string()).join("exe");
+    let Ok(link) = fs::read_link(path) else {
+        return false;
+    };
+    link.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == target_name)
+        .unwrap_or(false)
+}
+
+fn resolve_shim_text_base(pid: u32, layout: &RetailLayout) -> Result<Option<u64>> {
+    resolve_shim_text_base_in(pid, layout, Path::new("/proc"))
+}
+
+fn resolve_shim_text_base_in(
+    pid: u32,
+    layout: &RetailLayout,
+    proc_root: &Path,
+) -> Result<Option<u64>> {
+    let Some(shim_path) = layout.resolved_shim_path() else {
+        return Ok(None);
+    };
+    let Some(shim_name) = shim_path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let maps_path = proc_root.join(pid.to_string()).join("maps");
+    let contents = fs::read_to_string(&maps_path)
+        .with_context(|| format!("reading {}", maps_path.display()))?;
+    for line in contents.lines() {
+        if !line.contains(shim_name) {
+            continue;
+        }
+        let Some(range) = line.split_whitespace().next() else {
+            continue;
+        };
+        let Some((start, _)) = range.split_once('-') else {
+            continue;
+        };
+        if let Ok(addr) = u64::from_str_radix(start, 16) {
+            return Ok(Some(addr));
+        }
+    }
+    Ok(None)
+}
+
+fn write_retail_gdb_script(
+    paths: &Paths,
+    layout: &RetailLayout,
+    session_id: &str,
+    pid: u32,
+    shim_base: Option<u64>,
+) -> Result<PathBuf> {
+    let cmd_path = paths.gdb_commands_path(session_id);
+    let mut file = File::create(&cmd_path)
+        .with_context(|| format!("creating gdb command file {}", cmd_path.display()))?;
+    let liblua_path = shell_quote(&layout.liblua_bin().to_string_lossy().into_owned());
+    writeln!(file, "set pagination off")?;
+    writeln!(file, "set confirm off")?;
+    writeln!(file, "set architecture i386")?;
+    writeln!(file, "set sysroot /")?;
+    if let Some(solib) = gdb_solib_search_path(layout) {
+        writeln!(file, "set solib-search-path {}", solib)?;
+    }
+    writeln!(file, "define hook-run")?;
+    writeln!(
+        file,
+        "  python print('[grctl] retail already running; use \"continue\" instead of \"run\".')"
+    )?;
+    writeln!(
+        file,
+        "  python raise gdb.GdbError('retail already running; use continue instead of run')"
+    )?;
+    writeln!(file, "end")?;
+    writeln!(
+        file,
+        "file {}",
+        layout.retail_bin().to_string_lossy()
+    )?;
+    writeln!(file, "attach {}", pid)?;
+    if let (Some(shim_path), Some(base)) = (layout.resolved_shim_path(), shim_base) {
+        writeln!(
+            file,
+            "add-symbol-file {} 0x{:x}",
+            shim_path.to_string_lossy(),
+            base
+        )?;
+    }
+    writeln!(file, "python")?;
+    writeln!(file, "import gdb")?;
+    writeln!(file, "import os")?;
+    writeln!(file, "import shlex")?;
+    writeln!(file, "pid = gdb.selected_inferior().pid")?;
+    writeln!(
+        file,
+        "maps = open(f\"/proc/{pid}/maps\", 'r', encoding='utf-8', errors='ignore').read().splitlines()"
+    )?;
+    writeln!(
+        file,
+        "def find_base(name):\n    for line in maps:\n        if name not in line:\n            continue\n        rng = line.split()[0]\n        start = rng.split('-')[0]\n        try:\n            return int(start, 16)\n        except ValueError:\n            continue\n    return None"
+    )?;
+    writeln!(
+        file,
+        "def add_symbols(path, label):\n    base = find_base(os.path.basename(path))\n    if base is None:\n        print(f\"[grctl] note: {{label}} not mapped; skipping add-symbol-file\")\n        return\n    quoted = shlex.quote(path)\n    try:\n        gdb.execute(f\"add-symbol-file {{quoted}} 0x{{base:x}}\")\n        print(f\"[grctl] loaded symbols for {{label}} at 0x{{base:x}}\")\n    except gdb.error as err:\n        print(f\"[grctl] warning: add-symbol-file failed for {{label}}: {{err}}\")"
+    )?;
+    writeln!(file, "add_symbols({}, 'libLua.so')", liblua_path)?;
+    writeln!(file, "end")?;
+    writeln!(
+        file,
+        "echo Attached to GrimFandango (pid {}).\\n",
+        pid
+    )?;
+    writeln!(file, "echo Set breakpoints, then 'continue'.\\n")?;
+    Ok(cmd_path)
+}
+
+fn launch_gdb(
+    paths: &Paths,
+    layout: &RetailLayout,
+    session_id: &str,
+    pid: u32,
+) -> Result<()> {
+    let shim_base =
+        resolve_shim_text_base(pid, layout).with_context(|| format!("resolving shim base for pid {pid}"))?;
+    if layout.resolved_shim_path().is_some() && shim_base.is_none() {
+        eprintln!(
+            "[grctl] warning: unable to locate shim mapping in /proc/{}/maps; symbols will be missing",
+            pid
+        );
+    }
+    let cmd_path = write_retail_gdb_script(paths, layout, session_id, pid, shim_base)?;
+    println!(
+        "[grctl] attaching gdb to retail (pid {}); commands at {}",
+        pid,
+        cmd_path.display()
+    );
+    let status = Command::new("gdb")
+        .arg("-q")
+        .arg("-x")
+        .arg(&cmd_path)
+        .current_dir(layout.dev_install())
+        .status()
+        .context("starting gdb")?;
+    if !status.success() {
+        eprintln!("[grctl] warning: gdb exited with {}", status);
+    }
+    Ok(())
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1313,7 +1599,7 @@ fn launch_component(
     log_path: PathBuf,
     mut command: Command,
     command_line: Vec<String>,
-) -> Result<()> {
+) -> Result<u32> {
     command.current_dir(&paths.repo_root);
     command.stdin(Stdio::null());
     command.env("GRCTL_MANAGED", "1");
@@ -1382,7 +1668,7 @@ fn launch_component(
         session_id,
         run_id
     );
-    Ok(())
+    Ok(pid)
 }
 
 fn ensure_component_available(component: ComponentKind, paths: &Paths) -> Result<()> {
@@ -1819,6 +2105,115 @@ fn tail_file(path: &Path, tail: usize) -> Result<Vec<String>> {
         buffer.push_back(line);
     }
     Ok(buffer.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use tempfile::TempDir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &Path)]) -> Self {
+            let mut saved = Vec::new();
+            for (key, value) in vars {
+                saved.push((*key, std::env::var(key).ok()));
+                std::env::set_var(key, value);
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn build_fake_layout(root: &Path) -> Result<(RetailLayout, EnvGuard)> {
+        let dev_install = root.join("dev-install");
+        fs::create_dir_all(&dev_install)?;
+        fs::write(dev_install.join("GrimFandango"), b"bin")?;
+        fs::write(dev_install.join("libLua.so"), b"bin")?;
+        fs::write(dev_install.join("GrimFandango.sym"), b"")?;
+        fs::write(dev_install.join("libLua.so.sym"), b"")?;
+
+        let shim_path = root
+            .join("target")
+            .join("i686-unknown-linux-gnu")
+            .join("release")
+            .join("libgrim_telemetry_shim.so");
+        if let Some(parent) = shim_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&shim_path, b"shim")?;
+
+        let steam_root = root.join("steam-root");
+        fs::create_dir_all(&steam_root)?;
+        let steam_install = root.join("steam-install");
+        fs::create_dir_all(&steam_install)?;
+
+        let guard = EnvGuard::set(&[
+            ("GRIM_STEAM_ROOT", &steam_root),
+            ("GRIM_STEAM_INSTALL", &steam_install),
+        ]);
+        let layout = RetailLayout::new(root)?;
+        Ok((layout, guard))
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wait_for_process_finds_session_pid() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let proc_root = tmp.path().join("proc");
+        let pid_dir = proc_root.join("1234");
+        fs::create_dir_all(&pid_dir)?;
+        fs::write(pid_dir.join("environ"), b"FOO=1\0GRCTL_SESSION_ID=session-123\0")?;
+
+        let (layout, _guard) = build_fake_layout(tmp.path())?;
+        symlink(layout.retail_bin(), pid_dir.join("exe"))?;
+
+        let pid = wait_for_grim_process_in("session-123", &layout, &proc_root)?;
+        assert_eq!(pid, 1234);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shim_base_parses_from_proc_maps() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let proc_root = tmp.path().join("proc");
+        let pid_dir = proc_root.join("5678");
+        fs::create_dir_all(&pid_dir)?;
+        fs::write(pid_dir.join("environ"), b"")?;
+
+        let (layout, _guard) = build_fake_layout(tmp.path())?;
+        symlink(layout.retail_bin(), pid_dir.join("exe"))?;
+
+        let shim_path = layout.resolved_shim_path().expect("shim exists");
+        let maps_line = format!(
+            "565c0000-565e0000 r-xp 00000000 00:00 0 {}",
+            shim_path.display()
+        );
+        fs::write(pid_dir.join("maps"), format!("{maps_line}\n"))?;
+
+        let base = resolve_shim_text_base_in(5678, &layout, &proc_root)?;
+        assert_eq!(base, Some(0x565c0000));
+        Ok(())
+    }
 }
 
 #[derive(Default)]
