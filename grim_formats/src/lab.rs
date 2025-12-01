@@ -18,7 +18,7 @@ impl LabTypeId {
             return None;
         }
 
-        if bytes.iter().any(|&b| b == 0) {
+        if bytes.contains(&0) {
             // Trim trailing zeros but ensure non-empty
             let mut len = 4;
             while len > 0 && bytes[len - 1] == 0 {

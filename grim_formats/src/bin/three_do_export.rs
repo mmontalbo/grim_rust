@@ -39,10 +39,8 @@ fn main() -> Result<()> {
     let model = ThreeDoModel::from_bytes(&bytes)?;
     let export = ExportModel::from(&model);
 
-    if let Some(parent) = args.output.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = args.output.parent() && !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)?;
     }
 
     let file = File::create(&args.output)?;

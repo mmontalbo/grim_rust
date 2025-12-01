@@ -198,7 +198,7 @@ impl Mesh {
                     tex_indices: face
                         .tex_indices
                         .as_ref()
-                        .and_then(|indices| Some([indices[0], indices[idx], indices[idx + 1]])),
+                        .map(|indices| [indices[0], indices[idx], indices[idx + 1]]),
                     material_index: face.material_index,
                     face_index,
                 };

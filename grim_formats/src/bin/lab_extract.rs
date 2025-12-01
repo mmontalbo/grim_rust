@@ -64,16 +64,15 @@ fn resolve_lab_paths(args: &Args) -> Result<Vec<PathBuf>> {
         labs.extend(args.labs.iter().cloned());
     } else if let Some(root) = args.root.as_ref() {
         for entry in WalkDir::new(root).into_iter().filter_map(|res| res.ok()) {
-            if entry.file_type().is_file() {
-                if entry
+            if entry.file_type().is_file()
+                && entry
                     .path()
                     .extension()
                     .and_then(|ext| ext.to_str())
                     .map(|ext| ext.eq_ignore_ascii_case("lab"))
                     .unwrap_or(false)
-                {
-                    labs.push(entry.into_path());
-                }
+            {
+                labs.push(entry.into_path());
             }
         }
     }
@@ -129,10 +128,10 @@ fn extract_archive(
 
     let mut extracted = 0usize;
     for entry in archive.entries() {
-        if let Some(filter) = filter {
-            if !filter.contains(&entry.name.to_ascii_lowercase()) {
-                continue;
-            }
+        if let Some(filter) = filter
+            && !filter.contains(&entry.name.to_ascii_lowercase())
+        {
+            continue;
         }
 
         let raw = PathBuf::from(entry.name.replace('\\', "/"));

@@ -64,7 +64,7 @@ impl BmFrame {
             metadata.bits_per_pixel
         );
         ensure!(
-            self.data.len() % 2 == 0,
+            self.data.len().is_multiple_of(2),
             "depth buffer payload must be a multiple of 2 bytes"
         );
 
@@ -288,7 +288,7 @@ fn read_u16_from(stream: &mut &[u8]) -> Result<u16> {
 
 fn read_u8_from(stream: &mut &[u8]) -> Result<u8> {
     ensure!(
-        stream.len() >= 1,
+        !stream.is_empty(),
         "codec3 stream exhausted while reading byte"
     );
     let value = stream[0];
@@ -388,7 +388,10 @@ fn decompress_codec3(compressed: &[u8], result: &mut [u8], seed: Option<&[u8]>) 
 }
 
 fn convert_rgb565_to_rgba8888(data: &[u8]) -> Result<Vec<u8>> {
-    ensure!(data.len() % 2 == 0, "RGB565 buffer must be even length");
+    ensure!(
+        data.len().is_multiple_of(2),
+        "RGB565 buffer must be even length"
+    );
     let pixel_count = data.len() / 2;
     let mut rgba = Vec::with_capacity(pixel_count * 4);
 
@@ -408,7 +411,7 @@ fn convert_rgb565_to_rgba8888(data: &[u8]) -> Result<Vec<u8>> {
 
 fn convert_rgba8888_le(data: &[u8]) -> Result<Vec<u8>> {
     ensure!(
-        data.len() % 4 == 0,
+        data.len().is_multiple_of(4),
         "RGBA8888 buffer must be a multiple of 4 bytes"
     );
     let mut rgba = Vec::with_capacity(data.len());
@@ -425,7 +428,7 @@ fn convert_rgba8888_le(data: &[u8]) -> Result<Vec<u8>> {
 
 fn convert_zbuffer16_to_rgba8888(data: &[u8]) -> Result<Vec<u8>> {
     ensure!(
-        data.len() % 2 == 0,
+        data.len().is_multiple_of(2),
         "Z-buffer payload must be a multiple of 2 bytes"
     );
 
@@ -582,7 +585,7 @@ mod tests {
                 checksum = checksum,
                 diff_bytes = diff_bytes
             );
-            assert_eq!(checksum, 233_610_493_010_832_586_3u64);
+            assert_eq!(checksum, 2_336_104_930_108_325_863_u64);
 
             if label == "base" {
                 let stats = delta_frame

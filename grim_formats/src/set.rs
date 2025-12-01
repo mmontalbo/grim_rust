@@ -240,10 +240,10 @@ impl SetupBuilder {
             if let Some(value) = line.split_whitespace().last() {
                 self.near_clip = Some(value.parse()?);
             }
-        } else if line.starts_with("fclip") {
-            if let Some(value) = line.split_whitespace().last() {
-                self.far_clip = Some(value.parse()?);
-            }
+        } else if line.starts_with("fclip")
+            && let Some(value) = line.split_whitespace().last()
+        {
+            self.far_clip = Some(value.parse()?);
         }
         Ok(())
     }
@@ -286,25 +286,25 @@ impl SectorBuilder {
         let height = self
             .height
             .ok_or_else(|| anyhow!("sector '{}' missing height", self.name))?;
-        if let Some(expected) = self.expected_vertices {
-            if expected != self.vertices.len() {
-                return Err(anyhow!(
-                    "sector '{}' expected {} vertices, found {}",
-                    self.name,
-                    expected,
-                    self.vertices.len()
-                ));
-            }
+        if let Some(expected) = self.expected_vertices
+            && expected != self.vertices.len()
+        {
+            return Err(anyhow!(
+                "sector '{}' expected {} vertices, found {}",
+                self.name,
+                expected,
+                self.vertices.len()
+            ));
         }
-        if let Some(expected) = self.expected_tris {
-            if expected != self.triangles.len() {
-                return Err(anyhow!(
-                    "sector '{}' expected {} triangles, found {}",
-                    self.name,
-                    expected,
-                    self.triangles.len()
-                ));
-            }
+        if let Some(expected) = self.expected_tris
+            && expected != self.triangles.len()
+        {
+            return Err(anyhow!(
+                "sector '{}' expected {} triangles, found {}",
+                self.name,
+                expected,
+                self.triangles.len()
+            ));
         }
         Ok(Sector {
             name: self.name,
@@ -345,7 +345,10 @@ impl SectorBuilder {
                 .expected_vertices
                 .ok_or_else(|| anyhow!("numvertices must precede vertices block"))?;
             let target_len = self.vertices.len() + expected;
-            let tail = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+            let tail = line
+                .split_once(':')
+                .map(|(_, value)| value.trim())
+                .unwrap_or("");
             if !tail.is_empty() {
                 self.vertices.push(parse_vec3(tail)?);
             }
@@ -368,7 +371,10 @@ impl SectorBuilder {
                 .expected_tris
                 .ok_or_else(|| anyhow!("numtris must precede triangles block"))?;
             let target_len = self.triangles.len() + expected;
-            let tail = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+            let tail = line
+                .split_once(':')
+                .map(|(_, value)| value.trim())
+                .unwrap_or("");
             if !tail.is_empty() {
                 self.triangles.push(parse_triangle(tail)?);
             }

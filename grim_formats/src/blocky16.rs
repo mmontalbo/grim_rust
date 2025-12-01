@@ -129,8 +129,8 @@ impl Blocky16Decoder {
     fn init(&mut self, width: usize, height: usize) -> Result<()> {
         self.width = width;
         self.height = height;
-        self.blocks_width = (width + 7) / 8;
-        self.blocks_height = (height + 7) / 8;
+        self.blocks_width = width.div_ceil(8);
+        self.blocks_height = height.div_ceil(8);
         self.frame_size = width
             .checked_mul(height)
             .context("blocky16 frame size overflow")?
@@ -146,7 +146,7 @@ impl Blocky16Decoder {
             .context("blocky16 backing surface overflow")?
             .checked_mul(2)
             .context("blocky16 backing surface overflow")?;
-        self.offset = size.checked_sub(self.frame_size).unwrap_or(0);
+        self.offset = size.saturating_sub(self.frame_size);
         let delta_size = size
             .checked_mul(3)
             .and_then(|value| value.checked_add(200))
@@ -758,7 +758,7 @@ impl Blocky16Decoder {
             for d in 0..count_true {
                 let idx = 64 + c + d;
                 let tmp = self.table_small[idx] as i16;
-                let linear = ((tmp >> 2) as i16 * width as i16) + (tmp & 3) as i16;
+                let linear = (tmp >> 2) * width as i16 + (tmp & 3);
                 let dest = c + d * 2;
                 self.table_small[dest] = linear as u8;
                 self.table_small[dest + 1] = (linear >> 8) as u8;
@@ -768,7 +768,7 @@ impl Blocky16Decoder {
             for d in 0..count_false {
                 let idx = 80 + c + d;
                 let tmp = self.table_small[idx] as i16;
-                let linear = ((tmp >> 2) as i16 * width as i16) + (tmp & 3) as i16;
+                let linear = (tmp >> 2) * width as i16 + (tmp & 3);
                 let dest = 32 + c + d * 2;
                 self.table_small[dest] = linear as u8;
                 self.table_small[dest + 1] = (linear >> 8) as u8;
@@ -778,7 +778,7 @@ impl Blocky16Decoder {
             for d in 0..count_big_true {
                 let idx = 256 + a + d;
                 let tmp = self.table_big[idx] as i16;
-                let linear = ((tmp >> 3) as i16 * width as i16) + (tmp & 7) as i16;
+                let linear = (tmp >> 3) * width as i16 + (tmp & 7);
                 let dest = a + d * 2;
                 self.table_big[dest] = linear as u8;
                 self.table_big[dest + 1] = (linear >> 8) as u8;
@@ -788,7 +788,7 @@ impl Blocky16Decoder {
             for d in 0..count_big_false {
                 let idx = 320 + a + d;
                 let tmp = self.table_big[idx] as i16;
-                let linear = ((tmp >> 3) as i16 * width as i16) + (tmp & 7) as i16;
+                let linear = (tmp >> 3) * width as i16 + (tmp & 7);
                 let dest = 128 + a + d * 2;
                 self.table_big[dest] = linear as u8;
                 self.table_big[dest + 1] = (linear >> 8) as u8;
