@@ -75,7 +75,7 @@ impl MessageHeader {
         if input.len() < HEADER_LEN {
             return Err(ProtocolError::TruncatedHeader);
         }
-        if &input[..4] != HEADER_MAGIC {
+        if input[..4] != HEADER_MAGIC {
             return Err(ProtocolError::BadMagic);
         }
         let mut version_bytes = &input[4..6];
@@ -231,7 +231,7 @@ pub struct MovieControl {
     pub message: Option<String>,
 }
 
-fn vec_is_empty<T>(vec: &Vec<T>) -> bool {
+fn vec_is_empty<T>(vec: &[T]) -> bool {
     vec.is_empty()
 }
 
