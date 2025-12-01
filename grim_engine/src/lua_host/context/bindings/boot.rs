@@ -46,7 +46,7 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
             if args.is_empty() {
                 return Ok(0u32);
             }
-            let label = describe_callable_label(args.get(0).unwrap());
+            let label = describe_callable_label(args.first().unwrap());
             let handle = {
                 let mut state = start_ctx.borrow_mut();
                 state.start_script(label)
@@ -65,7 +65,7 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
             if args.is_empty() {
                 return Ok(0u32);
             }
-            let label = describe_callable_label(args.get(0).unwrap());
+            let label = describe_callable_label(args.first().unwrap());
             let handle = {
                 let mut state = single_ctx.borrow_mut();
                 state.start_script(label)
@@ -89,7 +89,7 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
         "stop_script",
         lua.create_function(move |_, args: Variadic<Value>| {
             let description = args
-                .get(0)
+                .first()
                 .map(describe_value)
                 .unwrap_or_else(|| "<unknown>".to_string());
             stop_ctx
@@ -113,7 +113,7 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
         "StartFullscreenMovie",
         lua.create_function(move |_, args: Variadic<Value>| {
             let movie = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             let yields = args.get(1).and_then(value_to_u32);
@@ -130,7 +130,7 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
         "RunFullscreenMovie",
         lua.create_function(move |_, args: Variadic<Value>| {
             let movie = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             let yields = args.get(1).and_then(value_to_u32);
@@ -147,7 +147,7 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
         "StartMovie",
         lua.create_function(move |_, args: Variadic<Value>| {
             let movie = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             Ok(legacy_movie_ctx

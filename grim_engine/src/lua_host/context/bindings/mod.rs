@@ -95,7 +95,7 @@ mod tests {
                         other => describe_value(&other),
                     };
                     Ok(Value::String(
-                        lua_ctx.create_string(&format!("fb::{key_name}"))?,
+                        lua_ctx.create_string(format!("fb::{key_name}"))?,
                     ))
                 },
             )

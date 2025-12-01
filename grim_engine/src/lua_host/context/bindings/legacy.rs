@@ -260,7 +260,7 @@ impl LegacyFallbacks {
             lua,
             "error",
             lua.create_function(|_, args: Variadic<Value>| {
-                if let Some(Value::String(message)) = args.get(0) {
+                if let Some(Value::String(message)) = args.first() {
                     eprintln!("[lua][error] {}", message.to_str()?);
                 }
                 Ok(Value::Nil)

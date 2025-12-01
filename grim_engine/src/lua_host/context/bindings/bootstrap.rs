@@ -146,7 +146,7 @@ fn install_basic_functions(
 
     let debug_state = context.clone();
     let print_debug = lua.create_function(move |_, args: Variadic<Value>| {
-        if let Some(Value::String(text)) = args.get(0) {
+        if let Some(Value::String(text)) = args.first() {
             if debug_state.borrow().verbose() {
                 println!("[lua][PrintDebug] {}", text.to_str()?);
             }
@@ -157,7 +157,7 @@ fn install_basic_functions(
 
     let logf_state = context.clone();
     let logf = lua.create_function(move |_, args: Variadic<Value>| {
-        if let Some(Value::String(text)) = args.get(0) {
+        if let Some(Value::String(text)) = args.first() {
             if logf_state.borrow().verbose() {
                 println!("[lua][logf] {}", text.to_str()?);
             }
@@ -300,7 +300,7 @@ fn install_system_table(
         "put_in_set",
         lua.create_function(move |_, args: Variadic<Value>| {
             let set = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             manny_put_ctx
@@ -329,7 +329,7 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
         "readfrom",
         lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
             let mut handle_ref = current_input.borrow_mut();
-            if let Some(Value::String(path)) = args.get(0) {
+            if let Some(Value::String(path)) = args.first() {
                 *handle_ref = Some(path.to_str().unwrap_or("<input>").to_string());
                 return Ok(Value::String(path.clone()));
             }
@@ -345,11 +345,11 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
         "writeto",
         lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
             let mut handle_ref = current_output.borrow_mut();
-            if let Some(Value::String(path)) = args.get(0) {
+            if let Some(Value::String(path)) = args.first() {
                 *handle_ref = Some(path.to_str().unwrap_or("<output>").to_string());
                 return Ok(Value::String(path.clone()));
             }
-            if let Some(Value::String(handle)) = args.get(0) {
+            if let Some(Value::String(handle)) = args.first() {
                 *handle_ref = Some(handle.to_str().unwrap_or("<output>").to_string());
                 return Ok(Value::String(handle.clone()));
             }
@@ -365,7 +365,7 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
         "appendto",
         lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
             let mut handle_ref = append_state.borrow_mut();
-            if let Some(Value::String(path)) = args.get(0) {
+            if let Some(Value::String(path)) = args.first() {
                 *handle_ref = Some(path.to_str().unwrap_or("<append>").to_string());
                 return Ok(Value::String(path.clone()));
             }
@@ -380,7 +380,7 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
         "read",
         lua.create_function(move |_, args: Variadic<Value>| {
             let _handle = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .or_else(|| read_state.borrow().clone());
             Ok(Value::Nil)
@@ -394,7 +394,7 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
         "write",
         lua.create_function(move |_, args: Variadic<Value>| {
             let handle = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .or_else(|| write_state.borrow().clone())
                 .unwrap_or_else(|| "<stdout>".to_string());
@@ -416,7 +416,7 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
 }
 
 fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {
-    let fallback = Value::Number(3.141592653589793);
+    let fallback = Value::Number(std::f64::consts::PI);
     let pi_value = globals
         .get::<_, Table>("math")
         .ok()
@@ -446,7 +446,7 @@ fn install_stubbed_tables(
         "write",
         lua.create_function(move |_, args: Variadic<Value>| {
             let key = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             prefs_write_ctx
@@ -459,7 +459,7 @@ fn install_stubbed_tables(
         "set_voice_effect",
         lua.create_function(move |_, args: Variadic<Value>| {
             let effect = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             prefs_voice_ctx
@@ -534,7 +534,7 @@ fn install_stubbed_tables(
         "unlock_concepts",
         lua.create_function(move |_, args: Variadic<Value>| {
             let value = args
-                .get(0)
+                .first()
                 .and_then(value_to_string)
                 .unwrap_or_else(|| "<unknown>".to_string());
             concepts_ctx
