@@ -79,7 +79,8 @@ impl FrameDumpMode {
             // Capture a small burst of frames by default when wildcard requested.
             return FrameDumpMode::First(5);
         }
-        if !trimmed.contains(',') && !trimmed.contains('-')
+        if !trimmed.contains(',')
+            && !trimmed.contains('-')
             && let Ok(count) = trimmed.parse::<u64>()
         {
             if count == 0 {

@@ -864,9 +864,7 @@ mod tests {
         assert!(fields.iter().any(|f| f == "id=0x00000007"));
         assert!(fields.iter().any(|f| f == "tag=42"));
         assert!(fields.iter().any(|f| f == "value_type=userdata"));
-        assert!(fields
-            .iter()
-            .all(|f| !f.starts_with("payload_hex=")));
+        assert!(fields.iter().all(|f| !f.starts_with("payload_hex=")));
     }
 
     #[test]
@@ -983,7 +981,9 @@ mod tests {
         let fields = EventBuilder::from(event).finish();
         assert!(fields.iter().any(|f| f == "event=set_table_entry"));
         assert!(fields.iter().any(|f| f == "table_handle=0x0000000a"));
-        assert!(fields.iter().any(|f| f == "table_handle_label=table:example"));
+        assert!(fields
+            .iter()
+            .any(|f| f == "table_handle_label=table:example"));
         assert!(fields
             .iter()
             .any(|f| f.starts_with("key={\"kind\":\"string\"")));

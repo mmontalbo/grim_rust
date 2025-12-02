@@ -228,7 +228,9 @@ fn observe_markers(
             return Ok((observed, seen, false));
         }
 
-        if let Some(deadline) = deadline && Instant::now() >= deadline {
+        if let Some(deadline) = deadline
+            && Instant::now() >= deadline
+        {
             return Ok((observed, seen, true));
         }
 
@@ -269,7 +271,9 @@ fn hold_for_duration(
     }
 
     while Instant::now() < hold_deadline {
-        if let Some(limit) = deadline && Instant::now() >= limit {
+        if let Some(limit) = deadline
+            && Instant::now() >= limit
+        {
             timed_out = true;
             break;
         }

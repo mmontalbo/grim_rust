@@ -64,7 +64,9 @@ fn main() -> Result<()> {
 
     let mut written = 0usize;
     for frame in &snm.frames {
-        if let Some(limit) = args.limit && written >= limit {
+        if let Some(limit) = args.limit
+            && written >= limit
+        {
             break;
         }
 

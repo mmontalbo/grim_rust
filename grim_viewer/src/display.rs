@@ -207,7 +207,9 @@ impl ViewerState {
 
         let pending_dump = self.maybe_prepare_frame_dump(&frame, &mut encoder);
         self.queue.submit(std::iter::once(encoder.finish()));
-        if let Some(dump) = pending_dump && let Err(err) = self.finish_frame_dump(dump) {
+        if let Some(dump) = pending_dump
+            && let Err(err) = self.finish_frame_dump(dump)
+        {
             eprintln!("[grim_viewer] failed to dump frame: {err:?}");
         }
         frame.present();

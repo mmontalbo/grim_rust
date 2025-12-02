@@ -208,7 +208,9 @@ struct EventDumpWriter {
 
 impl EventDumpWriter {
     fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() && !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!(
                     "failed to create engine event dump directory {}",
@@ -551,7 +553,9 @@ impl ActiveMovieStatus {
     }
 
     fn poll_pending_ready(&mut self, now: Instant) -> Option<MovieFrame> {
-        if let Some(front) = self.pending.front() && now >= front.deadline {
+        if let Some(front) = self.pending.front()
+            && now >= front.deadline
+        {
             let PendingMovieFrame {
                 frame,
                 pts,
@@ -933,67 +937,64 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    event_loop.run(move |event, target| {
-        match event {
-            Event::WindowEvent { window_id, event } if window_id == viewer.window().id() => {
-                match event {
-                    WindowEvent::CloseRequested => target.exit(),
-                    WindowEvent::Resized(size) => viewer.resize(size),
-                    WindowEvent::KeyboardInput {
-                        event:
-                            KeyEvent {
-                                logical_key: Key::Named(NamedKey::Escape),
-                                state: ElementState::Pressed,
-                                ..
-                            },
+    event_loop.run(move |event, target| match event {
+        Event::WindowEvent { window_id, event } if window_id == viewer.window().id() => match event
+        {
+            WindowEvent::CloseRequested => target.exit(),
+            WindowEvent::Resized(size) => viewer.resize(size),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Named(NamedKey::Escape),
+                        state: ElementState::Pressed,
                         ..
-                    } => target.exit(),
-                    WindowEvent::KeyboardInput {
-                        event:
-                            key_event @ KeyEvent {
-                                state: ElementState::Pressed,
-                                ..
-                            },
-                        ..
-                    } => {
-                        if handle_sync_key(&key_event, &mut controls)
-                            || handle_movie_key(&key_event, engine_stream.as_mut())
-                        {
-                            viewer.window().request_redraw();
-                        }
-                    }
-                    WindowEvent::RedrawRequested => match viewer.render() {
-                        Ok(_) => {}
-                        Err(SurfaceError::Lost) => viewer.resize(viewer.size()),
-                        Err(SurfaceError::OutOfMemory) => target.exit(),
-                        Err(err) => eprintln!("[grim_viewer] render error: {err:?}"),
                     },
-                    _ => {}
-                }
-            }
-            Event::AboutToWait => {
-                drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
-                drain_engine_events(engine_stream.as_mut(), &mut viewer);
-                let outcome = pump_movie_playback(engine_stream.as_mut(), &mut viewer);
-                if outcome.needs_redraw {
+                ..
+            } => target.exit(),
+            WindowEvent::KeyboardInput {
+                event:
+                    key_event @ KeyEvent {
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                if handle_sync_key(&key_event, &mut controls)
+                    || handle_movie_key(&key_event, engine_stream.as_mut())
+                {
                     viewer.window().request_redraw();
                 }
-                if let Some(deadline) = outcome.next_deadline {
-                    target.set_control_flow(ControlFlow::WaitUntil(deadline));
-                } else {
-                    target.set_control_flow(ControlFlow::Poll);
-                }
-                update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
-                update_debug_panel(
-                    &mut viewer,
-                    &controls,
-                    &retail_stream,
-                    engine_stream.as_ref(),
-                );
-                update_window_title(viewer.window(), &controls);
             }
+            WindowEvent::RedrawRequested => match viewer.render() {
+                Ok(_) => {}
+                Err(SurfaceError::Lost) => viewer.resize(viewer.size()),
+                Err(SurfaceError::OutOfMemory) => target.exit(),
+                Err(err) => eprintln!("[grim_viewer] render error: {err:?}"),
+            },
             _ => {}
+        },
+        Event::AboutToWait => {
+            drain_retail_events(&mut retail_stream, &mut viewer, &mut controls);
+            drain_engine_events(engine_stream.as_mut(), &mut viewer);
+            let outcome = pump_movie_playback(engine_stream.as_mut(), &mut viewer);
+            if outcome.needs_redraw {
+                viewer.window().request_redraw();
+            }
+            if let Some(deadline) = outcome.next_deadline {
+                target.set_control_flow(ControlFlow::WaitUntil(deadline));
+            } else {
+                target.set_control_flow(ControlFlow::Poll);
+            }
+            update_view_labels(&mut viewer, &retail_stream, engine_stream.as_ref());
+            update_debug_panel(
+                &mut viewer,
+                &controls,
+                &retail_stream,
+                engine_stream.as_ref(),
+            );
+            update_window_title(viewer.window(), &controls);
         }
+        _ => {}
     })?;
     Ok(())
 }
@@ -1659,7 +1660,8 @@ fn update_debug_panel(
                     && retail.enabled
                     && let Some(frame) = retail.last_frame.as_ref()
                 {
-                    let delta_ms = (update.host_time_ns as i128 - frame.host_time_ns as i128) as f64
+                    let delta_ms = (update.host_time_ns as i128 - frame.host_time_ns as i128)
+                        as f64
                         / 1_000_000.0;
                     lines.push(format!("Frame Δt: {delta_ms:.2} ms"));
                 }
@@ -1672,10 +1674,11 @@ fn update_debug_panel(
                     .unwrap_or_else(|| "(none)".to_string());
                 lines.push(format!("Hotspot: {hotspot_label}"));
                 if let Some(commentary) = update.commentary.as_ref() {
-                    let label = commentary
-                        .label
-                        .as_deref()
-                        .unwrap_or(if commentary.active { "(active)" } else { "(idle)" });
+                    let label = commentary.label.as_deref().unwrap_or(if commentary.active {
+                        "(active)"
+                    } else {
+                        "(idle)"
+                    });
                     let status = if commentary.active { "ACTIVE" } else { "idle" };
                     let mut line = format!("Commentary: {status} {label}");
                     if let Some(reason) = commentary.suppressed_reason.as_ref() {

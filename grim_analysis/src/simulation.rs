@@ -93,10 +93,7 @@ impl FunctionSimulationBuilder {
         method: String,
         args: Vec<String>,
     ) {
-        let subsystem_entry = self
-            .stateful_calls
-            .entry(subsystem)
-            .or_default();
+        let subsystem_entry = self.stateful_calls.entry(subsystem).or_default();
         let target_entry = subsystem_entry.entry(target.clone()).or_default();
         *target_entry.entry(method.clone()).or_insert(0) += 1;
 
@@ -415,9 +412,8 @@ fn function_call_arguments(call: &FunctionCall) -> Option<Vec<String>> {
 
 fn first_argument_expression(call: &FunctionCall) -> Option<&Expression> {
     call.suffixes().find_map(|suffix| {
-        if let Suffix::Call(Call::AnonymousCall(
-            FunctionArgs::Parentheses { arguments, .. },
-        )) = suffix
+        if let Suffix::Call(Call::AnonymousCall(FunctionArgs::Parentheses { arguments, .. })) =
+            suffix
         {
             arguments.iter().next()
         } else {
@@ -517,10 +513,9 @@ fn analyze_function_args(builder: &mut FunctionSimulationBuilder, args: &Functio
 
 fn function_args_to_strings(args: &FunctionArgs) -> Vec<String> {
     match args {
-        FunctionArgs::Parentheses { arguments, .. } => arguments
-            .iter()
-            .map(expression_to_argument_repr)
-            .collect(),
+        FunctionArgs::Parentheses { arguments, .. } => {
+            arguments.iter().map(expression_to_argument_repr).collect()
+        }
         FunctionArgs::TableConstructor(_) => vec!["<table>".to_string()],
         FunctionArgs::String(token) => vec![strip_matching_quotes(token.token().to_string())],
         _ => Vec::new(),

@@ -265,10 +265,7 @@ fn render_display_line(entry: &LogEntry) -> String {
     let marker = if entry.is_composite() { "[C]" } else { "   " };
     let mut text = format!(
         "{} {:>10} {:<28} {}",
-        marker,
-        entry.seq_display,
-        entry.event,
-        entry.summary
+        marker, entry.seq_display, entry.event, entry.summary
     );
     if let Some(hider) = entry.hidden_by {
         text.push_str(&format!(" (covered by #{})", hider + 1));

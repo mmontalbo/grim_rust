@@ -946,9 +946,7 @@ fn emit_set_table_entry(
         Some(pushes) if pushes.len() >= 2 => pushes,
         _ => return,
     };
-    let handle = match table_handle
-        .or_else(|| table_handle_from_pushes(&pushes))
-    {
+    let handle = match table_handle.or_else(|| table_handle_from_pushes(&pushes)) {
         Some(handle) => handle,
         None => return,
     };
@@ -1474,8 +1472,11 @@ impl PushEventTracker {
         if self.pushes.len() == self.capacity {
             self.pushes.pop_front();
         }
-        self.pushes
-            .push_back(TrackedPush { log_seq, preview, handle });
+        self.pushes.push_back(TrackedPush {
+            log_seq,
+            preview,
+            handle,
+        });
     }
 
     fn record_non_push(&mut self) {
