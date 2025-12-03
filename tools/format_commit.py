@@ -119,6 +119,18 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+def _is_deleted_in_git(root: Path, path: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--deleted", "--", path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return path in result.stdout.splitlines()
+
 
 def format_message(component: str, summary: str, why: list[str], what: list[str]) -> str:
     root = Path(__file__).resolve().parent.parent
@@ -152,7 +164,8 @@ def format_message(component: str, summary: str, why: list[str], what: list[str]
         except ValueError as exc:
             raise ValueError(f"--what path must be within repo: {path}") from exc
         if not file_path.exists():
-            raise ValueError(f"--what path does not exist: {path}")
+            if not _is_deleted_in_git(root, path):
+                raise ValueError(f"--what path does not exist: {path}")
 
     lines = [f"{component}: {summary}", "", "Why:"]
     lines.extend(f"- {item}" for item in why)
