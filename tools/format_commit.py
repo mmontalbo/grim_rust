@@ -2,7 +2,7 @@
 """Format a commit message that follows the project template.
 
 Usage:
-    python tools/format_commit.py grim_viewer "short summary" \
+    python tools/format_commit.py grim_engine "short summary" \
         --why "reason one" --why "reason two" \
         --what "path/file: change description" [...]
 

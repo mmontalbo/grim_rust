@@ -6,7 +6,7 @@ Why:
 What:
 - path/to/file: brief description of the edit
 
-# component should be a crate name (e.g. grim_viewer, grim_engine, grim_formats), docs, or tools.
+# component should be a crate name (e.g. grim_engine, grim_formats, grim_analysis), docs, or tools.
 # tools/format_commit.py can be used to generate a compliant message and
 # tools/lint_commit.py validates an existing message.
 
