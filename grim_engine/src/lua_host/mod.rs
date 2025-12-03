@@ -1,4 +1,5 @@
 mod context;
+mod legacy_lua;
 mod telemetry;
 
 use std::cell::RefCell;

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use grim_analysis::resources::normalize_legacy_lua;
+use crate::lua_host::legacy_lua::normalize_legacy_lua;
 use mlua::{Error as LuaError, Lua, MultiValue, Result as LuaResult, Value};
 
 use crate::lua_host::context::EngineContext;
