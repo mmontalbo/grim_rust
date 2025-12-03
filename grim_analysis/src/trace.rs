@@ -1,7 +1,6 @@
 use crate::{
     logging::{
-        log_event, log_event_with_seq, log_event_with_seq_display, log_line, LuaEvent,
-        OriginFields, UpvaluePreview, ValueFields, ValueType,
+        log_line, EventBuilder, LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
     },
     lua_api::{
         call_real_lua_call, call_real_lua_callfunction, call_real_lua_collectgarbage,
@@ -12,17 +11,17 @@ use crate::{
         call_real_lua_getstring, call_real_lua_gettable, call_real_lua_getuserdata,
         call_real_lua_iscfunction, call_real_lua_isfunction, call_real_lua_isnumber,
         call_real_lua_isstring, call_real_lua_istable, call_real_lua_isuserdata,
-        call_real_lua_newtag, call_real_lua_push_c_closure, call_real_lua_pushlstring,
-        call_real_lua_pushnil, call_real_lua_pushnumber, call_real_lua_pushobject,
-        call_real_lua_pushstring, call_real_lua_pushusertag, call_real_lua_pushvalue,
-        call_real_lua_rawgetglobal, call_real_lua_rawgettable, call_real_lua_rawsetglobal,
-        call_real_lua_rawsettable, call_real_lua_ref, call_real_lua_setfallback,
-        call_real_lua_setglobal, call_real_lua_settable, call_real_lua_settag,
-        call_real_lua_settagmethod, call_real_lua_tag, call_real_lua_unref, LuaCFunction,
-        LuaObject,
+        call_real_lua_newstate, call_real_lua_newtag, call_real_lua_newthread, call_real_lua_open,
+        call_real_lua_push_c_closure, call_real_lua_pushlstring, call_real_lua_pushnil,
+        call_real_lua_pushnumber, call_real_lua_pushobject, call_real_lua_pushstring,
+        call_real_lua_pushusertag, call_real_lua_pushvalue, call_real_lua_rawgetglobal,
+        call_real_lua_rawgettable, call_real_lua_rawsetglobal, call_real_lua_rawsettable,
+        call_real_lua_ref, call_real_lua_setfallback, call_real_lua_setglobal,
+        call_real_lua_settable, call_real_lua_settag, call_real_lua_settagmethod,
+        call_real_lua_tag, call_real_lua_unref, LuaCFunction, LuaObject, LuaState,
     },
     symbol_map::lookup_symbol_from_map,
-    telemetry,
+    telemetry, vm_state,
 };
 use libc::{c_char, c_int, size_t, Dl_info};
 use std::{
@@ -63,6 +62,45 @@ macro_rules! forward_int_result {
             }
         }
     }};
+}
+
+pub(crate) unsafe fn trace_lua_open() -> LuaState {
+    match call_real_lua_open() {
+        Some(state) => {
+            vm_state::record_main_state(state);
+            state
+        }
+        None => {
+            log_line("lua_open symbol missing; returning null");
+            ptr::null_mut()
+        }
+    }
+}
+
+pub(crate) unsafe fn trace_lua_newstate() -> LuaState {
+    match call_real_lua_newstate() {
+        Some(state) => {
+            vm_state::record_main_state(state);
+            state
+        }
+        None => {
+            log_line("lua_newstate symbol missing; returning null");
+            ptr::null_mut()
+        }
+    }
+}
+
+pub(crate) unsafe fn trace_lua_newthread(state: LuaState) -> LuaState {
+    match call_real_lua_newthread(state) {
+        Some(thread) => {
+            vm_state::record_thread_state(thread);
+            thread
+        }
+        None => {
+            log_line("lua_newthread symbol missing; returning null");
+            ptr::null_mut()
+        }
+    }
 }
 
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {
@@ -161,9 +199,10 @@ pub(crate) unsafe fn trace_lua_pushnil() {
 
 pub(crate) unsafe fn trace_lua_pushstring(value: *const c_char) {
     let text = cstr_opt(value).unwrap_or_else(|| "<null>".to_string());
+    let preview = truncate_for_log(&text, 80);
     let log_seq = log_event_with_seq(LuaEvent::PushString {
         len: text.len(),
-        preview: truncate_for_log(&text, 80),
+        preview: preview.clone(),
     });
     record_push_preview(
         log_seq,
@@ -171,7 +210,7 @@ pub(crate) unsafe fn trace_lua_pushstring(value: *const c_char) {
             kind: ValueType::String,
             value: None,
             value_len: Some(text.len()),
-            preview: Some(truncate_for_log(&text, 80)),
+            preview: Some(preview),
             tag: None,
         },
         None,
@@ -188,9 +227,10 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
         let bytes = std::slice::from_raw_parts(value as *const u8, len as usize);
         String::from_utf8_lossy(bytes).into_owned()
     };
+    let preview = truncate_for_log(&text, 80);
     let log_seq = log_event_with_seq(LuaEvent::PushLstring {
         len: len as usize,
-        preview: truncate_for_log(&text, 80),
+        preview: preview.clone(),
     });
     record_push_preview(
         log_seq,
@@ -198,7 +238,7 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
             kind: ValueType::String,
             value: None,
             value_len: Some(text.len()),
-            preview: Some(truncate_for_log(&text, 80)),
+            preview: Some(preview),
             tag: None,
         },
         None,
@@ -330,7 +370,6 @@ pub(crate) unsafe fn trace_lua_settable() {
     if succeeded {
         emit_set_table_entry(table_handle, pushes, raw_seq, caller, None);
     }
-    record_non_push_event();
 }
 
 pub(crate) unsafe fn trace_lua_rawsettable() {
@@ -356,7 +395,6 @@ pub(crate) unsafe fn trace_lua_rawsettable() {
             Some("via_rawsettable".to_string()),
         );
     }
-    record_non_push_event();
 }
 
 pub(crate) unsafe fn trace_lua_gettable() -> LuaObject {
@@ -446,6 +484,8 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
             if let Some(details) = describe_lua_value(handle) {
                 values = value_fields_from_details(&details);
             }
+        } else {
+            note = Some("lua_rawgetglobal_missing_after_set".to_string());
         }
     } else {
         note = Some("lua_rawsetglobal_missing".to_string());
@@ -506,7 +546,14 @@ pub(crate) unsafe fn trace_lua_setfallback(
 pub(crate) unsafe fn trace_lua_newtag() -> c_int {
     record_non_push_event();
     match call_real_lua_newtag() {
-        Some(tag) => tag,
+        Some(tag) => {
+            log_event(LuaEvent::SetTag {
+                tag,
+                note: Some("created_via_newtag".to_string()),
+                tag_label: None,
+            });
+            tag
+        }
         None => {
             log_line("lua_newtag symbol missing; returning 0");
             0
@@ -822,6 +869,16 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             values: values.clone(),
             origin: origin_fields(origin.as_ref()),
         });
+    } else {
+        log_event(LuaEvent::SetTagmethod {
+            tag,
+            event_name: event_label.clone(),
+            tag_label: tag_label_for(tag),
+            handle: handle_field,
+            handle_label,
+            values,
+            origin: origin_fields(origin.as_ref()),
+        });
     }
 }
 pub(crate) unsafe fn trace_lua_collectgarbage() {
@@ -1056,11 +1113,7 @@ fn snapshot_upvalue_previews(upvalues: c_int) -> Option<Vec<TrackedPush>> {
     }
     let required = upvalues as usize;
     match push_event_tracker().lock() {
-        Ok(mut tracker) => {
-            let previews = tracker.snapshot_recent(required);
-            tracker.clear();
-            previews
-        }
+        Ok(tracker) => tracker.snapshot_recent(required),
         Err(_) => {
             log_line("push event tracker mutex poisoned; unable to snapshot upvalues");
             None
@@ -1070,13 +1123,9 @@ fn snapshot_upvalue_previews(upvalues: c_int) -> Option<Vec<TrackedPush>> {
 
 fn take_last_push_seq() -> Option<u64> {
     match push_event_tracker().lock() {
-        Ok(mut tracker) => {
-            let seq = tracker
-                .snapshot_recent(1)
-                .and_then(|pushes| pushes.into_iter().last().map(|p| p.log_seq));
-            tracker.clear();
-            seq
-        }
+        Ok(tracker) => tracker
+            .snapshot_recent(1)
+            .and_then(|pushes| pushes.into_iter().last().map(|p| p.log_seq)),
         Err(_) => {
             log_line("push event tracker mutex poisoned; skipping push capture");
             None
@@ -1802,4 +1851,50 @@ struct MapSymbol {
     name: String,
     distance: usize,
     source_label: Option<String>,
+}
+
+fn log_event(event: LuaEvent) {
+    log_event_with_state(event, None);
+}
+
+fn log_event_with_seq(event: LuaEvent) -> u64 {
+    log_event_with_seq_state(event, None)
+}
+
+fn log_event_with_seq_display(event: LuaEvent, seq_display: impl Into<String>) {
+    log_event_with_seq_display_state(event, seq_display, None);
+}
+
+fn log_event_with_state(event: LuaEvent, preferred_state: Option<LuaState>) {
+    let mut builder: EventBuilder = event.into();
+    inject_state_field(&mut builder, preferred_state);
+    crate::logging::log_event(builder);
+}
+
+fn log_event_with_seq_state(event: LuaEvent, preferred_state: Option<LuaState>) -> u64 {
+    let mut builder: EventBuilder = event.into();
+    inject_state_field(&mut builder, preferred_state);
+    crate::logging::log_event_with_seq(builder)
+}
+
+fn log_event_with_seq_display_state(
+    event: LuaEvent,
+    seq_display: impl Into<String>,
+    preferred_state: Option<LuaState>,
+) {
+    let mut builder: EventBuilder = event.into();
+    inject_state_field(&mut builder, preferred_state);
+    crate::logging::log_event_with_seq_display(builder, seq_display);
+}
+
+fn inject_state_field(builder: &mut EventBuilder, preferred_state: Option<LuaState>) {
+    if let Some(addr) = active_state(preferred_state) {
+        builder.kv_mut("lua_state", format!("0x{addr:08x}"));
+    }
+}
+
+fn active_state(preferred_state: Option<LuaState>) -> Option<usize> {
+    preferred_state
+        .map(|ptr| ptr as usize)
+        .or_else(vm_state::main_state_addr)
 }

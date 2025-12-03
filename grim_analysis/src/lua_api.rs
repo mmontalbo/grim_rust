@@ -5,12 +5,16 @@ use std::{ffi::CStr, sync::OnceLock};
 /// Retail Lua 3.2 uses a `void (*)(void)` callback type for C functions.
 pub(crate) type LuaCFunction = unsafe extern "C" fn();
 pub(crate) type LuaObject = u32;
+pub(crate) type LuaState = *mut c_void;
 type LuaPushCClosureFn = unsafe extern "C" fn(LuaCFunction, c_int);
 type LuaDoFileFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type LuaDoStringFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type LuaDoBufferFn = unsafe extern "C" fn(*const c_char, size_t, *const c_char) -> c_int;
 type LuaCallFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type LuaCallFunctionFn = unsafe extern "C" fn(LuaObject) -> c_int;
+type LuaOpenFn = unsafe extern "C" fn() -> LuaState;
+type LuaNewStateFn = unsafe extern "C" fn() -> LuaState;
+type LuaNewThreadFn = unsafe extern "C" fn(LuaState) -> LuaState;
 type LuaGetObjNameFn = unsafe extern "C" fn(LuaObject, *mut *mut c_char) -> *mut c_char;
 type LuaSetGlobalFn = unsafe extern "C" fn(*const c_char);
 type LuaGetGlobalFn = unsafe extern "C" fn(*const c_char) -> LuaObject;
@@ -57,6 +61,9 @@ static LUA_DOFILE: OnceLock<Option<LuaDoFileFn>> = OnceLock::new();
 static LUA_DOBUFFER: OnceLock<Option<LuaDoBufferFn>> = OnceLock::new();
 static LUA_CALL: OnceLock<Option<LuaCallFn>> = OnceLock::new();
 static LUA_CALLFUNCTION: OnceLock<Option<LuaCallFunctionFn>> = OnceLock::new();
+static LUA_OPEN: OnceLock<Option<LuaOpenFn>> = OnceLock::new();
+static LUA_NEWSTATE: OnceLock<Option<LuaNewStateFn>> = OnceLock::new();
+static LUA_NEWTHREAD: OnceLock<Option<LuaNewThreadFn>> = OnceLock::new();
 static LUA_GETOBJNAME: OnceLock<Option<LuaGetObjNameFn>> = OnceLock::new();
 static LUA_SETGLOBAL: OnceLock<Option<LuaSetGlobalFn>> = OnceLock::new();
 static LUA_GETGLOBAL: OnceLock<Option<LuaGetGlobalFn>> = OnceLock::new();
@@ -110,6 +117,18 @@ pub(crate) fn call_real_lua_push_c_closure(func: LuaCFunction, upvalues: c_int) 
             }
         }
     }
+}
+
+pub(crate) fn call_real_lua_open() -> Option<LuaState> {
+    unsafe { lua_open_symbol().map(|symbol| symbol()) }
+}
+
+pub(crate) fn call_real_lua_newstate() -> Option<LuaState> {
+    unsafe { lua_newstate_symbol().map(|symbol| symbol()) }
+}
+
+pub(crate) fn call_real_lua_newthread(state: LuaState) -> Option<LuaState> {
+    unsafe { lua_newthread_symbol().map(|symbol| symbol(state)) }
 }
 
 pub(crate) fn call_real_lua_dofile(filename: *const c_char) -> Option<c_int> {
@@ -578,6 +597,36 @@ fn lua_callfunction_symbol() -> Option<LuaCallFunctionFn> {
             label: "lua_callfunction",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaCallFunctionFn>(ptr))
+    })
+}
+
+fn lua_open_symbol() -> Option<LuaOpenFn> {
+    *LUA_OPEN.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_open\0",
+            label: "lua_open",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaOpenFn>(ptr))
+    })
+}
+
+fn lua_newstate_symbol() -> Option<LuaNewStateFn> {
+    *LUA_NEWSTATE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_newstate\0",
+            label: "lua_newstate",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewStateFn>(ptr))
+    })
+}
+
+fn lua_newthread_symbol() -> Option<LuaNewThreadFn> {
+    *LUA_NEWTHREAD.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_newthread\0",
+            label: "lua_newthread",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewThreadFn>(ptr))
     })
 }
 

@@ -1,14 +1,10 @@
 [workspace]
 members = [
-  "grim_analysis",
   "grim_formats",
   "grim_engine",
-  "grim_viewer",
-  "grim_stream",
-  "tools/live_retail_capture",
   "grctl",
   "grctl/grim_scenarios",
-  "grim_analysis/retail_capture/rust_shim",
+  "grim_analysis",
   "grim_telemetry_common",
   "tools/trace_tui",
 ]

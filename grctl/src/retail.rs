@@ -55,8 +55,6 @@ impl RetailLayout {
         let rust_workspace_target = repo_root.join("target").join("i686-unknown-linux-gnu");
         let rust_local_target = repo_root
             .join("grim_analysis")
-            .join("retail_capture")
-            .join("rust_shim")
             .join("target")
             .join("i686-unknown-linux-gnu");
         let rust_shim_workspace_release = rust_workspace_target.join("release").join(shim_name);

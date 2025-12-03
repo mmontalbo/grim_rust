@@ -21,11 +21,6 @@ without modifying the game's assets.
   traces align 1:1.
 - `lua_getglobal` and `lua_callfunction` logs are always per-call and include
   the running count. `GRIM_SHIM_LOG=/path` redirects output to a file.
-- A quick diff helper lives at `tools/trace_diff.py`:
-  `./tools/trace_diff.py retail.log rust.log [--ignore field] [--context N]`
-  reports the first mismatch and prints ±N lines of context (defaults ignore
-  `seq`/`ts` since they diverge across runs).
-
 ## Event reference (raw Lua VM surface)
 - Common envelope on every line: `seq`, `ts`, `event=<name>`, followed by event
   fields, then `engine=retail vm_id=lua32` (and optional `run_id` if set).
@@ -119,7 +114,7 @@ nix-shell --run 'cargo build -p grim_telemetry_shim --release --target i686-unkn
 ```
 
 The resulting shared object lives at
-`grim_analysis/retail_capture/rust_shim/target/release/libgrim_telemetry_shim.so`.
+`target/i686-unknown-linux-gnu/release/libgrim_telemetry_shim.so` (workspace build) or `grim_analysis/target/i686-unknown-linux-gnu/release/libgrim_telemetry_shim.so` if built locally from this crate.
 Preload it before starting the retail executable:
 
 ```bash
