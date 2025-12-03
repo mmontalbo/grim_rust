@@ -1,8 +1,8 @@
 # grctl
 
 `grctl` is a BusyBox-style control utility that supervises the Grim Fandango
-study stack. It centralises the ad-hoc tooling in `tools/` so the viewer,
-engine, and retail binary share the same lifecycle and logging conventions.
+study stack. It centralises the ad-hoc tooling in `tools/` so the engine and
+retail binary share the same lifecycle and logging conventions.
 
 ## Quick start
 
@@ -46,9 +46,6 @@ automatically when it detects that a recorded PID has already exited.
 - `watch intro-timeline [--engine-log <path>] [--retail-events <path>] [--poll-interval-ms <ms>] [--from-end]` tails `target/grctl/logs/grim_engine.log` (symlink to the latest run) and `dev-install/mods/telemetry_events.jsonl`, parses `intro.timeline` events, and prints a rolling missing/extra/order summary.
 - Example: `nix-shell --run 'cargo run -p grctl -- watch intro-timeline --poll-interval-ms 500'`.
 - `watch intro-timeline --launch [--engine-release]` clears the intro logs, starts grim_engine headless with verbose logging, launches the retail capture without a timeout, and then begins the watch. Press Ctrl-C to stop the watch and shut down the launched components.
-
-The scenario and viewer helpers remain available but are hidden; they are not
-part of the streamlined boot/telemetry comparison flow.
 
 ## Retail helpers
 
