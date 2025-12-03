@@ -145,6 +145,8 @@ def format_message(component: str, summary: str, why: list[str], what: list[str]
         if not description.strip():
             raise ValueError(f"--what entry missing description after colon (got {item!r})")
         file_path = (root / path).resolve()
+        if file_path == root:
+            raise ValueError("--what path must not be the repo root; point at a specific file or directory")
         try:
             file_path.relative_to(root)
         except ValueError as exc:
