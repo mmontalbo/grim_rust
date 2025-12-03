@@ -16,17 +16,11 @@ flow and prototype modern tooling around it.
   read from automatically.
 
 ## Repository Layout
-- `grim_analysis/` – static boot-flow analysis; details in
-  `grim_analysis/README.md`.
+- `grim_analysis/` – retail telemetry shim (`grim_telemetry_shim`); see
+  `grim_analysis/README.rust_shim.md`.
 - `grim_engine/` – prototype runtime host; see `grim_engine/README.md`.
 - `grim_formats/` – asset format helpers and CLIs; see `grim_formats/README.md`.
-- `grim_viewer/` – minimal live preview UI for retail + intro stream; see
-  `grim_viewer/README.md`.
-- `docs/` – reference material:
-  - `docs/runtime_smoke_tests.md` now tracks the trimmed intro playback scope
-    and links to historical runtime demo notes.
-  - `docs/live_streaming_pipeline.md` records the current live-preview stack and
-    the pieces that were intentionally removed.
+- `docs/` – reference notes for current tooling.
 - `tools/` – repo-level utilities such as `tools/sync_assets.sh` for asset
   preparation and commit helpers.
 
