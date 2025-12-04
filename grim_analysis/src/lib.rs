@@ -11,7 +11,6 @@
 
 mod logging;
 mod lua_api;
-mod symbol_map;
 mod telemetry;
 mod trace;
 mod vm_state;
@@ -19,14 +18,14 @@ mod vm_state;
 use libc::{c_char, c_int, c_void};
 use lua_api::LuaCFunction;
 use trace::{
-    trace_lua_call, trace_lua_callfunction, trace_lua_collectgarbage, trace_lua_copytagmethods,
-    trace_lua_createtable, trace_lua_dobuffer, trace_lua_dofile, trace_lua_dostring,
-    trace_lua_error, trace_lua_getglobal, trace_lua_getref, trace_lua_gettable, trace_lua_newtag,
-    trace_lua_push_closure, trace_lua_pushlstring, trace_lua_pushnil, trace_lua_pushnumber,
-    trace_lua_pushobject, trace_lua_pushstring, trace_lua_pushusertag, trace_lua_pushvalue,
-    trace_lua_rawgetglobal, trace_lua_rawgettable, trace_lua_rawsetglobal, trace_lua_rawsettable,
-    trace_lua_ref, trace_lua_setfallback, trace_lua_setglobal, trace_lua_settable,
-    trace_lua_settag, trace_lua_settagmethod, trace_lua_unref,
+    trace_lua_callfunction, trace_lua_collectgarbage, trace_lua_copytagmethods,
+    trace_lua_createtable, trace_lua_dofile, trace_lua_dostring, trace_lua_error,
+    trace_lua_getglobal, trace_lua_getref, trace_lua_gettable, trace_lua_newtag,
+    trace_lua_push_closure, trace_lua_pushnil, trace_lua_pushnumber, trace_lua_pushobject,
+    trace_lua_pushstring, trace_lua_pushusertag, trace_lua_rawgetglobal, trace_lua_rawgettable,
+    trace_lua_rawsetglobal, trace_lua_rawsettable, trace_lua_ref, trace_lua_setfallback,
+    trace_lua_setglobal, trace_lua_settable, trace_lua_settag, trace_lua_settagmethod,
+    trace_lua_unref,
 };
 
 #[no_mangle]
@@ -65,27 +64,8 @@ pub unsafe extern "C" fn lua_getglobal(name: *const libc::c_char) -> lua_api::Lu
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lua_dobuffer(
-    buffer: *const libc::c_char,
-    size: libc::size_t,
-    name: *const libc::c_char,
-) -> c_int {
-    trace_lua_dobuffer(buffer, size, name)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn lua_call(name: *const libc::c_char) -> c_int {
-    trace_lua_call(name)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn lua_callfunction(func: *mut libc::c_void) -> c_int {
     trace_lua_callfunction(func)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn lua_newthread(state: *mut c_void) -> *mut c_void {
-    trace::trace_lua_newthread(state)
 }
 
 #[no_mangle]
@@ -129,11 +109,6 @@ pub unsafe extern "C" fn lua_pushstring(value: *const libc::c_char) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lua_pushlstring(value: *const libc::c_char, len: libc::size_t) {
-    trace_lua_pushlstring(value, len);
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn lua_pushusertag(id: libc::c_int, tag: libc::c_int) {
     trace_lua_pushusertag(id, tag);
 }
@@ -141,11 +116,6 @@ pub unsafe extern "C" fn lua_pushusertag(id: libc::c_int, tag: libc::c_int) {
 #[no_mangle]
 pub unsafe extern "C" fn lua_pushobject(object: lua_api::LuaObject) {
     trace_lua_pushobject(object);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn lua_pushvalue(index: libc::c_int) {
-    trace_lua_pushvalue(index);
 }
 
 #[no_mangle]

@@ -1,5 +1,5 @@
 pub(crate) use grim_telemetry_common::{
-    EventBuilder, LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
+    EventBuilder, LuaEvent, OriginFields, ValueFields, ValueType,
 };
 use grim_telemetry_common::{TelemetryConfig, TelemetryLogger};
 
@@ -24,11 +24,4 @@ pub(crate) fn log_event(event: impl Into<EventBuilder>) {
 
 pub(crate) fn log_event_with_seq(event: impl Into<EventBuilder>) -> u64 {
     LOGGER.log_event_with_seq(event)
-}
-
-pub(crate) fn log_event_with_seq_display(
-    event: impl Into<EventBuilder>,
-    seq_display: impl Into<String>,
-) {
-    LOGGER.log_event_with_seq_display(event, seq_display)
 }
