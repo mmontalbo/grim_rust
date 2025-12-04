@@ -9,4 +9,3 @@ crate-type = ["cdylib"]
 [dependencies]
 libc = "0.2"
 grim_telemetry_common = { path = "../grim_telemetry_common" }
-serde_json = "1.0"

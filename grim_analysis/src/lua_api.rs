@@ -1,5 +1,5 @@
 use crate::logging::log_line;
-use libc::{c_char, c_double, c_float, c_int, c_void};
+use libc::{c_char, c_double, c_float, c_int, c_void, size_t};
 use std::{ffi::CStr, sync::OnceLock};
 
 /// Retail Lua 3.2 uses a `void (*)(void)` callback type for C functions.
@@ -9,9 +9,12 @@ pub(crate) type LuaState = *mut c_void;
 type LuaPushCClosureFn = unsafe extern "C" fn(LuaCFunction, c_int);
 type LuaDoFileFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type LuaDoStringFn = unsafe extern "C" fn(*const c_char) -> c_int;
+type LuaDoBufferFn = unsafe extern "C" fn(*const c_char, size_t, *const c_char) -> c_int;
+type LuaCallFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type LuaCallFunctionFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaOpenFn = unsafe extern "C" fn() -> LuaState;
 type LuaNewStateFn = unsafe extern "C" fn() -> LuaState;
+type LuaNewThreadFn = unsafe extern "C" fn(LuaState) -> LuaState;
 type LuaGetObjNameFn = unsafe extern "C" fn(LuaObject, *mut *mut c_char) -> *mut c_char;
 type LuaSetGlobalFn = unsafe extern "C" fn(*const c_char);
 type LuaGetGlobalFn = unsafe extern "C" fn(*const c_char) -> LuaObject;
@@ -29,7 +32,9 @@ type LuaGetUserdataFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaTagFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaPushNumberFn = unsafe extern "C" fn(c_float);
 type LuaPushStringFn = unsafe extern "C" fn(*const c_char);
+type LuaPushLStringFn = unsafe extern "C" fn(*const c_char, size_t);
 type LuaPushNilFn = unsafe extern "C" fn();
+type LuaPushValueFn = unsafe extern "C" fn(c_int);
 type LuaPushUsertagFn = unsafe extern "C" fn(c_int, c_int);
 type LuaPushObjectFn = unsafe extern "C" fn(LuaObject);
 type LuaCreateTableFn = unsafe extern "C" fn() -> LuaObject;
@@ -53,13 +58,15 @@ type LuaErrorFn = unsafe extern "C" fn(*const c_char);
 static LUA_PUSH_CCLOSURE: OnceLock<Option<LuaPushCClosureFn>> = OnceLock::new();
 static LUA_DOSTRING: OnceLock<Option<LuaDoStringFn>> = OnceLock::new();
 static LUA_DOFILE: OnceLock<Option<LuaDoFileFn>> = OnceLock::new();
+static LUA_DOBUFFER: OnceLock<Option<LuaDoBufferFn>> = OnceLock::new();
+static LUA_CALL: OnceLock<Option<LuaCallFn>> = OnceLock::new();
 static LUA_CALLFUNCTION: OnceLock<Option<LuaCallFunctionFn>> = OnceLock::new();
 static LUA_OPEN: OnceLock<Option<LuaOpenFn>> = OnceLock::new();
 static LUA_NEWSTATE: OnceLock<Option<LuaNewStateFn>> = OnceLock::new();
+static LUA_NEWTHREAD: OnceLock<Option<LuaNewThreadFn>> = OnceLock::new();
 static LUA_GETOBJNAME: OnceLock<Option<LuaGetObjNameFn>> = OnceLock::new();
 static LUA_SETGLOBAL: OnceLock<Option<LuaSetGlobalFn>> = OnceLock::new();
 static LUA_GETGLOBAL: OnceLock<Option<LuaGetGlobalFn>> = OnceLock::new();
-static LUA_STATE_GLOBAL: OnceLock<Option<usize>> = OnceLock::new();
 static LUA_GETCFUNCTION: OnceLock<Option<LuaGetCFunctionFn>> = OnceLock::new();
 static LUA_LUA2C: OnceLock<Option<LuaLua2CFn>> = OnceLock::new();
 static LUA_ISNUMBER: OnceLock<Option<LuaIsNumberFn>> = OnceLock::new();
@@ -74,7 +81,9 @@ static LUA_GETUSERDATA: OnceLock<Option<LuaGetUserdataFn>> = OnceLock::new();
 static LUA_TAG: OnceLock<Option<LuaTagFn>> = OnceLock::new();
 static LUA_PUSHNUMBER: OnceLock<Option<LuaPushNumberFn>> = OnceLock::new();
 static LUA_PUSHSTRING: OnceLock<Option<LuaPushStringFn>> = OnceLock::new();
+static LUA_PUSHLSTRING: OnceLock<Option<LuaPushLStringFn>> = OnceLock::new();
 static LUA_PUSHNIL: OnceLock<Option<LuaPushNilFn>> = OnceLock::new();
+static LUA_PUSHVALUE: OnceLock<Option<LuaPushValueFn>> = OnceLock::new();
 static LUA_PUSHUSERTAG: OnceLock<Option<LuaPushUsertagFn>> = OnceLock::new();
 static LUA_PUSHOBJECT: OnceLock<Option<LuaPushObjectFn>> = OnceLock::new();
 static LUA_CREATETABLE: OnceLock<Option<LuaCreateTableFn>> = OnceLock::new();
@@ -118,12 +127,28 @@ pub(crate) fn call_real_lua_newstate() -> Option<LuaState> {
     unsafe { lua_newstate_symbol().map(|symbol| symbol()) }
 }
 
+pub(crate) fn call_real_lua_newthread(state: LuaState) -> Option<LuaState> {
+    unsafe { lua_newthread_symbol().map(|symbol| symbol(state)) }
+}
+
 pub(crate) fn call_real_lua_dofile(filename: *const c_char) -> Option<c_int> {
     unsafe { lua_dofile_symbol().map(|symbol| symbol(filename)) }
 }
 
 pub(crate) fn call_real_lua_dostring(chunk: *const c_char) -> Option<c_int> {
     unsafe { lua_dostring_symbol().map(|symbol| symbol(chunk)) }
+}
+
+pub(crate) fn call_real_lua_dobuffer(
+    buffer: *const c_char,
+    size: size_t,
+    name: *const c_char,
+) -> Option<c_int> {
+    unsafe { lua_dobuffer_symbol().map(|symbol| symbol(buffer, size, name)) }
+}
+
+pub(crate) fn call_real_lua_call(func_name: *const c_char) -> Option<c_int> {
+    unsafe { lua_call_symbol().map(|symbol| symbol(func_name)) }
 }
 
 pub(crate) fn call_real_lua_callfunction(func: LuaObject) -> Option<c_int> {
@@ -159,24 +184,6 @@ pub(crate) fn call_real_lua_setglobal(name: *const c_char) -> bool {
 
 pub(crate) fn call_real_lua_getglobal(name: *const c_char) -> Option<LuaObject> {
     unsafe { lua_getglobal_symbol().map(|symbol| symbol(name)) }
-}
-
-pub(crate) fn lua_state_global_addr() -> Option<usize> {
-    unsafe {
-        lua_state_global_symbol().and_then(|symbol| {
-            let slot = symbol as *const LuaState;
-            if slot.is_null() {
-                None
-            } else {
-                let state = *slot;
-                if state.is_null() {
-                    None
-                } else {
-                    Some(state as usize)
-                }
-            }
-        })
-    }
 }
 
 pub(crate) fn call_real_lua_getcfunction(handle: LuaObject) -> Option<LuaCFunction> {
@@ -299,6 +306,21 @@ pub(crate) fn call_real_lua_pushstring(value: *const c_char) -> bool {
     }
 }
 
+pub(crate) fn call_real_lua_pushlstring(value: *const c_char, len: size_t) -> bool {
+    unsafe {
+        match lua_pushlstring_symbol() {
+            Some(symbol) => {
+                symbol(value, len);
+                true
+            }
+            None => {
+                log_line("lua_pushlstring symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
 pub(crate) fn call_real_lua_pushnil() -> bool {
     unsafe {
         match lua_pushnil_symbol() {
@@ -308,6 +330,21 @@ pub(crate) fn call_real_lua_pushnil() -> bool {
             }
             None => {
                 log_line("lua_pushnil symbol missing; skipping push");
+                false
+            }
+        }
+    }
+}
+
+pub(crate) fn call_real_lua_pushvalue(index: c_int) -> bool {
+    unsafe {
+        match lua_pushvalue_symbol() {
+            Some(symbol) => {
+                symbol(index);
+                true
+            }
+            None => {
+                log_line("lua_pushvalue symbol missing; skipping push");
                 false
             }
         }
@@ -533,6 +570,26 @@ fn lua_dofile_symbol() -> Option<LuaDoFileFn> {
     })
 }
 
+fn lua_dobuffer_symbol() -> Option<LuaDoBufferFn> {
+    *LUA_DOBUFFER.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_dobuffer\0",
+            label: "lua_dobuffer",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaDoBufferFn>(ptr))
+    })
+}
+
+fn lua_call_symbol() -> Option<LuaCallFn> {
+    *LUA_CALL.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_call\0",
+            label: "lua_call",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCallFn>(ptr))
+    })
+}
+
 fn lua_callfunction_symbol() -> Option<LuaCallFunctionFn> {
     *LUA_CALLFUNCTION.get_or_init(|| unsafe {
         resolve_symbol_with_variants(&[SymbolVariant {
@@ -555,17 +612,21 @@ fn lua_open_symbol() -> Option<LuaOpenFn> {
 
 fn lua_newstate_symbol() -> Option<LuaNewStateFn> {
     *LUA_NEWSTATE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[
-            SymbolVariant {
-                symbol: b"lua_newstate\0",
-                label: "lua_newstate",
-            },
-            SymbolVariant {
-                symbol: b"_Z12lua_newstatev\0",
-                label: "lua_newstate (mangled)",
-            },
-        ])
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_newstate\0",
+            label: "lua_newstate",
+        }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewStateFn>(ptr))
+    })
+}
+
+fn lua_newthread_symbol() -> Option<LuaNewThreadFn> {
+    *LUA_NEWTHREAD.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_newthread\0",
+            label: "lua_newthread",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewThreadFn>(ptr))
     })
 }
 
@@ -596,22 +657,6 @@ fn lua_getglobal_symbol() -> Option<LuaGetGlobalFn> {
             label: "lua_getglobal",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetGlobalFn>(ptr))
-    })
-}
-
-fn lua_state_global_symbol() -> Option<usize> {
-    *LUA_STATE_GLOBAL.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[
-            SymbolVariant {
-                symbol: b"L\0",
-                label: "L",
-            },
-            SymbolVariant {
-                symbol: b"L_Main\0",
-                label: "L_Main",
-            },
-        ])
-        .map(|ptr| ptr as usize)
     })
 }
 
@@ -755,6 +800,16 @@ fn lua_pushstring_symbol() -> Option<LuaPushStringFn> {
     })
 }
 
+fn lua_pushlstring_symbol() -> Option<LuaPushLStringFn> {
+    *LUA_PUSHLSTRING.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushlstring\0",
+            label: "lua_pushlstring",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushLStringFn>(ptr))
+    })
+}
+
 fn lua_pushusertag_symbol() -> Option<LuaPushUsertagFn> {
     *LUA_PUSHUSERTAG.get_or_init(|| unsafe {
         resolve_symbol_with_variants(&[SymbolVariant {
@@ -782,6 +837,16 @@ fn lua_pushnil_symbol() -> Option<LuaPushNilFn> {
             label: "lua_pushnil",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushNilFn>(ptr))
+    })
+}
+
+fn lua_pushvalue_symbol() -> Option<LuaPushValueFn> {
+    *LUA_PUSHVALUE.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[SymbolVariant {
+            symbol: b"lua_pushvalue\0",
+            label: "lua_pushvalue",
+        }])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushValueFn>(ptr))
     })
 }
 
