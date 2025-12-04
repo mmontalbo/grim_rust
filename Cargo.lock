@@ -408,6 +408,7 @@ version = "0.1.0"
 dependencies = [
  "grim_telemetry_common",
  "libc",
+ "serde_json",
 ]
 
 [[package]]

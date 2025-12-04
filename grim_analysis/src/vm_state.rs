@@ -1,8 +1,7 @@
 use crate::{logging::log_line, lua_api::LuaState};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 static MAIN_STATE: OnceLock<usize> = OnceLock::new();
-static THREAD_STATES: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 
 pub(crate) fn record_main_state(state: LuaState) {
     if state.is_null() {
@@ -31,30 +30,5 @@ pub(crate) fn record_main_state(state: LuaState) {
                 ));
             }
         }
-    }
-}
-
-pub(crate) fn main_state_addr() -> Option<usize> {
-    MAIN_STATE.get().copied()
-}
-
-pub(crate) fn record_thread_state(state: LuaState) {
-    if state.is_null() {
-        log_line("lua_newthread returned null; skipping thread registry update");
-        return;
-    }
-    let addr = state as usize;
-    let registry = THREAD_STATES.get_or_init(|| Mutex::new(Vec::new()));
-    match registry.lock() {
-        Ok(mut states) => {
-            if !states.contains(&addr) {
-                states.push(addr);
-                log_line(&format!(
-                    "recorded lua thread state at 0x{addr:08x} ({} tracked total)",
-                    states.len()
-                ));
-            }
-        }
-        Err(_) => log_line("lua_newthread registry mutex poisoned; skipping update"),
     }
 }
