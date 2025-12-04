@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use anyhow::{Context, Result};
 use crate::lua_host::legacy_lua::normalize_legacy_lua;
+use anyhow::{Context, Result};
 use mlua::{Function, Lua, Result as LuaResult, Value, Variadic};
 
 use super::util::{
