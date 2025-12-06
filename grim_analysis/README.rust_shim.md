@@ -120,7 +120,15 @@ LD_PRELOAD=/path/to/libgrim_analysis.so ./GrimFandango.exe
 ## New contributor quickstart
 - Build and point `LD_PRELOAD` at `libgrim_analysis.so` using the command above (workspace or crate-local paths both work).
 - Sanity-check that hooks loaded: launch retail with `GRIM_SHIM_LOG=/tmp/grim_shim.log` set and confirm early log lines like `event=lua_pushcclosure`/`event=lua_setglobal` appear. If you see `required Lua C function missing`, the shim couldn't find the retail symbol (common when a wrapper is requested before the engine registers it).
-- Know where to look: most VM tracing lives in `grim_analysis/src/trace.rs` (push helpers near the top, globals/refs mid-file, table/tag plumbing and semantic emitters further down). Cutscene/movie wrappers and post-intro room tracking live in `grim_analysis/src/telemetry.rs`.
+- Know where to look: VM tracing is split under `grim_analysis/src/trace/`:
+  - `state.rs` (open/newstate/newthread)
+  - `push.rs` (push* helpers and upvalue previews)
+  - `tables.rs` (create/get/set/rawset)
+  - `globals.rs` (set/rawset/get/rawget + registered_global/constant detection)
+  - `refs.rs` (lua_ref/getref/unref)
+  - `calls.rs` (do* buffers/calls, collectgarbage, lua_error)
+  - `tags.rs` (setfallback/tag/tagmethod plumbing)
+  Shared helpers live in `trace/mod.rs`. Cutscene/movie wrappers and post-intro room tracking live in `grim_analysis/src/telemetry.rs`.
 - Movie/room telemetry also writes newline-delimited JSON to `mods/telemetry_events.jsonl` (created on first movie event). Delete the file between runs if you want a clean capture; there is no rotation.
 - Quick smoke loop: `grctl retail start --attach` will LD_PRELOAD the shim from the workspace target; tail the shim log or `mods/telemetry_events.jsonl` to confirm wrappers are firing before making changes.
 
