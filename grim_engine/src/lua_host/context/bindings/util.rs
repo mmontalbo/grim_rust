@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use grim_telemetry_common::{OriginFields, SeqRange, UpvaluePreview, ValueFields, ValueType};
+use grim_telemetry_common::{OriginFields, UpvaluePreview, ValueFields, ValueType};
 use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 
 use crate::lua_host::telemetry::{
@@ -22,27 +22,11 @@ impl TaggedHandle {
 
 impl UserData for TaggedHandle {}
 
-#[derive(Clone, Copy)]
-pub(crate) struct RegisteredPush {
-    pub log_seq: u64,
-    pub push_seq: Option<u64>,
-}
-
-impl RegisteredPush {
-    pub(crate) fn log_only(log_seq: u64) -> Self {
-        Self {
-            log_seq,
-            push_seq: None,
-        }
-    }
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct RegisteredGlobalMeta {
     pub upvalues: i32,
     pub upvalue_previews: Option<Vec<UpvaluePreview>>,
     pub value_overrides: Option<ValueFields>,
-    pub push: Option<RegisteredPush>,
 }
 
 thread_local! {
@@ -111,20 +95,11 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     }
     let upvalues = hint.as_ref().map(|meta| meta.upvalues).unwrap_or(0);
     let upvalue_previews = hint.as_ref().and_then(|meta| meta.upvalue_previews.clone());
-    let hint_push = hint.as_ref().and_then(|meta| meta.push);
-    let mut func_push_seq = hint_push.and_then(|push| push.push_seq);
-    let mut seqs: Vec<u64> = Vec::new();
-
-    if let Some(push) = hint_push {
-        seqs.push(push.log_seq);
-    }
 
     if matches!(value, Value::Function(_)) {
         if let Some(previews) = upvalue_previews.as_ref() {
             for preview in previews {
-                if let Some(seq) = log_push_from_preview(preview) {
-                    seqs.push(seq);
-                }
+                let _ = log_push_from_preview(preview);
             }
         }
     }
@@ -136,73 +111,53 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     match &value {
         Value::Function(func) => {
             origin = origin_fields_for_ptr(func.to_pointer());
-            if func_push_seq.is_none() {
-                let push = log_push_cclosure("lua_pushCclosure", func.to_pointer(), upvalues, None);
-                func_push_seq = Some(push.push_seq);
-                seqs.push(push.log_seq);
-            }
+            log_push_cclosure("lua_pushCclosure", func.to_pointer(), upvalues, None);
         }
         Value::Nil => {
-            seqs.push(log_push_nil());
+            log_push_nil();
         }
         Value::Integer(num) => {
-            seqs.push(log_push_number(&format_number_for_log(*num as f64)));
+            log_push_number(&format_number_for_log(*num as f64));
         }
         Value::Number(num) => {
-            seqs.push(log_push_number(&format_number_for_log(*num)));
+            log_push_number(&format_number_for_log(*num));
         }
         Value::String(text) => {
             let bytes = text.as_bytes();
             let rendered = String::from_utf8_lossy(bytes).into_owned();
             let preview = truncate_for_log(&rendered, 80);
-            seqs.push(log_push_string(bytes.len(), preview));
+            log_push_string(bytes.len(), preview);
         }
         Value::Table(_) => {
-            let push_seq = log_push_object(
+            log_push_object(
                 handle.clone(),
                 Some(handle_label.clone()),
                 value_fields.clone(),
             );
-            seqs.push(push_seq);
         }
         _ => {}
     }
 
-    let bind_seq = log_lua_setglobal(
+    let _ = log_lua_setglobal(
         name,
         handle.clone(),
         Some(handle_label.clone()),
         value_fields.clone(),
         origin.clone(),
     );
-    seqs.push(bind_seq);
-    let seq_range = SeqRange::from_seqs(seqs.iter().copied());
 
-    if let Value::Function(ref func) = value {
-        let func_handle = ptr_to_handle(func.to_pointer());
-        let push_seq =
-            func_push_seq.expect("cclosure push should be recorded for function globals");
+    if matches!(value, Value::Function(_)) {
         log_registered_global(
             name,
             handle,
             Some(handle_label),
-            push_seq,
-            func_handle,
             upvalues,
             upvalue_previews,
             value_fields,
-            seq_range,
             origin,
         );
     } else {
-        log_registered_constant(
-            name,
-            handle,
-            Some(handle_label),
-            value_fields,
-            seq_range,
-            origin,
-        );
+        log_registered_constant(name, handle, Some(handle_label), value_fields, origin);
     }
 
     globals.set(name, value)

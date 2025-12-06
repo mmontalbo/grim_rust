@@ -1,5 +1,7 @@
 use crate::{
-    logging::{log_line, LuaEvent, OriginFields, SeqRange, UpvaluePreview, ValueFields, ValueType},
+    logging::{
+        log_line, LuaEvent, LuaSemanticEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
+    },
     lua_api::{
         call_real_lua_call, call_real_lua_callfunction, call_real_lua_collectgarbage,
         call_real_lua_copytagmethods, call_real_lua_createtable, call_real_lua_dobuffer,
@@ -116,22 +118,11 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
         None,
     );
     if let Some(previews) = upvalue_snapshot {
-        let mut seqs = Vec::with_capacity(previews.len() + 1);
         let mut previews_only = Vec::with_capacity(previews.len());
         for item in previews {
-            seqs.push(item.log_seq);
             previews_only.push(item.preview);
         }
-        seqs.push(closure_log_seq);
-        let seq_range = SeqRange::from_seqs(seqs);
-        remember_registered_global_candidate(
-            func_addr,
-            sequence,
-            upvalues,
-            previews_only,
-            seq_range,
-            origin.clone(),
-        );
+        remember_registered_global_candidate(func_addr, upvalues, previews_only, origin.clone());
     }
     record_non_push_event();
 
@@ -346,12 +337,12 @@ pub(crate) unsafe fn trace_lua_settable() {
     } else {
         Some("lua_settable_missing".to_string())
     };
-    let raw_seq = log_event_with_seq(LuaEvent::SetTable {
+    log_event_with_seq(LuaEvent::SetTable {
         note: note.clone(),
         caller: caller.clone(),
     });
     if succeeded {
-        emit_set_table_entry(table_handle, pushes, raw_seq, caller, None);
+        emit_set_table_entry(table_handle, pushes, caller, None);
     }
 }
 
@@ -365,7 +356,7 @@ pub(crate) unsafe fn trace_lua_rawsettable() {
     } else {
         Some("lua_rawsettable_missing".to_string())
     };
-    let raw_seq = log_event_with_seq(LuaEvent::RawsetTable {
+    log_event_with_seq(LuaEvent::RawsetTable {
         note: note.clone(),
         caller: caller.clone(),
     });
@@ -373,7 +364,6 @@ pub(crate) unsafe fn trace_lua_rawsettable() {
         emit_set_table_entry(
             table_handle,
             pushes,
-            raw_seq,
             caller,
             Some("via_rawsettable".to_string()),
         );
@@ -491,6 +481,10 @@ pub(crate) unsafe fn trace_lua_unref(reference: c_int) {
     } else {
         Some("lua_unref_missing".to_string())
     };
+    log_semantic_event(LuaSemanticEvent::SemanticUnref {
+        reference,
+        note: note.clone(),
+    });
     log_event(LuaEvent::Unref { reference, note });
 }
 
@@ -509,12 +503,22 @@ pub(crate) unsafe fn trace_lua_setfallback(
                 .unwrap_or_default();
             let handle_label = format!("fallback:{name}");
             remember_handle_label(handle, handle_label.clone());
+            let handle_hex = format!("0x{handle:08x}");
+            let origin_fields = origin_fields(Some(&origin));
+            log_semantic_event(LuaSemanticEvent::SemanticSetFallback {
+                fallback: name.clone(),
+                handle: handle_hex.clone(),
+                handle_label: Some(handle_label.clone()),
+                values: values.clone(),
+                origin: origin_fields.clone(),
+                caller: caller.clone(),
+            });
             log_event(LuaEvent::SetFallback {
                 fallback: name,
-                handle: format!("0x{handle:08x}"),
+                handle: handle_hex,
                 handle_label: Some(handle_label),
                 values,
-                origin: origin_fields(Some(&origin)),
+                origin: origin_fields,
                 caller,
             });
             handle
@@ -614,7 +618,6 @@ pub(crate) unsafe fn trace_lua_call(name: *const c_char) -> c_int {
 }
 
 pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
-    let last_push_seq = take_last_push_seq();
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
 
     if call_real_lua_setglobal(name) {
@@ -643,7 +646,7 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                 Some(ValueType::Cfunction | ValueType::Function)
             );
 
-            let raw_seq = log_event_with_seq(LuaEvent::BindGlobal {
+            log_event_with_seq(LuaEvent::BindGlobal {
                 name: label.clone(),
                 handle: format!("0x{handle:08x}"),
                 handle_label: Some(handle_label.clone()),
@@ -660,28 +663,17 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                             &label,
                             handle,
                             handle_label.clone(),
-                            func_addr,
-                            candidate.push_seq,
                             candidate.upvalues,
                             candidate.upvalue_previews,
                             values,
                             merged_origin,
-                            candidate.seq_range,
-                            raw_seq,
                         );
                         return;
                     }
                 }
             }
 
-            emit_registered_constant(
-                &label,
-                handle,
-                handle_label,
-                values,
-                origin,
-                SeqRange::from_seqs(last_push_seq.into_iter().chain(Some(raw_seq))),
-            );
+            emit_registered_constant(&label, handle, handle_label, values, origin);
         }
     }
 }
@@ -735,17 +727,37 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         log_line("lua_ref tracker mutex poisoned; skipping cache update");
                     }
                     remember_handle_label_if_missing(handle, label.clone());
+                    let handle_hex = format!("0x{handle:08x}");
+                    let origin_fields = origin_fields(origin.as_ref());
+                    log_semantic_event(LuaSemanticEvent::SemanticStoreRef {
+                        lock,
+                        reference,
+                        handle: Some(handle_hex.clone()),
+                        handle_label: Some(label.clone()),
+                        label: Some(label.clone()),
+                        note: None,
+                        origin: origin_fields.clone(),
+                    });
                     log_event(LuaEvent::StoreRef {
                         lock,
                         reference,
-                        handle: Some(format!("0x{handle:08x}")),
+                        handle: Some(handle_hex),
                         handle_label: Some(label.clone()),
                         label: Some(label),
                         note: None,
-                        origin: origin_fields(origin.as_ref()),
+                        origin: origin_fields,
                     });
                 }
                 None => {
+                    log_semantic_event(LuaSemanticEvent::SemanticStoreRef {
+                        lock,
+                        reference,
+                        handle: Some("<unknown>".to_string()),
+                        handle_label: Some(format!("ref:{reference}")),
+                        label: Some(format!("ref:{reference}")),
+                        note: Some("lua_getref_missing".to_string()),
+                        origin: OriginFields::default(),
+                    });
                     log_event(LuaEvent::StoreRef {
                         lock,
                         reference,
@@ -782,17 +794,35 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
                 log_line("lua_getref tracker mutex poisoned; skipping cache update");
             }
             remember_handle_label_if_missing(handle, label.clone());
+            let handle_hex = format!("0x{handle:08x}");
+            let origin_fields = origin_fields(origin.as_ref());
+            log_semantic_event(LuaSemanticEvent::SemanticFetchRef {
+                reference,
+                handle: Some(handle_hex.clone()),
+                handle_label: Some(label.clone()),
+                label: Some(label.clone()),
+                note: None,
+                origin: origin_fields.clone(),
+            });
             log_event(LuaEvent::FetchRef {
                 reference,
-                handle: Some(format!("0x{handle:08x}")),
+                handle: Some(handle_hex),
                 handle_label: Some(label.clone()),
                 label: Some(label),
                 note: None,
-                origin: origin_fields(origin.as_ref()),
+                origin: origin_fields,
             });
             handle
         }
         None => {
+            log_semantic_event(LuaSemanticEvent::SemanticFetchRef {
+                reference,
+                handle: Some("<unknown>".to_string()),
+                handle_label: None,
+                label: None,
+                note: Some("lua_getref_symbol_missing".to_string()),
+                origin: OriginFields::default(),
+            });
             log_event(LuaEvent::FetchRef {
                 reference,
                 handle: Some("<unknown>".to_string()),
@@ -823,6 +853,15 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             }
         }
     }
+    let origin_fields = origin_fields(origin.as_ref());
+    log_semantic_event(LuaSemanticEvent::SemanticSetTagmethod {
+        tag,
+        event_name: event_label.clone(),
+        handle: handle_field.clone(),
+        handle_label: handle_label.clone(),
+        values: values.clone(),
+        origin: origin_fields.clone(),
+    });
     if call_real_lua_settagmethod(tag, event) {
         log_event(LuaEvent::SetTagmethod {
             tag,
@@ -830,7 +869,7 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             handle: handle_field.clone(),
             handle_label: handle_label.clone(),
             values: values.clone(),
-            origin: origin_fields(origin.as_ref()),
+            origin: origin_fields.clone(),
         });
     } else {
         log_event(LuaEvent::SetTagmethod {
@@ -839,7 +878,7 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             handle: handle_field,
             handle_label,
             values,
-            origin: origin_fields(origin.as_ref()),
+            origin: origin_fields,
         });
     }
 }
@@ -927,7 +966,6 @@ fn take_recent_pushes(count: usize) -> Option<Vec<TrackedPush>> {
 fn emit_set_table_entry(
     table_handle: Option<LuaObject>,
     pushes: Option<Vec<TrackedPush>>,
-    raw_seq: u64,
     caller: OriginFields,
     note: Option<String>,
 ) {
@@ -939,33 +977,41 @@ fn emit_set_table_entry(
         Some(handle) => handle,
         None => return,
     };
-    let table_push_seq = pushes
-        .iter()
-        .rev()
-        .find(|push| push.handle == Some(handle))
-        .map(|push| push.log_seq);
+    let table_handle_hex = format!("0x{handle:08x}");
+    let table_handle_label = handle_label_for(handle);
+    let table_fields = describe_lua_value(handle)
+        .map(|value| value_fields_from_details(&value))
+        .or_else(|| {
+            let mut fields = ValueFields::default();
+            fields.value_type = Some(ValueType::Table);
+            Some(fields)
+        });
+    let semantic_note = note.clone();
+    let semantic_caller = caller.clone();
     let key_push = &pushes[pushes.len() - 2];
     let value_push = pushes.last().unwrap();
-    let mut seqs = vec![key_push.log_seq, value_push.log_seq];
-    if let Some(seq) = table_push_seq {
-        seqs.push(seq);
-    }
-    seqs.push(raw_seq);
-    if let Some(seq_range) = SeqRange::from_seqs(seqs) {
-        log_event_with_seq_display(
-            LuaEvent::SetTableEntry {
-                table_handle: format!("0x{handle:08x}"),
-                table_handle_label: handle_label_for(handle),
-                key: key_push.preview.clone(),
-                value: value_push.preview.clone(),
-                note,
-                seq_min: Some(seq_range.min),
-                seq_max: Some(seq_range.max),
-                caller,
-            },
-            seq_range.display(),
-        );
-    }
+    let value_handle = value_push
+        .handle
+        .map(|value_handle| format!("0x{value_handle:08x}"));
+    let value_handle_label = value_push
+        .handle
+        .and_then(|value_handle| handle_label_for(value_handle));
+    let value_fields = value_push
+        .handle
+        .and_then(describe_lua_value)
+        .map(|details| value_fields_from_details(&details));
+    log_semantic_event(LuaSemanticEvent::SemanticSetTableEntry {
+        table_handle: table_handle_hex,
+        table_handle_label,
+        table_fields,
+        key: key_push.preview.clone(),
+        value: value_push.preview.clone(),
+        value_handle,
+        value_handle_label,
+        value_fields,
+        note: semantic_note,
+        caller: semantic_caller,
+    });
 }
 
 fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
@@ -980,31 +1026,22 @@ fn emit_registered_global(
     name: &str,
     handle: LuaObject,
     handle_label: String,
-    func_addr: usize,
-    push_seq: u64,
     upvalues: c_int,
     upvalue_previews: Vec<UpvaluePreview>,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
-    seq_range: Option<SeqRange>,
-    raw_setglobal_seq: u64,
 ) {
-    let seq_range = seq_range
-        .map(|range| range.include(raw_setglobal_seq))
-        .unwrap_or_else(|| SeqRange::new(raw_setglobal_seq, raw_setglobal_seq));
-    let event = LuaEvent::RegisteredGlobal {
+    let origin_fields = origin_fields(origin.as_ref());
+    log_semantic_event(LuaSemanticEvent::SemanticBindGlobal {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
         handle_label: Some(handle_label.clone()),
-        label: Some(handle_label),
-        push_seq,
-        func: format!("0x{func_addr:08x}"),
-        upvalues,
-        upvalue_previews: Some(upvalue_previews),
-        values,
-        origin: origin_fields(origin.as_ref()),
-    };
-    log_event_with_seq_display(event, seq_range.display());
+        label: Some(handle_label.clone()),
+        values: values.clone(),
+        upvalues: Some(upvalues),
+        upvalue_previews: Some(upvalue_previews.clone()),
+        origin: origin_fields.clone(),
+    });
 }
 
 fn emit_registered_constant(
@@ -1013,21 +1050,16 @@ fn emit_registered_constant(
     handle_label: String,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
-    seq_range: Option<SeqRange>,
 ) {
-    let constant_event = LuaEvent::RegisteredConstant {
+    let origin_fields = origin_fields(origin.as_ref());
+    log_semantic_event(LuaSemanticEvent::SemanticBindConstant {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
         handle_label: Some(handle_label.clone()),
-        label: Some(handle_label),
-        values,
-        origin: origin_fields(origin.as_ref()),
-    };
-    if let Some(range) = seq_range {
-        log_event_with_seq_display(constant_event, range.display());
-    } else {
-        log_event(constant_event);
-    }
+        label: Some(handle_label.clone()),
+        values: values.clone(),
+        origin: origin_fields.clone(),
+    });
 }
 
 fn snapshot_upvalue_previews(upvalues: c_int) -> Option<Vec<TrackedPush>> {
@@ -1044,34 +1076,18 @@ fn snapshot_upvalue_previews(upvalues: c_int) -> Option<Vec<TrackedPush>> {
     }
 }
 
-fn take_last_push_seq() -> Option<u64> {
-    match push_event_tracker().lock() {
-        Ok(tracker) => tracker
-            .snapshot_recent(1)
-            .and_then(|pushes| pushes.into_iter().last().map(|p| p.log_seq)),
-        Err(_) => {
-            log_line("push event tracker mutex poisoned; skipping push capture");
-            None
-        }
-    }
-}
-
 fn remember_registered_global_candidate(
     func_addr: usize,
-    push_seq: u64,
     upvalues: c_int,
     previews: Vec<UpvaluePreview>,
-    seq_range: Option<SeqRange>,
     origin: Option<ClosureOrigin>,
 ) {
     match registered_global_tracker().lock() {
         Ok(mut tracker) => {
             tracker.remember(PendingRegisteredGlobal {
                 func_addr,
-                push_seq,
                 upvalues,
                 upvalue_previews: previews,
-                seq_range,
                 origin,
             });
         }
@@ -1399,10 +1415,8 @@ struct TrackedPush {
 
 struct PendingRegisteredGlobal {
     func_addr: usize,
-    push_seq: u64,
     upvalues: c_int,
     upvalue_previews: Vec<UpvaluePreview>,
-    seq_range: Option<SeqRange>,
     origin: Option<ClosureOrigin>,
 }
 
@@ -1654,10 +1668,10 @@ fn log_event(event: LuaEvent) {
     crate::logging::log_event(event);
 }
 
-fn log_event_with_seq(event: LuaEvent) -> u64 {
-    crate::logging::log_event_with_seq(event)
+fn log_semantic_event(event: LuaSemanticEvent) {
+    crate::logging::log_event(event);
 }
 
-fn log_event_with_seq_display(event: LuaEvent, seq_display: impl Into<String>) {
-    crate::logging::log_event_with_seq_display(event, seq_display);
+fn log_event_with_seq(event: LuaEvent) -> u64 {
+    crate::logging::log_event_with_seq(event)
 }

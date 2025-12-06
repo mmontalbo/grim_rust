@@ -466,6 +466,117 @@ pub struct UpvaluePreview {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
+pub enum LuaSemanticEvent {
+    SemanticBindGlobal {
+        name: String,
+        handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        upvalues: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        upvalue_previews: Option<Vec<UpvaluePreview>>,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    SemanticBindConstant {
+        name: String,
+        handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    SemanticSetTableEntry {
+        table_handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        table_handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        table_fields: Option<ValueFields>,
+        key: UpvaluePreview,
+        value: UpvaluePreview,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_fields: Option<ValueFields>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        caller: OriginFields,
+    },
+    SemanticStoreRef {
+        lock: i32,
+        #[serde(rename = "ref")]
+        reference: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    SemanticFetchRef {
+        #[serde(rename = "ref")]
+        reference: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    SemanticUnref {
+        #[serde(rename = "ref")]
+        reference: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    SemanticSetFallback {
+        fallback: String,
+        handle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
+        #[serde(flatten)]
+        caller: OriginFields,
+    },
+    SemanticSetTagmethod {
+        tag: i32,
+        event_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle_label: Option<String>,
+        #[serde(flatten)]
+        values: ValueFields,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum LuaEvent {
     #[serde(rename = "lua_setglobal")]
     BindGlobal {
@@ -832,22 +943,39 @@ impl From<LuaEvent> for EventBuilder {
         let obj = value
             .as_object()
             .expect("LuaEvent should serialize to an object");
-        let Some(event_name) = obj.get("event").and_then(|v| v.as_str()) else {
-            panic!("LuaEvent serialized without event tag");
-        };
-
-        let mut builder = EventBuilder::new(event_name);
-        // Use a stable order for deterministic logs.
-        let mut keys: Vec<_> = obj.keys().filter(|k| k.as_str() != "event").collect();
-        keys.sort();
-        for key in keys {
-            if let Some(value) = obj.get(key) {
-                let rendered = render_json_value(value);
-                builder.kv_mut(key, rendered);
-            }
-        }
+        let mut builder = builder_from_object(obj);
+        builder.kv_mut("stream", "raw");
         builder
     }
+}
+
+impl From<LuaSemanticEvent> for EventBuilder {
+    fn from(event: LuaSemanticEvent) -> Self {
+        let value = serde_json::to_value(event).expect("serialize LuaSemanticEvent");
+        let obj = value
+            .as_object()
+            .expect("LuaSemanticEvent should serialize to an object");
+        let mut builder = builder_from_object(obj);
+        builder.kv_mut("stream", "semantic");
+        builder
+    }
+}
+
+fn builder_from_object(obj: &serde_json::Map<String, JsonValue>) -> EventBuilder {
+    let Some(event_name) = obj.get("event").and_then(|v| v.as_str()) else {
+        panic!("telemetry event serialized without event tag");
+    };
+    let mut builder = EventBuilder::new(event_name);
+    // Use a stable order for deterministic logs.
+    let mut keys: Vec<_> = obj.keys().filter(|k| k.as_str() != "event").collect();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = obj.get(key) {
+            let rendered = render_json_value(value);
+            builder.kv_mut(key, rendered);
+        }
+    }
+    builder
 }
 
 fn render_json_value(value: &JsonValue) -> String {
@@ -1037,5 +1165,39 @@ mod tests {
         assert!(fields.iter().any(|f| f == "seq_max=7"));
         assert!(fields.iter().any(|f| f == "origin=0x0000cafe"));
         assert!(fields.iter().any(|f| f == "note=via_rawsettable"));
+    }
+
+    #[test]
+    fn raw_events_include_stream_marker() {
+        let fields = EventBuilder::from(LuaEvent::CollectGarbage {}).finish();
+        assert!(fields.iter().any(|f| f == "stream=raw"));
+    }
+
+    #[test]
+    fn semantic_events_serialize_with_stream() {
+        let event = LuaSemanticEvent::SemanticBindGlobal {
+            name: "foo".to_string(),
+            handle: "0x00000002".to_string(),
+            handle_label: Some("global:foo".to_string()),
+            label: Some("global:foo".to_string()),
+            values: ValueFields {
+                value_type: Some(ValueType::Cfunction),
+                func: Some("0x0000beef".to_string()),
+                ..Default::default()
+            },
+            upvalues: Some(1),
+            upvalue_previews: Some(vec![UpvaluePreview {
+                kind: ValueType::Number,
+                value: Some("1".to_string()),
+                value_len: None,
+                preview: None,
+                tag: None,
+            }]),
+            origin: OriginFields::default(),
+        };
+        let fields = EventBuilder::from(event).finish();
+        assert!(fields.iter().any(|f| f == "event=semantic_bind_global"));
+        assert!(fields.iter().any(|f| f == "stream=semantic"));
+        assert!(fields.iter().any(|f| f == "handle_label=global:foo"));
     }
 }

@@ -10,7 +10,7 @@ use std::{
 };
 
 use grim_telemetry_common::{
-    EventBuilder, LuaEvent, OriginFields, SeqRange, TelemetryConfig, TelemetryLogger,
+    EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
     UpvaluePreview, ValueFields, ValueType,
 };
 
@@ -38,18 +38,8 @@ fn log_event_with_seq(event: impl Into<EventBuilder>) -> u64 {
     LOGGER.log_event_with_seq(event)
 }
 
-fn log_event_with_seq_display(event: impl Into<EventBuilder>, seq_display: String) {
-    LOGGER.log_event_with_seq_display(event, seq_display);
-}
-
 fn next_push_seq() -> u64 {
     PUSH_SEQ.fetch_add(1, Ordering::Relaxed) + 1
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct LoggedPushCclosure {
-    pub push_seq: u64,
-    pub log_seq: u64,
 }
 
 pub(crate) fn ptr_to_handle(func: *const c_void) -> String {
@@ -71,20 +61,20 @@ pub(crate) fn log_push_cclosure(
     func: *const c_void,
     upvalues: i32,
     symbol_label: Option<&str>,
-) -> LoggedPushCclosure {
+) -> u64 {
     let push_seq = next_push_seq();
     let mut origin = origin_fields_for_ptr(func);
     if let Some(symbol) = symbol_label {
         origin.symbol = Some(symbol.to_string());
     }
-    let log_seq = log_event_with_seq(LuaEvent::PushCclosure {
+    log_event_with_seq(LuaEvent::PushCclosure {
         name: label.to_string(),
         func: ptr_to_handle(func),
         push_seq,
         upvalues,
         origin,
     });
-    LoggedPushCclosure { push_seq, log_seq }
+    push_seq
 }
 
 #[allow(dead_code)]
@@ -159,32 +149,22 @@ pub(crate) fn log_registered_global(
     name: &str,
     handle: String,
     handle_label: Option<String>,
-    push_seq: u64,
-    func: String,
     upvalues: i32,
     upvalue_previews: Option<Vec<UpvaluePreview>>,
     values: ValueFields,
-    seq_range: Option<SeqRange>,
     origin: OriginFields,
 ) {
     let label = handle_label.clone();
-    let event = LuaEvent::RegisteredGlobal {
+    log_event(LuaSemanticEvent::SemanticBindGlobal {
         name: name.to_string(),
-        handle,
+        handle: handle.clone(),
         handle_label: handle_label.clone(),
-        label,
-        push_seq,
-        func,
-        upvalues,
-        upvalue_previews,
-        values,
-        origin,
-    };
-    if let Some(seq_range) = seq_range {
-        log_event_with_seq_display(event, seq_range.display());
-    } else {
-        log_event(event);
-    }
+        label: label.clone(),
+        values: values.clone(),
+        upvalues: Some(upvalues),
+        upvalue_previews: upvalue_previews.clone(),
+        origin: origin.clone(),
+    });
 }
 
 pub(crate) fn log_registered_constant(
@@ -192,22 +172,16 @@ pub(crate) fn log_registered_constant(
     handle: String,
     handle_label: Option<String>,
     values: ValueFields,
-    seq_range: Option<SeqRange>,
     origin: OriginFields,
 ) {
-    let event = LuaEvent::RegisteredConstant {
+    log_event(LuaSemanticEvent::SemanticBindConstant {
         name: name.to_string(),
-        handle,
+        handle: handle.clone(),
         handle_label: handle_label.clone(),
-        label: handle_label,
-        values,
-        origin,
-    };
-    if let Some(seq_range) = seq_range {
-        log_event_with_seq_display(event, seq_range.display());
-    } else {
-        log_event(event);
-    }
+        label: handle_label.clone(),
+        values: values.clone(),
+        origin: origin.clone(),
+    });
 }
 
 pub(crate) fn log_push_usertag(id: i32, tag: i32, payload_hex: String) -> u64 {
@@ -248,46 +222,51 @@ pub(crate) fn log_set_table_entry(
     value_handle: Option<(String, Option<String>, ValueFields)>,
 ) {
     let caller = caller_origin_fields();
-    let mut seqs = Vec::new();
+    let semantic_caller = caller.clone();
+    let semantic_key = key.clone();
+    let semantic_value = value.clone();
+    let semantic_table_handle = table_handle.clone();
+    let semantic_table_handle_label = table_handle_label.clone();
+    let semantic_note = note.clone();
     // Retail telemetry records pushing the target table before setting entries.
     let table_fields = table_fields.unwrap_or_else(|| {
         let mut fields = ValueFields::default();
         fields.value_type = Some(ValueType::Table);
         fields
     });
-    let table_seq = log_push_object(
+    let semantic_table_fields = Some(table_fields.clone());
+    let semantic_value_handle = value_handle.as_ref().map(|(handle, _, _)| handle.clone());
+    let semantic_value_handle_label = value_handle
+        .as_ref()
+        .and_then(|(_, label, _)| label.clone());
+    let semantic_value_fields = value_handle.as_ref().map(|(_, _, fields)| fields.clone());
+    log_push_object(
         table_handle.clone(),
         table_handle_label.clone(),
         table_fields.clone(),
     );
-    seqs.push(table_seq);
-    if let Some(seq) = log_push_from_preview(&key) {
-        seqs.push(seq);
-    }
+    let _ = log_push_from_preview(&key);
     if let Some((value_handle, value_label, value_fields)) = value_handle {
-        seqs.push(log_push_object(value_handle, value_label, value_fields));
-    } else if let Some(seq) = log_push_from_preview(&value) {
-        seqs.push(seq);
+        log_push_object(value_handle, value_label, value_fields);
+    } else {
+        let _ = log_push_from_preview(&value);
     }
-    let set_seq = log_event_with_seq(LuaEvent::SetTable {
+    log_event(LuaEvent::SetTable {
         note: note.clone(),
         caller: caller.clone(),
     });
-    seqs.push(set_seq);
-    let seq_range = SeqRange::from_seqs(seqs).unwrap_or_else(|| SeqRange::new(set_seq, set_seq));
-    log_event_with_seq_display(
-        LuaEvent::SetTableEntry {
-            table_handle,
-            table_handle_label,
-            key,
-            value,
-            note,
-            seq_min: Some(seq_range.min),
-            seq_max: Some(seq_range.max),
-            caller,
-        },
-        seq_range.display(),
-    );
+    log_event(LuaSemanticEvent::SemanticSetTableEntry {
+        table_handle: semantic_table_handle,
+        table_handle_label: semantic_table_handle_label,
+        table_fields: semantic_table_fields,
+        key: semantic_key,
+        value: semantic_value,
+        value_handle: semantic_value_handle,
+        value_handle_label: semantic_value_handle_label,
+        value_fields: semantic_value_fields,
+        note: semantic_note,
+        caller: semantic_caller,
+    });
 }
 
 pub(crate) fn log_set_tag(tag: i32, note: Option<String>) {
@@ -310,6 +289,16 @@ pub(crate) fn log_store_ref(
     handle_label: Option<String>,
     label: Option<String>,
 ) {
+    let origin = caller_origin_fields();
+    log_event(LuaSemanticEvent::SemanticStoreRef {
+        lock,
+        reference,
+        handle: handle.clone(),
+        handle_label: handle_label.clone(),
+        label: label.clone(),
+        note: None,
+        origin: origin.clone(),
+    });
     log_event(LuaEvent::StoreRef {
         lock,
         reference,
@@ -317,7 +306,7 @@ pub(crate) fn log_store_ref(
         handle_label,
         label: label.clone(),
         note: None,
-        origin: caller_origin_fields(),
+        origin,
     });
 }
 
@@ -329,6 +318,14 @@ pub(crate) fn log_set_tagmethod(
     values: ValueFields,
     origin: OriginFields,
 ) {
+    log_event(LuaSemanticEvent::SemanticSetTagmethod {
+        tag: tag as i32,
+        event_name: event.to_string(),
+        handle: handle.clone(),
+        handle_label: handle_label.clone(),
+        values: values.clone(),
+        origin: origin.clone(),
+    });
     log_event(LuaEvent::SetTagmethod {
         tag: tag as i32,
         event_name: event.to_string(),
@@ -347,13 +344,22 @@ pub(crate) fn log_set_fallback(
     target_ptr: Option<*const c_void>,
 ) {
     let origin = target_ptr.map_or_else(OriginFields::default, origin_fields_for_ptr);
+    let caller = caller_origin_fields();
+    log_event(LuaSemanticEvent::SemanticSetFallback {
+        fallback: fallback.to_string(),
+        handle: handle.clone(),
+        handle_label: handle_label.clone(),
+        values: values.clone(),
+        origin: origin.clone(),
+        caller: caller.clone(),
+    });
     log_event(LuaEvent::SetFallback {
         fallback: fallback.to_string(),
         handle,
         handle_label,
         values,
         origin,
-        caller: caller_origin_fields(),
+        caller,
     });
 }
 
@@ -365,6 +371,14 @@ pub(crate) fn log_fetch_ref(
     note: Option<String>,
     origin: OriginFields,
 ) {
+    log_event(LuaSemanticEvent::SemanticFetchRef {
+        reference,
+        handle: handle.clone(),
+        handle_label: handle_label.clone(),
+        label: label.clone(),
+        note: note.clone(),
+        origin: origin.clone(),
+    });
     log_event(LuaEvent::FetchRef {
         reference,
         handle,
@@ -376,6 +390,10 @@ pub(crate) fn log_fetch_ref(
 }
 
 pub(crate) fn log_unref(reference: i32, note: Option<String>) {
+    log_event(LuaSemanticEvent::SemanticUnref {
+        reference,
+        note: note.clone(),
+    });
     log_event(LuaEvent::Unref { reference, note });
 }
 
