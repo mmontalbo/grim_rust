@@ -70,14 +70,19 @@ pub(crate) fn log_push_cclosure(
     label: &str,
     func: *const c_void,
     upvalues: i32,
+    symbol_label: Option<&str>,
 ) -> LoggedPushCclosure {
     let push_seq = next_push_seq();
+    let mut origin = origin_fields_for_ptr(func);
+    if let Some(symbol) = symbol_label {
+        origin.symbol = Some(symbol.to_string());
+    }
     let log_seq = log_event_with_seq(LuaEvent::PushCclosure {
         name: label.to_string(),
         func: ptr_to_handle(func),
         push_seq,
         upvalues,
-        origin: origin_fields_for_ptr(func),
+        origin,
     });
     LoggedPushCclosure { push_seq, log_seq }
 }

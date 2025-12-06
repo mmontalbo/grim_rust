@@ -40,13 +40,13 @@ pub(crate) fn install_globals(
 ) -> Result<()> {
     let globals = lua.globals();
 
-    // Ensure legacy version string is the first bound global to mirror retail traces.
     set_global(lua, &globals, "_VERSION", "Lua 3.1 (alpha)")?;
 
     install_legacy_io(lua, &globals)?;
-    // Retail pushes errorfb before _TRIGMODE is bound; log a stub push to align traces.
-    let errorfb = lua.create_function(|_, ()| Ok(Value::Nil))?;
-    log_push_cclosure("lua_pushCclosure", errorfb.to_pointer(), 0);
+    let errorfb: Function = globals
+        .get("error")
+        .context("error handler missing from Lua state")?;
+    log_push_cclosure("lua_pushCclosure", errorfb.to_pointer(), 0, Some("errorfb"));
     set_global(lua, &globals, "_TRIGMODE", "deg")?;
     install_legacy_compat(lua, &globals, context.clone())?;
     if let (Ok(settagmethod), Some(pow_fn)) = (
@@ -60,23 +60,21 @@ pub(crate) fn install_globals(
                     .ok()
             }),
     ) {
-        log_push_cclosure("lua_pushCclosure", pow_fn.to_pointer(), 0);
+        log_push_cclosure("lua_pushCclosure", pow_fn.to_pointer(), 0, Some("math_pow"));
         log_push_number("0");
         let _ = settagmethod.call::<_, Value>((-1, "pow", pow_fn));
     }
     install_pi_constant(lua, &globals)?;
-    // Retail triggers the first GC after PI is bound.
     lua.gc_collect()?;
     log_event(LuaEvent::CollectGarbage {});
     install_system_table(lua, &globals, context.clone())?;
     lua.gc_collect()?;
     log_event(LuaEvent::CollectGarbage {});
-    // Retail pushes default camera/control handlers before rebinding type; log stub pushes to align.
     let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-    log_push_cclosure("lua_pushCclosure", default_cam_change.to_pointer(), 0);
+    log_push_cclosure("lua_pushCclosure", default_cam_change.to_pointer(), 0, None);
     let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     for _ in 0..3 {
-        log_push_cclosure("lua_pushCclosure", default_control.to_pointer(), 0);
+        log_push_cclosure("lua_pushCclosure", default_control.to_pointer(), 0, None);
     }
 
     install_basic_functions(lua, &globals, context.clone())?;
@@ -130,7 +128,6 @@ fn install_basic_functions(
     context: Rc<RefCell<EngineContext>>,
 ) -> LuaResult<()> {
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
-        // Retail saves the stock type and wraps it so userdata can report richer tags.
         let type_ptr = type_fn.to_pointer();
         let type_handle = ptr_to_handle(type_ptr);
         log_event(LuaEvent::GetGlobal {
