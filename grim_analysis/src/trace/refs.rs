@@ -13,6 +13,7 @@ use super::{
     resolve_lua_function_label, ClosureOrigin,
 };
 
+/// Traces releasing a Lua reference and emits both semantic and raw events.
 pub(crate) unsafe fn trace_lua_unref(reference: c_int) {
     record_non_push_event();
     let note = if call_real_lua_unref(reference) {
@@ -27,6 +28,7 @@ pub(crate) unsafe fn trace_lua_unref(reference: c_int) {
     log_event(LuaEvent::Unref { reference, note });
 }
 
+/// Traces storing the top-of-stack value in the Lua reference table.
 pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
     record_non_push_event();
     match call_real_lua_ref(lock) {
@@ -97,6 +99,7 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
     }
 }
 
+/// Traces fetching a value from the Lua reference table.
 pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
     record_non_push_event();
     match call_real_lua_getref(reference) {

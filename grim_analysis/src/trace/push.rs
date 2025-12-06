@@ -18,6 +18,7 @@ use super::{
     value_fields_from_details, ClosureOrigin,
 };
 
+/// Traces pushing a C closure, capturing origin metadata and upvalue count.
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {
     let func_addr = func as *const c_void as usize;
     let origin = Some(ClosureOrigin::new(func as *const c_void));
@@ -49,6 +50,7 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
     }
 }
 
+/// Traces pushing a number onto the Lua stack.
 pub(crate) unsafe fn trace_lua_pushnumber(value: f32) {
     let rendered = format_number_for_log(value as f64);
     telemetry::record_pushed_number(value.into());
@@ -71,6 +73,7 @@ pub(crate) unsafe fn trace_lua_pushnumber(value: f32) {
     }
 }
 
+/// Traces pushing nil onto the Lua stack.
 pub(crate) unsafe fn trace_lua_pushnil() {
     telemetry::record_pushed_nil();
     let log_seq = log_event_with_seq(LuaEvent::PushNil {});
@@ -90,6 +93,7 @@ pub(crate) unsafe fn trace_lua_pushnil() {
     }
 }
 
+/// Traces pushing a NUL-terminated string.
 pub(crate) unsafe fn trace_lua_pushstring(value: *const c_char) {
     let text = super::cstr_opt(value).unwrap_or_else(|| "<null>".to_string());
     let preview = truncate_for_log(&text, 80);
@@ -113,6 +117,7 @@ pub(crate) unsafe fn trace_lua_pushstring(value: *const c_char) {
     }
 }
 
+/// Traces pushing a sized string slice.
 pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
     let text = if value.is_null() {
         "<null>".to_string()
@@ -141,6 +146,7 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
     }
 }
 
+/// Traces pushing a tagged userdata id.
 pub(crate) unsafe fn trace_lua_pushusertag(id: c_int, tag: c_int) {
     let values = ValueFields {
         value_type: Some(ValueType::Userdata),
@@ -165,6 +171,7 @@ pub(crate) unsafe fn trace_lua_pushusertag(id: c_int, tag: c_int) {
     }
 }
 
+/// Traces pushing an existing Lua object handle and captures its preview.
 pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
     let value_details = describe_lua_value(object);
     let values = value_details
@@ -184,6 +191,7 @@ pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
     }
 }
 
+/// Traces duplicating a value already on the Lua stack.
 pub(crate) unsafe fn trace_lua_pushvalue(index: c_int) {
     let source = call_real_lua_getparam(index);
     let mut values = ValueFields::default();

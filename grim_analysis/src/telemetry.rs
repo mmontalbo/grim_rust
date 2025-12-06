@@ -58,6 +58,7 @@ struct TelemetryHooks {
 }
 
 impl TelemetryHooks {
+    /// Returns the global telemetry hook state, initializing it on first access.
     fn shared() -> &'static Mutex<Self> {
         TELEMETRY.get_or_init(|| {
             Mutex::new(Self {
@@ -86,6 +87,7 @@ impl TelemetryHooks {
         })
     }
 
+    /// Installs Lua wrappers for movies and rooms once; defers to later ticks on failure.
     fn maybe_install_hooks(&mut self) {
         if self.installed {
             return;
@@ -100,6 +102,7 @@ impl TelemetryHooks {
         }
     }
 
+    /// Hooks engine movie functions, storing originals and replacing globals.
     fn install_movie_wrappers(&mut self) -> bool {
         let start_fullscreen = resolve_cfunction("StartFullscreenMovie");
         let start_movie = resolve_cfunction("StartMovie");
@@ -140,6 +143,7 @@ impl TelemetryHooks {
             || stop_movie_wrapped
     }
 
+    /// Hooks room transition functions so the intro follow-up room can be recorded.
     fn install_room_wrappers(&mut self) -> bool {
         let make_set = resolve_cfunction("MakeCurrentSet");
         let make_setup = resolve_cfunction("MakeCurrentSetup");
@@ -161,6 +165,7 @@ impl TelemetryHooks {
         set_wrapped || setup_wrapped
     }
 
+    /// Begins tracking a newly started fullscreen movie, emitting initial telemetry.
     fn record_fullscreen_start(&mut self, movie_name: &str) {
         // Treat overlapping starts as a replacement: end the prior movie, normalize the new
         // label, reset counters, and emit intro timeline + start cutscene events.
@@ -188,6 +193,7 @@ impl TelemetryHooks {
         );
     }
 
+    /// Records a poll against the current movie and ends it if playback stopped.
     fn record_fullscreen_poll(&mut self, playing: PlayingState) {
         self.poll_count = self.poll_count.saturating_add(1);
         let elapsed = self.elapsed_ms();
@@ -210,6 +216,7 @@ impl TelemetryHooks {
         }
     }
 
+    /// Cleans up the active movie state and emits end-of-cutscene telemetry.
     fn end_active_movie(&mut self, playing: PlayingState, reason: Option<EndReason>) {
         // Close out the current movie: finalize skip state, flag post-intro tracking,
         // emit end events with elapsed/poll counts, and clear active fields.
@@ -238,6 +245,7 @@ impl TelemetryHooks {
         self.skip_requested = false;
     }
 
+    /// Writes an intro timeline event to disk, allocating the writer on demand.
     fn emit_intro_timeline_event(&mut self, event: &str) {
         let seq = self.next_seq;
         let line = format!(
@@ -260,6 +268,7 @@ impl TelemetryHooks {
         self.next_seq += 1;
     }
 
+    /// Lazily opens the JSONL telemetry file, logging failures and disabling writes.
     fn ensure_writer(&mut self) -> Option<&mut TelemetryWriter> {
         if self.writer.is_none() {
             if let Err(err) = fs::create_dir_all("mods") {
@@ -281,6 +290,7 @@ impl TelemetryHooks {
         self.writer.as_mut()
     }
 
+    /// Emits a structured cutscene event describing movie playback state.
     fn emit_cutscene_event(&self, phase: CutscenePhase, playing: PlayingState, meta: CutsceneMeta) {
         let movie = self
             .active_movie_name
@@ -310,6 +320,7 @@ impl TelemetryHooks {
         });
     }
 
+    /// Marks that a skip was requested and logs the request event.
     fn record_cutscene_skip_request(&mut self) {
         self.skip_requested = true;
         log_event(LuaEvent::CutsceneSkip {
@@ -325,6 +336,7 @@ impl TelemetryHooks {
         });
     }
 
+    /// Emits a skip completion event using the active or last finished movie.
     fn record_cutscene_skip_complete(&mut self) {
         log_event(LuaEvent::CutsceneSkip {
             phase: CutsceneSkipPhase::Complete,
@@ -343,10 +355,12 @@ impl TelemetryHooks {
         });
     }
 
+    /// Returns elapsed milliseconds since the current movie started.
     fn elapsed_ms(&self) -> Option<u128> {
         self.start_instant.map(|start| start.elapsed().as_millis())
     }
 
+    /// Records the first room/set update after the intro movie finishes.
     fn record_post_intro_room_event(
         &mut self,
         source: &str,
@@ -405,6 +419,7 @@ struct TelemetryWriter {
 }
 
 impl TelemetryWriter {
+    /// Opens (or creates) the JSONL telemetry file for appending.
     fn open(path: &str) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
@@ -412,6 +427,7 @@ impl TelemetryWriter {
         })
     }
 
+    /// Writes a single line to the telemetry file and flushes it.
     fn write_line(&mut self, line: &str) -> std::io::Result<()> {
         self.inner.write_all(line.as_bytes())?;
         self.inner.write_all(b"\n")?;
@@ -419,12 +435,14 @@ impl TelemetryWriter {
     }
 }
 
+/// Attempts to install telemetry hooks; called from traced Lua entry points.
 pub(crate) fn observe_lua_activity() {
     if let Ok(mut hooks) = TelemetryHooks::shared().lock() {
         hooks.maybe_install_hooks();
     }
 }
 
+/// Wraps `StartFullscreenMovie`, calling the original and recording start metadata.
 unsafe extern "C" fn start_fullscreen_movie_wrapper() {
     let movie = read_movie_name_arg();
     let original = {
@@ -445,6 +463,7 @@ unsafe extern "C" fn start_fullscreen_movie_wrapper() {
     }
 }
 
+/// Wraps `StartMovie`, calling the original and recording start metadata.
 unsafe extern "C" fn start_movie_wrapper() {
     let movie = read_movie_name_arg();
     let original = {
@@ -465,6 +484,7 @@ unsafe extern "C" fn start_movie_wrapper() {
     }
 }
 
+/// Wraps `IsFullscreenMoviePlaying`, capturing the playing flag pushed by the VM.
 unsafe extern "C" fn is_fullscreen_movie_playing_wrapper() {
     let playing = capture_playing_from_poll(|| {
         let original = {
@@ -486,6 +506,7 @@ unsafe extern "C" fn is_fullscreen_movie_playing_wrapper() {
     }
 }
 
+/// Wraps `IsMoviePlaying`, capturing the playing flag pushed by the VM.
 unsafe extern "C" fn is_movie_playing_wrapper() {
     let playing = capture_playing_from_poll(|| {
         let original = {
@@ -507,6 +528,7 @@ unsafe extern "C" fn is_movie_playing_wrapper() {
     }
 }
 
+/// Wraps `StopMovie`, recording skip requests and end-of-playback events.
 unsafe extern "C" fn stop_movie_wrapper() {
     let original = {
         let hooks = TelemetryHooks::shared()
@@ -529,6 +551,7 @@ unsafe extern "C" fn stop_movie_wrapper() {
     }
 }
 
+/// Wraps `MakeCurrentSet`, capturing the first post-intro set transition.
 unsafe extern "C" fn make_current_set_wrapper() {
     let set = read_string_arg(1);
     let original = {
@@ -549,6 +572,7 @@ unsafe extern "C" fn make_current_set_wrapper() {
     }
 }
 
+/// Wraps `MakeCurrentSetup`, capturing the first post-intro setup transition.
 unsafe extern "C" fn make_current_setup_wrapper() {
     let setup = read_string_arg(1).or_else(|| read_number_arg(1).map(format_number_arg));
     let original = {
@@ -569,6 +593,7 @@ unsafe extern "C" fn make_current_setup_wrapper() {
     }
 }
 
+/// Replaces a Lua global with a wrapper closure, returning success.
 fn replace_global(name: &str, wrapper: LuaCFunction) -> bool {
     let Ok(cstr) = CString::new(name) else {
         log_line(&format!("invalid global name for telemetry hook: {name}"));
@@ -580,6 +605,7 @@ fn replace_global(name: &str, wrapper: LuaCFunction) -> bool {
     call_real_lua_setglobal(cstr.as_ptr())
 }
 
+/// Resolves a Lua C function by global name, logging if it is absent.
 fn resolve_cfunction(name: &str) -> Option<LuaCFunction> {
     let Ok(cname) = CString::new(name) else {
         log_line(&format!("invalid cstring for Lua lookup: {name}"));
@@ -593,6 +619,7 @@ fn resolve_cfunction(name: &str) -> Option<LuaCFunction> {
     func
 }
 
+/// Logs a missing C function once to avoid flooding output.
 fn log_missing_cfunction(name: &str) {
     static MISSING_REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let set = MISSING_REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
@@ -607,6 +634,7 @@ fn log_missing_cfunction(name: &str) {
     }
 }
 
+/// Installs `wrapper` only if the original target function exists.
 fn wrap_if_present(name: &str, target: Option<LuaCFunction>, wrapper: LuaCFunction) -> bool {
     let Some(_) = target else {
         return false;
@@ -620,10 +648,12 @@ fn wrap_if_present(name: &str, target: Option<LuaCFunction>, wrapper: LuaCFuncti
     true
 }
 
+/// Reads the first Lua argument as a movie name string.
 fn read_movie_name_arg() -> Option<String> {
     read_string_arg(1)
 }
 
+/// Reads the argument at `index` as a string if it is present and typed as string.
 fn read_string_arg(index: i32) -> Option<String> {
     let first = call_real_lua_getparam(index)?;
     if !call_real_lua_isstring(first) {
@@ -632,6 +662,7 @@ fn read_string_arg(index: i32) -> Option<String> {
     call_real_lua_getstring(first)
 }
 
+/// Reads the argument at `index` as a number if present.
 fn read_number_arg(index: i32) -> Option<f64> {
     let first = call_real_lua_getparam(index)?;
     if !call_real_lua_isnumber(first) {
@@ -640,6 +671,7 @@ fn read_number_arg(index: i32) -> Option<f64> {
     call_real_lua_getnumber(first)
 }
 
+/// Formats a numeric Lua argument as a compact string (drops trailing .0).
 fn format_number_arg(value: f64) -> String {
     if (value.fract() - 0.0).abs() < f64::EPSILON {
         format!("{value:.0}")
@@ -648,6 +680,7 @@ fn format_number_arg(value: f64) -> String {
     }
 }
 
+/// Captures a boolean-ish result pushed by poll wrappers while restoring prior state.
 fn capture_playing_from_poll<F: FnOnce() -> Option<()>>(call_original: F) -> PlayingState {
     // Poll wrappers mark capture active, let the original call run (which may push
     // a boolean-ish value), then latch the pushed number/nil into POLL_CAPTURE_RESULT.
@@ -666,6 +699,7 @@ fn capture_playing_from_poll<F: FnOnce() -> Option<()>>(call_original: F) -> Pla
     })
 }
 
+/// Records a pushed number as a playback flag when a poll hook is active.
 pub(crate) fn record_pushed_number(value: f64) {
     // record_pushed_* are invoked from push hooks; when a poll is active they capture
     // the effective playing flag for the surrounding call.
@@ -681,6 +715,7 @@ pub(crate) fn record_pushed_number(value: f64) {
     })
 }
 
+/// Records a pushed nil as a playback flag when a poll hook is active.
 pub(crate) fn record_pushed_nil() {
     POLL_CAPTURE_ACTIVE.with(|active| {
         if !active.get() {

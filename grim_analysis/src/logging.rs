@@ -18,14 +18,17 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     run_id_env: None,
 });
 
+/// Emits a single line-based diagnostic to the configured telemetry sink.
 pub(crate) fn log_line(message: &str) {
     LOGGER.log_line(message);
 }
 
+/// Sends a structured telemetry event without exposing the logger.
 pub(crate) fn log_event(event: impl Into<EventBuilder>) {
     LOGGER.log_event(event);
 }
 
+/// Sends a structured telemetry event and returns its sequence number for correlation.
 pub(crate) fn log_event_with_seq(event: impl Into<EventBuilder>) -> u64 {
     LOGGER.log_event_with_seq(event)
 }

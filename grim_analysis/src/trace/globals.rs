@@ -14,6 +14,7 @@ use super::{
     value_fields_from_details, ClosureOrigin,
 };
 
+/// Traces a raw global read (no metamethods) and records the returned handle/value.
 pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
     record_non_push_event();
     let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
@@ -40,6 +41,7 @@ pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
     }
 }
 
+/// Traces a raw global write (no metamethods) and emits metadata about the stored value.
 pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     record_non_push_event();
     let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
@@ -76,6 +78,7 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     });
 }
 
+/// Traces a global set, emitting semantic bind events for functions/constants.
 pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
     let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
 
@@ -138,6 +141,7 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
     }
 }
 
+/// Traces a global read and increments access counters for the symbol.
 pub(crate) unsafe fn trace_lua_getglobal(name: *const c_char) -> LuaObject {
     record_non_push_event();
     let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());

@@ -11,6 +11,7 @@ use super::{
     record_non_push_event, take_recent_pushes, value_fields_from_details,
 };
 
+/// Traces table creation and records the resulting handle metadata.
 pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
     record_non_push_event();
     match call_real_lua_createtable() {
@@ -34,6 +35,7 @@ pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
     }
 }
 
+/// Traces `lua_settable`, emitting events about the table mutation when possible.
 pub(crate) unsafe fn trace_lua_settable() {
     let pushes = take_recent_pushes(3);
     let table_handle = call_real_lua_getparam(-3);
@@ -53,6 +55,7 @@ pub(crate) unsafe fn trace_lua_settable() {
     }
 }
 
+/// Traces `lua_rawsettable`, emitting events about the table mutation when possible.
 pub(crate) unsafe fn trace_lua_rawsettable() {
     let pushes = take_recent_pushes(3);
     let table_handle = call_real_lua_getparam(-3);
@@ -77,6 +80,7 @@ pub(crate) unsafe fn trace_lua_rawsettable() {
     }
 }
 
+/// Traces a table lookup with metamethods, logging the returned value.
 pub(crate) unsafe fn trace_lua_gettable() -> LuaObject {
     record_non_push_event();
     match call_real_lua_gettable() {
@@ -98,6 +102,7 @@ pub(crate) unsafe fn trace_lua_gettable() -> LuaObject {
     }
 }
 
+/// Traces a table lookup without metamethods, logging the returned value.
 pub(crate) unsafe fn trace_lua_rawgettable() -> LuaObject {
     record_non_push_event();
     match call_real_lua_rawgettable() {

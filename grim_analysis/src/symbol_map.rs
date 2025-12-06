@@ -32,6 +32,7 @@ struct LoadedSymbolMap {
     module_filter: Option<String>,
 }
 
+/// Resolves an address to the closest symbol using any configured symbol maps.
 pub(crate) fn lookup_symbol_from_map(
     addr: usize,
     module_path: Option<&str>,
@@ -41,11 +42,13 @@ pub(crate) fn lookup_symbol_from_map(
     maps.lookup(addr, module_path, module_base)
 }
 
+/// Lazily loads and caches symbol maps; returns None when no maps are configured.
 fn symbol_maps() -> Option<&'static SymbolMaps> {
     static MAPS: OnceLock<Option<SymbolMaps>> = OnceLock::new();
     MAPS.get_or_init(load_symbol_maps).as_ref()
 }
 
+/// Reads symbol maps specified via environment variables and returns them if any parsed successfully.
 fn load_symbol_maps() -> Option<SymbolMaps> {
     let mut maps = Vec::new();
     if let Some(map) = load_symbol_map("GRIM_SHIM_SYMBOL_MAP", "GRIM_SHIM_SYMBOL_MAP_MODULE") {
@@ -64,6 +67,7 @@ fn load_symbol_maps() -> Option<SymbolMaps> {
     }
 }
 
+/// Attempts to load a single symbol map based on env vars for path and module filter.
 fn load_symbol_map(path_var: &str, module_var: &str) -> Option<LoadedSymbolMap> {
     let path = env::var(path_var).ok()?;
     let module_filter = env::var(module_var).ok().filter(|value| !value.is_empty());
@@ -71,6 +75,7 @@ fn load_symbol_map(path_var: &str, module_var: &str) -> Option<LoadedSymbolMap> 
     load_symbol_map_at_path(path_ref, module_filter)
 }
 
+/// Opens a symbol map file, logs failures, and collects parsed entries.
 fn load_symbol_map_at_path(
     path_ref: &Path,
     module_filter: Option<String>,
@@ -118,6 +123,7 @@ fn load_symbol_map_at_path(
     })
 }
 
+/// Parses a whitespace-delimited address/symbol line, ignoring comments and blanks.
 fn parse_symbol_line(line: &str) -> Option<SymbolEntry> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -145,11 +151,13 @@ fn parse_symbol_line(line: &str) -> Option<SymbolEntry> {
     Some(SymbolEntry { addr, name })
 }
 
+/// Converts a hex address token (with or without 0x) into a usize.
 fn parse_hex_addr(token: &str) -> Option<usize> {
     usize::from_str_radix(token.trim_start_matches("0x"), 16).ok()
 }
 
 impl SymbolMaps {
+    /// Searches all loaded maps, preferring module-specific ones, for the best match.
     fn lookup(
         &self,
         addr: usize,
@@ -177,6 +185,7 @@ impl SymbolMaps {
 }
 
 impl LoadedSymbolMap {
+    /// Checks whether this map should be used for the provided module path.
     fn matches_module(&self, module_path: Option<&str>) -> bool {
         match (&self.module_filter, module_path) {
             (Some(filter), Some(path)) => path.contains(filter),
@@ -185,6 +194,7 @@ impl LoadedSymbolMap {
         }
     }
 
+    /// Looks up an address using both module-relative and absolute offsets.
     fn lookup(&self, addr: usize, module_base: Option<usize>) -> Option<SymbolMapHit> {
         // First try relative to module base (useful for shared libraries).
         let mut candidates = Vec::new();
@@ -204,6 +214,7 @@ impl LoadedSymbolMap {
         None
     }
 
+    /// Finds the nearest symbol at or before the requested offset within this map.
     fn lookup_addr(&self, offset: usize) -> Option<SymbolMapHit> {
         let idx = match self
             .entries

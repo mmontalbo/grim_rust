@@ -107,6 +107,7 @@ static LUA_SETTAGMETHOD: OnceLock<Option<LuaSetTagMethodFn>> = OnceLock::new();
 static LUA_COLLECTGARBAGE: OnceLock<Option<LuaCollectGarbageFn>> = OnceLock::new();
 static LUA_ERROR: OnceLock<Option<LuaErrorFn>> = OnceLock::new();
 
+/// Calls the resolved `lua_pushCclosure` and returns whether the symbol existed.
 pub(crate) fn call_real_lua_push_c_closure(func: LuaCFunction, upvalues: c_int) -> bool {
     unsafe {
         match lua_push_c_closure_symbol() {
@@ -122,26 +123,32 @@ pub(crate) fn call_real_lua_push_c_closure(func: LuaCFunction, upvalues: c_int) 
     }
 }
 
+/// Creates a Lua state via the retail `lua_open`, if available.
 pub(crate) fn call_real_lua_open() -> Option<LuaState> {
     unsafe { lua_open_symbol().map(|symbol| symbol()) }
 }
 
+/// Creates a Lua state via the retail `lua_newstate`, if available.
 pub(crate) fn call_real_lua_newstate() -> Option<LuaState> {
     unsafe { lua_newstate_symbol().map(|symbol| symbol()) }
 }
 
+/// Spawns a new Lua thread within the retail VM when the symbol is present.
 pub(crate) fn call_real_lua_newthread(state: LuaState) -> Option<LuaState> {
     unsafe { lua_newthread_symbol().map(|symbol| symbol(state)) }
 }
 
+/// Forwards `lua_dofile` into the retail VM, returning None if the symbol is missing.
 pub(crate) fn call_real_lua_dofile(filename: *const c_char) -> Option<c_int> {
     unsafe { lua_dofile_symbol().map(|symbol| symbol(filename)) }
 }
 
+/// Forwards `lua_dostring` into the retail VM, returning None if the symbol is missing.
 pub(crate) fn call_real_lua_dostring(chunk: *const c_char) -> Option<c_int> {
     unsafe { lua_dostring_symbol().map(|symbol| symbol(chunk)) }
 }
 
+/// Runs a Lua buffer in the retail VM if the symbol resolves successfully.
 pub(crate) fn call_real_lua_dobuffer(
     buffer: *const c_char,
     size: size_t,
@@ -150,14 +157,17 @@ pub(crate) fn call_real_lua_dobuffer(
     unsafe { lua_dobuffer_symbol().map(|symbol| symbol(buffer, size, name)) }
 }
 
+/// Calls a Lua function by name in the retail VM, if available.
 pub(crate) fn call_real_lua_call(func_name: *const c_char) -> Option<c_int> {
     unsafe { lua_call_symbol().map(|symbol| symbol(func_name)) }
 }
 
+/// Calls a Lua function by handle in the retail VM, if available.
 pub(crate) fn call_real_lua_callfunction(func: LuaObject) -> Option<c_int> {
     unsafe { lua_callfunction_symbol().map(|symbol| symbol(func)) }
 }
 
+/// Retrieves the name and kind for a Lua function handle when the symbol exists.
 pub(crate) fn call_real_lua_getobjname(
     handle: LuaObject,
 ) -> Option<(Option<String>, Option<String>)> {
@@ -170,6 +180,7 @@ pub(crate) fn call_real_lua_getobjname(
     }
 }
 
+/// Sets a global in the retail VM and reports whether the symbol was available.
 pub(crate) fn call_real_lua_setglobal(name: *const c_char) -> bool {
     unsafe {
         match lua_setglobal_symbol() {
@@ -185,14 +196,17 @@ pub(crate) fn call_real_lua_setglobal(name: *const c_char) -> bool {
     }
 }
 
+/// Reads a global from the retail VM, returning None if the symbol is missing.
 pub(crate) fn call_real_lua_getglobal(name: *const c_char) -> Option<LuaObject> {
     unsafe { lua_getglobal_symbol().map(|symbol| symbol(name)) }
 }
 
+/// Resolves the C function pointer behind a Lua handle.
 pub(crate) fn call_real_lua_getcfunction(handle: LuaObject) -> Option<LuaCFunction> {
     unsafe { lua_getcfunction_symbol().and_then(|symbol| symbol(handle)) }
 }
 
+/// Fetches the Lua stack parameter at `index`, returning None for null/invalid entries.
 pub(crate) fn call_real_lua_getparam(index: c_int) -> Option<LuaObject> {
     unsafe {
         lua_lua2c_symbol()
@@ -201,6 +215,7 @@ pub(crate) fn call_real_lua_getparam(index: c_int) -> Option<LuaObject> {
     }
 }
 
+/// Returns whether the handle represents a number according to the retail VM.
 pub(crate) fn call_real_lua_isnumber(object: LuaObject) -> bool {
     unsafe {
         lua_isnumber_symbol()
@@ -209,6 +224,7 @@ pub(crate) fn call_real_lua_isnumber(object: LuaObject) -> bool {
     }
 }
 
+/// Returns whether the handle represents a string according to the retail VM.
 pub(crate) fn call_real_lua_isstring(object: LuaObject) -> bool {
     unsafe {
         lua_isstring_symbol()
@@ -217,6 +233,7 @@ pub(crate) fn call_real_lua_isstring(object: LuaObject) -> bool {
     }
 }
 
+/// Returns whether the handle represents a table according to the retail VM.
 pub(crate) fn call_real_lua_istable(object: LuaObject) -> bool {
     unsafe {
         lua_istable_symbol()
@@ -225,6 +242,7 @@ pub(crate) fn call_real_lua_istable(object: LuaObject) -> bool {
     }
 }
 
+/// Returns whether the handle represents a function according to the retail VM.
 pub(crate) fn call_real_lua_isfunction(object: LuaObject) -> bool {
     unsafe {
         lua_isfunction_symbol()
@@ -233,6 +251,7 @@ pub(crate) fn call_real_lua_isfunction(object: LuaObject) -> bool {
     }
 }
 
+/// Returns whether the handle represents a C function according to the retail VM.
 pub(crate) fn call_real_lua_iscfunction(object: LuaObject) -> bool {
     unsafe {
         lua_iscfunction_symbol()
@@ -241,6 +260,7 @@ pub(crate) fn call_real_lua_iscfunction(object: LuaObject) -> bool {
     }
 }
 
+/// Returns whether the handle represents userdata according to the retail VM.
 pub(crate) fn call_real_lua_isuserdata(object: LuaObject) -> bool {
     unsafe {
         lua_isuserdata_symbol()
@@ -249,10 +269,12 @@ pub(crate) fn call_real_lua_isuserdata(object: LuaObject) -> bool {
     }
 }
 
+/// Fetches the numeric value behind a Lua handle if the symbol is present.
 pub(crate) fn call_real_lua_getnumber(object: LuaObject) -> Option<c_double> {
     unsafe { lua_getnumber_symbol().map(|symbol| symbol(object)) }
 }
 
+/// Converts a Lua string handle into a Rust `String`, if possible.
 pub(crate) fn call_real_lua_getstring(object: LuaObject) -> Option<String> {
     unsafe {
         lua_getstring_symbol().and_then(|symbol| {
@@ -266,10 +288,12 @@ pub(crate) fn call_real_lua_getstring(object: LuaObject) -> Option<String> {
     }
 }
 
+/// Returns the tag associated with a Lua handle via the retail API.
 pub(crate) fn call_real_lua_tag(object: LuaObject) -> Option<c_int> {
     unsafe { lua_tag_symbol().map(|symbol| symbol(object)) }
 }
 
+/// Pushes a number via the retail API, returning whether the symbol existed.
 pub(crate) fn call_real_lua_pushnumber(value: c_float) -> bool {
     unsafe {
         match lua_pushnumber_symbol() {
@@ -285,6 +309,7 @@ pub(crate) fn call_real_lua_pushnumber(value: c_float) -> bool {
     }
 }
 
+/// Pushes a NUL-terminated string via the retail API, returning success.
 pub(crate) fn call_real_lua_pushstring(value: *const c_char) -> bool {
     unsafe {
         match lua_pushstring_symbol() {
@@ -300,6 +325,7 @@ pub(crate) fn call_real_lua_pushstring(value: *const c_char) -> bool {
     }
 }
 
+/// Pushes a sized string via the retail API, returning success.
 pub(crate) fn call_real_lua_pushlstring(value: *const c_char, len: size_t) -> bool {
     unsafe {
         match lua_pushlstring_symbol() {
@@ -315,6 +341,7 @@ pub(crate) fn call_real_lua_pushlstring(value: *const c_char, len: size_t) -> bo
     }
 }
 
+/// Pushes `nil` via the retail API, returning whether the symbol existed.
 pub(crate) fn call_real_lua_pushnil() -> bool {
     unsafe {
         match lua_pushnil_symbol() {
@@ -330,6 +357,7 @@ pub(crate) fn call_real_lua_pushnil() -> bool {
     }
 }
 
+/// Duplicates a stack value by index via the retail API, returning success.
 pub(crate) fn call_real_lua_pushvalue(index: c_int) -> bool {
     unsafe {
         match lua_pushvalue_symbol() {
@@ -345,6 +373,7 @@ pub(crate) fn call_real_lua_pushvalue(index: c_int) -> bool {
     }
 }
 
+/// Pushes a tagged userdata via the retail API, returning success.
 pub(crate) fn call_real_lua_pushusertag(id: c_int, tag: c_int) -> bool {
     unsafe {
         match lua_pushusertag_symbol() {
@@ -360,6 +389,7 @@ pub(crate) fn call_real_lua_pushusertag(id: c_int, tag: c_int) -> bool {
     }
 }
 
+/// Pushes an existing Lua handle via the retail API, returning success.
 pub(crate) fn call_real_lua_pushobject(object: LuaObject) -> bool {
     unsafe {
         match lua_pushobject_symbol() {
@@ -375,10 +405,12 @@ pub(crate) fn call_real_lua_pushobject(object: LuaObject) -> bool {
     }
 }
 
+/// Creates a table in the retail VM if the symbol resolves.
 pub(crate) fn call_real_lua_createtable() -> Option<LuaObject> {
     unsafe { lua_createtable_symbol().map(|symbol| symbol()) }
 }
 
+/// Sets a table entry via the retail API, returning whether the symbol existed.
 pub(crate) fn call_real_lua_settable() -> bool {
     unsafe {
         match lua_settable_symbol() {
@@ -394,6 +426,7 @@ pub(crate) fn call_real_lua_settable() -> bool {
     }
 }
 
+/// Sets a table entry without metamethods via the retail API, returning success.
 pub(crate) fn call_real_lua_rawsettable() -> bool {
     unsafe {
         match lua_rawsettable_symbol() {
@@ -409,18 +442,22 @@ pub(crate) fn call_real_lua_rawsettable() -> bool {
     }
 }
 
+/// Reads a table entry via the retail API if the symbol is present.
 pub(crate) fn call_real_lua_gettable() -> Option<LuaObject> {
     unsafe { lua_gettable_symbol().map(|symbol| symbol()) }
 }
 
+/// Reads a table entry without metamethods via the retail API if available.
 pub(crate) fn call_real_lua_rawgettable() -> Option<LuaObject> {
     unsafe { lua_rawgettable_symbol().map(|symbol| symbol()) }
 }
 
+/// Reads a global without metamethods via the retail API if available.
 pub(crate) fn call_real_lua_rawgetglobal(name: *const c_char) -> Option<LuaObject> {
     unsafe { lua_rawgetglobal_symbol().map(|symbol| symbol(name)) }
 }
 
+/// Writes a global without metamethods via the retail API, returning success.
 pub(crate) fn call_real_lua_rawsetglobal(name: *const c_char) -> bool {
     unsafe {
         match lua_rawsetglobal_symbol() {
@@ -436,6 +473,7 @@ pub(crate) fn call_real_lua_rawsetglobal(name: *const c_char) -> bool {
     }
 }
 
+/// Releases a Lua reference if the retail symbol exists.
 pub(crate) fn call_real_lua_unref(reference: c_int) -> bool {
     unsafe {
         match lua_unref_symbol() {
@@ -451,6 +489,7 @@ pub(crate) fn call_real_lua_unref(reference: c_int) -> bool {
     }
 }
 
+/// Sets a fallback handler in the retail VM if the symbol resolves.
 pub(crate) fn call_real_lua_setfallback(
     event: *const c_char,
     func: LuaCFunction,
@@ -458,14 +497,17 @@ pub(crate) fn call_real_lua_setfallback(
     unsafe { lua_setfallback_symbol().map(|symbol| symbol(event, func)) }
 }
 
+/// Allocates a new tag in the retail VM if available.
 pub(crate) fn call_real_lua_newtag() -> Option<c_int> {
     unsafe { lua_newtag_symbol().map(|symbol| symbol()) }
 }
 
+/// Copies tag methods between tags in the retail VM, when supported.
 pub(crate) fn call_real_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> Option<c_int> {
     unsafe { lua_copytagmethods_symbol().map(|symbol| symbol(tagto, tagfrom)) }
 }
 
+/// Sets the active tag for the top-of-stack value, returning success.
 pub(crate) fn call_real_lua_settag(tag: c_int) -> bool {
     unsafe {
         match lua_settag_symbol() {
@@ -481,14 +523,17 @@ pub(crate) fn call_real_lua_settag(tag: c_int) -> bool {
     }
 }
 
+/// Stores the top-of-stack value in the reference table if the symbol resolves.
 pub(crate) fn call_real_lua_ref(lock: c_int) -> Option<c_int> {
     unsafe { lua_ref_symbol().map(|symbol| symbol(lock)) }
 }
 
+/// Retrieves a value from the reference table if the symbol resolves.
 pub(crate) fn call_real_lua_getref(reference: c_int) -> Option<LuaObject> {
     unsafe { lua_getref_symbol().map(|symbol| symbol(reference)) }
 }
 
+/// Installs a tag method for an event if the symbol resolves.
 pub(crate) fn call_real_lua_settagmethod(tag: c_int, event: *const c_char) -> bool {
     unsafe {
         match lua_settagmethod_symbol() {
@@ -504,6 +549,7 @@ pub(crate) fn call_real_lua_settagmethod(tag: c_int, event: *const c_char) -> bo
     }
 }
 
+/// Runs Lua's garbage collector if the symbol resolves.
 pub(crate) fn call_real_lua_collectgarbage() -> bool {
     unsafe {
         match lua_collectgarbage_symbol() {
@@ -519,6 +565,7 @@ pub(crate) fn call_real_lua_collectgarbage() -> bool {
     }
 }
 
+/// Raises a Lua error through the retail VM, returning success.
 pub(crate) fn call_real_lua_error(message: *const c_char) -> bool {
     unsafe {
         match lua_error_symbol() {
@@ -1010,6 +1057,7 @@ struct SymbolVariant {
     label: &'static str,
 }
 
+/// Attempts each symbol spelling until one resolves via `dlsym`.
 unsafe fn resolve_symbol_with_variants(variants: &[SymbolVariant]) -> Option<*mut c_void> {
     for variant in variants {
         if let Some(ptr) = resolve_symbol_ptr(variant.symbol, variant.label) {
@@ -1019,6 +1067,7 @@ unsafe fn resolve_symbol_with_variants(variants: &[SymbolVariant]) -> Option<*mu
     None
 }
 
+/// Resolves a single symbol name using `RTLD_NEXT` and falls back to `RTLD_DEFAULT`.
 unsafe fn resolve_symbol_ptr(symbol: &[u8], label: &str) -> Option<*mut c_void> {
     let mut ptr = libc::dlsym(libc::RTLD_NEXT, symbol.as_ptr() as *const c_char);
     if ptr.is_null() {
@@ -1032,6 +1081,7 @@ unsafe fn resolve_symbol_ptr(symbol: &[u8], label: &str) -> Option<*mut c_void> 
     }
 }
 
+/// Converts an optional C string pointer into an owned `String`.
 unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         None

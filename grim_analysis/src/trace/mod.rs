@@ -1,5 +1,5 @@
 //! Trace instrumentation for the Lua 3.1 C API.
-//! 
+//!
 //! Each `trace_lua_*` function mirrors the retail VM behavior while logging both
 //! raw events and higher-level semantics (push previews, table mutations, globals,
 //! references, and tag operations). Symbol resolution and value inspection are
@@ -67,19 +67,7 @@ extern "C" {
     fn backtrace(buffer: *mut *mut c_void, size: c_int) -> c_int;
 }
 
-fn forward_int_result(label: &str, result: Option<c_int>) -> c_int {
-    match result {
-        Some(value) => value,
-        None => {
-            log_line(&format!(
-                "{} symbol missing; returning failure to keep engine alive",
-                label
-            ));
-            -1
-        }
-    }
-}
-
+/// Caches metadata about a push so later table operations can correlate key/value pairs.
 fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
     // We keep a tiny ring buffer of recent push events so table set operations can pair
     // their key/value pushes with the destination table. Any non-push clears the ring
@@ -91,6 +79,7 @@ fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<Lua
     }
 }
 
+/// Clears pending push context when a non-push API call occurs.
 fn record_non_push_event() {
     // A non-push (e.g. call, get) means pending push context is no longer meaningful.
     if let Ok(mut tracker) = push_event_tracker().lock() {
@@ -100,6 +89,7 @@ fn record_non_push_event() {
     }
 }
 
+/// Returns the most recent captured pushes needed to describe a table write.
 fn take_recent_pushes(count: usize) -> Option<Vec<TrackedPush>> {
     match push_event_tracker().lock() {
         Ok(mut tracker) => {
@@ -114,6 +104,7 @@ fn take_recent_pushes(count: usize) -> Option<Vec<TrackedPush>> {
     }
 }
 
+/// Emits semantic/log events describing a table entry mutation if we have enough context.
 fn emit_set_table_entry(
     table_handle: Option<LuaObject>,
     pushes: Option<Vec<TrackedPush>>,
@@ -167,6 +158,7 @@ fn emit_set_table_entry(
     });
 }
 
+/// Picks a table handle from captured pushes when none was provided directly.
 fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
     pushes
         .iter()
@@ -175,6 +167,7 @@ fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
         .and_then(|push| push.handle)
 }
 
+/// Emits a semantic binding event for a function registered as a global.
 fn emit_registered_global(
     name: &str,
     handle: LuaObject,
@@ -195,6 +188,7 @@ fn emit_registered_global(
     });
 }
 
+/// Emits a semantic binding event for a constant registered as a global.
 fn emit_registered_constant(
     name: &str,
     handle: LuaObject,
@@ -213,6 +207,7 @@ fn emit_registered_constant(
     });
 }
 
+/// Records that a closure was just pushed so a subsequent global set can attribute it.
 fn remember_registered_global_candidate(
     func_addr: usize,
     upvalues: c_int,
@@ -232,6 +227,7 @@ fn remember_registered_global_candidate(
     }
 }
 
+/// Retrieves a pending registered-global candidate for the given function address.
 fn take_registered_global_candidate(func_addr: usize) -> Option<PendingRegisteredGlobal> {
     match registered_global_tracker().lock() {
         Ok(mut tracker) => tracker.take(func_addr),
@@ -241,15 +237,18 @@ fn take_registered_global_candidate(func_addr: usize) -> Option<PendingRegistere
         }
     }
 }
+/// Singleton accessor for the push event tracker ring buffer.
 fn push_event_tracker() -> &'static Mutex<PushEventTracker> {
     PUSH_EVENT_TRACKER.get_or_init(|| Mutex::new(PushEventTracker::new(PUSH_RING_CAPACITY)))
 }
 
+/// Singleton accessor for tracking recently pushed closures destined for globals.
 fn registered_global_tracker() -> &'static Mutex<RegisteredGlobalTracker> {
     REGISTERED_GLOBAL_CANDIDATES
         .get_or_init(|| Mutex::new(RegisteredGlobalTracker::new(MAX_PENDING_REGISTERED_GLOBALS)))
 }
 
+/// Renders floats cleanly for logging, stripping trailing decimals when whole.
 fn format_number_for_log(value: f64) -> String {
     if (value.fract() - 0.0).abs() < f64::EPSILON {
         format!("{value:.0}")
@@ -258,6 +257,7 @@ fn format_number_for_log(value: f64) -> String {
     }
 }
 
+/// Truncates a long string for logging while indicating it was shortened.
 fn truncate_for_log(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         return text.to_string();
@@ -267,6 +267,7 @@ fn truncate_for_log(text: &str, max_len: usize) -> String {
     truncated
 }
 
+/// Inspects a Lua handle into a structured value description.
 fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
     if handle == 0 {
         return Some(ValueDetails::Nil);
@@ -298,6 +299,7 @@ fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
     Some(ValueDetails::Unknown { tag })
 }
 
+/// Converts a value description into telemetry-ready `ValueFields`.
 fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
     match value {
         ValueDetails::Number(value) => ValueFields {
@@ -344,6 +346,7 @@ fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
     }
 }
 
+/// Converts a value description into a compact upvalue preview.
 fn upvalue_preview_from_details(value: &ValueDetails) -> UpvaluePreview {
     match value {
         ValueDetails::Number(value) => UpvaluePreview {
@@ -427,6 +430,7 @@ enum ValueDetails {
     },
 }
 
+/// Normalizes optional origin metadata into telemetry fields.
 fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
     let mut fields = OriginFields::default();
     if let Some(origin) = origin {
@@ -452,6 +456,7 @@ fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
     fields
 }
 
+/// Captures the current call stack as a backtrace; currently unused beyond placeholder.
 fn caller_origin_fields() -> OriginFields {
     let mut frames: [*mut c_void; 32] = [ptr::null_mut(); 32];
     let depth = unsafe { backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
@@ -467,6 +472,7 @@ struct ClosureDetails {
     symbol: Option<String>,
 }
 
+/// Describes the module/symbol information for a closure pointer using `dladdr`.
 fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
     unsafe {
         let mut info = MaybeUninit::<Dl_info>::zeroed();
@@ -493,6 +499,7 @@ fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
     }
 }
 
+/// Converts a potentially null C string into an owned `String`.
 unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         None
@@ -507,6 +514,7 @@ struct PushEventTracker {
 }
 
 impl PushEventTracker {
+    /// Creates a ring buffer for recent push operations.
     fn new(capacity: usize) -> Self {
         Self {
             pushes: VecDeque::with_capacity(capacity),
@@ -514,6 +522,7 @@ impl PushEventTracker {
         }
     }
 
+    /// Records a push event with its sequence and optional handle.
     fn record_push(&mut self, log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
         if self.pushes.len() == self.capacity {
             self.pushes.pop_front();
@@ -525,10 +534,12 @@ impl PushEventTracker {
         });
     }
 
+    /// Clears tracked pushes when a non-push event happens.
     fn record_non_push(&mut self) {
         self.pushes.clear();
     }
 
+    /// Returns the `count` most recent pushes if available.
     fn snapshot_recent(&self, count: usize) -> Option<Vec<TrackedPush>> {
         if count == 0 {
             return Some(Vec::new());
@@ -540,6 +551,7 @@ impl PushEventTracker {
         Some(self.pushes.iter().skip(start).cloned().collect())
     }
 
+    /// Empties the buffer of tracked pushes.
     fn clear(&mut self) {
         self.pushes.clear();
     }
@@ -564,6 +576,7 @@ struct RegisteredGlobalTracker {
 }
 
 impl RegisteredGlobalTracker {
+    /// Creates a bounded tracker for recent registered-global candidates.
     fn new(max_per_func: usize) -> Self {
         Self {
             pending: HashMap::new(),
@@ -571,6 +584,7 @@ impl RegisteredGlobalTracker {
         }
     }
 
+    /// Records a pushed closure as a potential future global binding.
     fn remember(&mut self, candidate: PendingRegisteredGlobal) {
         let queue = self.pending.entry(candidate.func_addr).or_default();
         queue.push_back(candidate);
@@ -579,6 +593,7 @@ impl RegisteredGlobalTracker {
         }
     }
 
+    /// Retrieves the most recent candidate for a given function address, pruning when empty.
     fn take(&mut self, func_addr: usize) -> Option<PendingRegisteredGlobal> {
         let candidate = self
             .pending
@@ -605,6 +620,7 @@ struct CallfunctionTracker {
 impl CallfunctionTracker {
     // Provides shared labeling/origin metadata across call/ref/global hooks so we only
     // resolve expensive symbols once and can keep per-handle call counts.
+    /// Initializes trackers for call counts, labels, and origins.
     fn new() -> Self {
         Self {
             counts: HashMap::new(),
@@ -613,30 +629,37 @@ impl CallfunctionTracker {
         }
     }
 
+    /// Overrides any existing label for a handle.
     fn remember_label<S: Into<String>>(&mut self, handle: LuaObject, label: S) {
         self.labels.insert(handle, label.into());
     }
 
+    /// Records a label only if one is not already present.
     fn remember_label_if_missing<S: Into<String>>(&mut self, handle: LuaObject, label: S) {
         self.labels.entry(handle).or_insert_with(|| label.into());
     }
 
+    /// Records the origin metadata for a handle.
     fn remember_origin(&mut self, handle: LuaObject, origin: ClosureOrigin) {
         self.origins.insert(handle, origin);
     }
 
+    /// Records origin metadata only if none was cached.
     fn remember_origin_if_missing(&mut self, handle: LuaObject, origin: ClosureOrigin) {
         self.origins.entry(handle).or_insert(origin);
     }
 
+    /// Fetches any cached label for a handle.
     fn label_for(&self, handle: LuaObject) -> Option<String> {
         self.labels.get(&handle).cloned()
     }
 
+    /// Fetches any cached origin for a handle.
     fn origin_for(&self, handle: LuaObject) -> Option<ClosureOrigin> {
         self.origins.get(&handle).cloned()
     }
 
+    /// Increments call counts for the handle and returns the latest sample.
     fn record(&mut self, handle: LuaObject, label: &str) -> CallSample {
         let count = {
             let entry = self.counts.entry(handle).or_insert(0);
@@ -661,12 +684,14 @@ struct GlobalAccessTracker {
 }
 
 impl GlobalAccessTracker {
+    /// Creates a tracker for global access counts.
     fn new() -> Self {
         Self {
             counts: HashMap::new(),
         }
     }
 
+    /// Increments and returns the access count for a global label.
     fn record(&mut self, label: &str) -> u64 {
         let count = {
             let entry = self.counts.entry(label.to_string()).or_insert(0);
@@ -682,25 +707,30 @@ struct HandleLabelTracker {
 }
 
 impl HandleLabelTracker {
+    /// Creates an empty handle-to-label map.
     fn new() -> Self {
         Self {
             labels: HashMap::new(),
         }
     }
 
+    /// Records or overwrites a label for the given handle.
     fn remember_label(&mut self, handle: LuaObject, label: String) {
         self.labels.insert(handle, label);
     }
 
+    /// Records a label if one does not already exist.
     fn remember_label_if_missing(&mut self, handle: LuaObject, label: String) {
         self.labels.entry(handle).or_insert(label);
     }
 
+    /// Fetches the label for a handle if available.
     fn label_for(&self, handle: LuaObject) -> Option<String> {
         self.labels.get(&handle).cloned()
     }
 }
 
+/// Produces a human-readable label for a Lua function handle using caches and `getobjname`.
 fn resolve_lua_function_label(handle: LuaObject) -> String {
     // Prefer cached labels/origins from prior binds/refs, falling back to Lua's
     // getobjname and finally a hex handle to ensure every function log has a label.
@@ -727,18 +757,22 @@ fn resolve_lua_function_label(handle: LuaObject) -> String {
     format!("handle=0x{handle:08x}")
 }
 
+/// Singleton accessor for the callfunction tracker.
 fn callfunction_tracker() -> &'static Mutex<CallfunctionTracker> {
     CALLFUNCTION_TRACKER.get_or_init(|| Mutex::new(CallfunctionTracker::new()))
 }
 
+/// Singleton accessor for the global access tracker.
 fn global_access_tracker() -> &'static Mutex<GlobalAccessTracker> {
     GLOBAL_ACCESS_TRACKER.get_or_init(|| Mutex::new(GlobalAccessTracker::new()))
 }
 
+/// Singleton accessor for the handle label tracker.
 fn handle_label_tracker() -> &'static Mutex<HandleLabelTracker> {
     HANDLE_LABELS.get_or_init(|| Mutex::new(HandleLabelTracker::new()))
 }
 
+/// Stores a label for the handle unless the handle is null, logging on mutex failure.
 fn remember_handle_label(handle: LuaObject, label: impl Into<String>) {
     if handle == 0 {
         return;
@@ -750,6 +784,7 @@ fn remember_handle_label(handle: LuaObject, label: impl Into<String>) {
     }
 }
 
+/// Stores a label only if one is not already present for the handle.
 fn remember_handle_label_if_missing(handle: LuaObject, label: impl Into<String>) {
     if handle == 0 {
         return;
@@ -761,6 +796,7 @@ fn remember_handle_label_if_missing(handle: LuaObject, label: impl Into<String>)
     }
 }
 
+/// Fetches a label for the handle if one was recorded.
 fn handle_label_for(handle: LuaObject) -> Option<String> {
     if handle == 0 {
         return None;
@@ -780,6 +816,7 @@ struct ClosureOrigin {
 }
 
 impl ClosureOrigin {
+    /// Builds origin metadata for a closure pointer, including module and symbol map info.
     fn new(ptr: *const c_void) -> Self {
         let details = describe_closure_target(ptr);
         let map_symbol =
@@ -803,10 +840,12 @@ struct MapSymbol {
     distance: usize,
 }
 
+/// Emits a structured semantic event through the logging layer.
 fn log_semantic_event(event: LuaSemanticEvent) {
     crate::logging::log_event(event);
 }
 
+/// Emits a structured event and returns its sequence number for correlation.
 fn log_event_with_seq(event: LuaEvent) -> u64 {
     crate::logging::log_event_with_seq(event)
 }

@@ -14,6 +14,7 @@ use super::{
     record_non_push_event, remember_handle_label, value_fields_from_details, ClosureOrigin,
 };
 
+/// Traces installing a fallback handler and emits both raw and semantic events.
 pub(crate) unsafe fn trace_lua_setfallback(
     event_name: *const c_char,
     func: LuaCFunction,
@@ -56,6 +57,7 @@ pub(crate) unsafe fn trace_lua_setfallback(
     }
 }
 
+/// Traces tag creation and records the assigned tag id.
 pub(crate) unsafe fn trace_lua_newtag() -> c_int {
     record_non_push_event();
     match call_real_lua_newtag() {
@@ -73,6 +75,7 @@ pub(crate) unsafe fn trace_lua_newtag() -> c_int {
     }
 }
 
+/// Traces copying tag methods between tags, noting the caller and result.
 pub(crate) unsafe fn trace_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> c_int {
     record_non_push_event();
     match call_real_lua_copytagmethods(tagto, tagfrom) {
@@ -94,6 +97,7 @@ pub(crate) unsafe fn trace_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> c
     }
 }
 
+/// Traces setting a tag on the top-of-stack value.
 pub(crate) unsafe fn trace_lua_settag(tag: c_int) {
     record_non_push_event();
     let note = if call_real_lua_settag(tag) {
@@ -104,6 +108,7 @@ pub(crate) unsafe fn trace_lua_settag(tag: c_int) {
     log_event(LuaEvent::SetTag { tag, note });
 }
 
+/// Traces installing a tag method handler for a given event.
 pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
     let event_label = super::cstr_opt(event).unwrap_or_else(|| "<null>".to_string());
     let top_handle = call_real_lua_getparam(-1);

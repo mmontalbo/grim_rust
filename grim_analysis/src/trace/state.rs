@@ -4,6 +4,7 @@ use crate::{
 };
 use std::ptr;
 
+/// Opens a new Lua state via the retail VM, returning null if the symbol is missing.
 pub(crate) unsafe fn trace_lua_open() -> LuaState {
     match call_real_lua_open() {
         Some(state) => state,
@@ -14,6 +15,7 @@ pub(crate) unsafe fn trace_lua_open() -> LuaState {
     }
 }
 
+/// Creates a new Lua state via the retail VM, returning null if the symbol is missing.
 pub(crate) unsafe fn trace_lua_newstate() -> LuaState {
     match call_real_lua_newstate() {
         Some(state) => state,
@@ -24,6 +26,7 @@ pub(crate) unsafe fn trace_lua_newstate() -> LuaState {
     }
 }
 
+/// Creates a new Lua thread via the retail VM, returning null if the symbol is missing.
 pub(crate) unsafe fn trace_lua_newthread(state: LuaState) -> LuaState {
     match call_real_lua_newthread(state) {
         Some(thread) => thread,
