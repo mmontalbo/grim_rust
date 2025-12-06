@@ -8,11 +8,12 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_store_ref, log_unref, normalize_handle,
-    origin_fields_for_ptr, ptr_to_handle,
+    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref, origin_fields_for_ptr,
+    ptr_to_handle,
 };
 
-use super::util::{handle_from_value, set_global_silent, value_fields_from_lua, TaggedHandle};
+use super::util::{set_global_silent, value_fields_from_lua, TaggedHandle};
+use super::{store_registry_value, RegistryRef};
 use crate::lua_host::context::EngineContext;
 
 pub(super) fn install_legacy_compat<'lua>(
@@ -121,12 +122,17 @@ fn install_fallback_globals<'lua>(
     let refs_state = refs.clone();
     let lua_ref = lua.create_function(move |lua_ctx, value: Value| -> LuaResult<i32> {
         let reference = refs_state.next_handle();
-        let snapshot = value.clone();
-        let key = lua_ctx.create_registry_value(value)?;
-        refs_state.store(reference, key);
         let label = format!("ref:{reference}");
-        let handle = normalize_handle(&label, handle_from_value(&snapshot));
-        log_store_ref(1, reference, Some(handle), Some(label.clone()), Some(label));
+        let entry = store_registry_value(
+            lua_ctx,
+            value,
+            1,
+            Some(reference),
+            Some(label.clone()),
+            None,
+            Some(label.clone()),
+        )?;
+        refs_state.store(entry);
         Ok(reference)
     })?;
     set_global_silent(lua, globals, "lua_ref", lua_ref)?;
@@ -141,22 +147,11 @@ fn install_fallback_globals<'lua>(
 
     let refs_state = refs.clone();
     let lua_getref = lua.create_function(move |lua_ctx, handle: i32| -> LuaResult<Value> {
-        let value = refs_state.resolve_value(lua_ctx, handle)?;
+        let value = refs_state.resolve_value(lua_ctx, handle, |value| match value {
+            Value::Function(func) => origin_fields_for_ptr(func.to_pointer()),
+            _ => OriginFields::default(),
+        })?;
         if let Some(value) = value {
-            let label = format!("ref:{handle}");
-            let handle_hex = normalize_handle(&label, handle_from_value(&value));
-            let origin = match &value {
-                Value::Function(func) => origin_fields_for_ptr(func.to_pointer()),
-                _ => OriginFields::default(),
-            };
-            log_fetch_ref(
-                handle,
-                Some(handle_hex),
-                Some(label.clone()),
-                Some(label),
-                None,
-                origin,
-            );
             Ok(value)
         } else {
             log_fetch_ref(
@@ -463,7 +458,7 @@ impl LegacyFallbacks {
 
 #[derive(Clone)]
 struct RegistryRefs {
-    entries: Rc<RefCell<HashMap<i32, RegistryKey>>>,
+    entries: Rc<RefCell<HashMap<i32, RegistryRef>>>,
     next: Rc<RefCell<i32>>,
 }
 
@@ -482,18 +477,26 @@ impl RegistryRefs {
         handle
     }
 
-    fn store(&self, handle: i32, key: RegistryKey) {
-        self.entries.borrow_mut().insert(handle, key);
+    fn store(&self, entry: RegistryRef) {
+        self.entries.borrow_mut().insert(entry.reference, entry);
     }
 
     fn remove(&self, handle: i32) {
         self.entries.borrow_mut().remove(&handle);
     }
 
-    fn resolve_value<'lua>(&self, lua: &'lua Lua, handle: i32) -> LuaResult<Option<Value<'lua>>> {
+    fn resolve_value<'lua>(
+        &self,
+        lua: &'lua Lua,
+        handle: i32,
+        origin_fn: impl FnOnce(&Value) -> OriginFields,
+    ) -> LuaResult<Option<Value<'lua>>> {
         let entries = self.entries.borrow();
-        if let Some(key) = entries.get(&handle) {
-            return lua.registry_value(key).map(Some);
+        if let Some(entry) = entries.get(&handle) {
+            let value: Value = lua.registry_value(&entry.key)?;
+            let origin = origin_fn(&value);
+            entry.log_fetch(origin, None);
+            return Ok(Some(value));
         }
         Ok(None)
     }

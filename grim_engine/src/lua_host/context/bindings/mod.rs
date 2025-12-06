@@ -2,6 +2,7 @@ mod boot;
 mod bootstrap;
 mod dofile;
 mod legacy;
+mod registry;
 mod util;
 
 pub(crate) use boot::{
@@ -9,6 +10,7 @@ pub(crate) use boot::{
     load_system_script, override_boot_stubs,
 };
 pub(crate) use bootstrap::{install_globals, install_package_path};
+pub(crate) use registry::{store_registry_value, PinnedRegistryKeys, RegistryRef};
 
 #[cfg(test)]
 mod tests {
