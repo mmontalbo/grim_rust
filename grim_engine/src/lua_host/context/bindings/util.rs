@@ -4,9 +4,9 @@ use grim_telemetry_common::{OriginFields, UpvaluePreview, ValueFields, ValueType
 use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 
 use crate::lua_host::telemetry::{
-    log_lua_setglobal, log_push_cclosure, log_push_from_preview, log_push_nil, log_push_number,
-    log_push_object, log_push_string, log_registered_constant, log_registered_global,
-    normalize_handle, origin_fields_for_ptr, ptr_to_handle,
+    log_lua_setglobal, log_push_cclosure, log_push_nil, log_push_number, log_push_object,
+    log_push_string, log_registered_constant, log_registered_global, normalize_handle,
+    origin_fields_for_ptr, ptr_to_handle,
 };
 
 #[derive(Clone)]
@@ -25,8 +25,6 @@ impl UserData for TaggedHandle {}
 #[derive(Clone, Default)]
 pub(crate) struct RegisteredGlobalMeta {
     pub upvalues: i32,
-    pub upvalue_previews: Option<Vec<UpvaluePreview>>,
-    pub value_overrides: Option<ValueFields>,
 }
 
 thread_local! {
@@ -49,27 +47,6 @@ fn take_registered_global_hint() -> Option<RegisteredGlobalMeta> {
     REGISTERED_GLOBAL_HINT.with(|cell| cell.replace(None))
 }
 
-fn merge_value_fields(target: &mut ValueFields, overrides: &ValueFields) {
-    if overrides.value_type.is_some() {
-        target.value_type = overrides.value_type.clone();
-    }
-    if overrides.value.is_some() {
-        target.value = overrides.value.clone();
-    }
-    if overrides.value_len.is_some() {
-        target.value_len = overrides.value_len;
-    }
-    if overrides.value_preview.is_some() {
-        target.value_preview = overrides.value_preview.clone();
-    }
-    if overrides.tag.is_some() {
-        target.tag = overrides.tag;
-    }
-    if overrides.func.is_some() {
-        target.func = overrides.func.clone();
-    }
-}
-
 pub(super) fn handle_from_value(value: &Value) -> Option<String> {
     match value {
         Value::Function(func) => Some(ptr_to_handle(func.to_pointer())),
@@ -88,21 +65,9 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     value: T,
 ) -> LuaResult<()> {
     let value = value.into_lua(lua)?;
-    let mut value_fields = value_fields_from_lua(&value);
+    let value_fields = value_fields_from_lua(&value);
     let hint = take_registered_global_hint();
-    if let Some(overrides) = hint.as_ref().and_then(|meta| meta.value_overrides.clone()) {
-        merge_value_fields(&mut value_fields, &overrides);
-    }
     let upvalues = hint.as_ref().map(|meta| meta.upvalues).unwrap_or(0);
-    let upvalue_previews = hint.as_ref().and_then(|meta| meta.upvalue_previews.clone());
-
-    if matches!(value, Value::Function(_)) {
-        if let Some(previews) = upvalue_previews.as_ref() {
-            for preview in previews {
-                let _ = log_push_from_preview(preview);
-            }
-        }
-    }
 
     let handle_label = format!("global:{name}");
     let handle = normalize_handle(&handle_label, handle_from_value(&value));
@@ -138,7 +103,7 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
         _ => {}
     }
 
-    let _ = log_lua_setglobal(
+    log_lua_setglobal(
         name,
         handle.clone(),
         Some(handle_label.clone()),
@@ -152,7 +117,6 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
             handle,
             Some(handle_label),
             upvalues,
-            upvalue_previews,
             value_fields,
             origin,
         );

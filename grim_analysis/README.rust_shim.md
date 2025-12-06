@@ -14,7 +14,7 @@ without modifying the game's assets.
   monotonic `ts=<millis>` is included for temporal alignment.
 - Output now always includes provenance details like `label`, `origin`, `module`,
   `symbol`, `demangled`, `symbol_source=map`, and per-event extras
-  (`push_seq`, `upvalues`, `calls`, `ref`, `lock`) to match the Rust engine
+  (`upvalues`, `calls`, `ref`, `lock`) to match the Rust engine
   trace.
 - The retail shim always emits `engine=retail` and `vm_id=lua32`; instrument the
   Rust engine side to emit `engine=rust` and reuse the same field names so
@@ -33,14 +33,14 @@ without modifying the game's assets.
   fallback registrations; subsequent events touching that handle will echo it.
 - Caller origin is included on table creation/mutator/tag-method operations to
   tie writes and tag setup back to the native sites that performed them.
-- Pushes: `lua_pushcclosure` (name, func, push_seq, upvalues, origin), `lua_pushnumber`
+- Pushes: `lua_pushcclosure` (name, func, upvalues, origin), `lua_pushnumber`
   (value), `lua_pushnil`, `lua_pushstring`/`lua_pushlstring` (len/preview), `lua_pushusertag`
   (id logged as a hex pointer, value fields include `value_type=userdata`,
   `tag`, plus caller origin fields when available).
 - Globals: `lua_setglobal` (name, handle, handle_label, label, value fields,
   origin) and `lua_getglobal` (name, handle, label, handle_label, count milestone).
-- Composites: `registered_global` (name/handle/labels/push_seq/func/upvalues/upvalue_previews
-  plus value/origin fields, seq range display spans pushes+bind) for closure binds with a matching
+- Composites: `registered_global` (name/handle/labels/func/upvalues plus value/origin fields for
+  closure binds with a matching
   push candidate.
 - Calls: `lua_callfunction` (handle, label, calls milestone, origin), `lua_call`
   (name), `lua_dofile`/`lua_dostring`/`lua_dobuffer` (path/snippet/name + size).
@@ -64,8 +64,7 @@ without modifying the game's assets.
 - Preload the shim via `LD_PRELOAD` so our exports are resolved before the
   engine's copy of libLua.
 - When the engine calls `lua_pushCclosure`, we log the function pointer being
-  wrapped and the closure name, along with a push sequence number, upvalue
-  count, and symbol provenance. `lua_setglobal` looks up the bound Lua handle
+  wrapped and the closure name, along with an upvalue count and symbol provenance. `lua_setglobal` looks up the bound Lua handle
   and tracks the global name -> C target mapping so subsequent call tracing can
   show provenance. `lua_getglobal` logs every read to reveal which globals
   scripts actually touch at runtime. `lua_ref` / `lua_getref` track anonymous

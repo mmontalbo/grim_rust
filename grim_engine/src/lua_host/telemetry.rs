@@ -4,7 +4,7 @@ use std::{
     mem::MaybeUninit,
     ptr,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, Ordering},
         Mutex, OnceLock,
     },
 };
@@ -17,7 +17,6 @@ use grim_telemetry_common::{
 const ENGINE_ID: &str = "grim_engine";
 const VM_ID: &str = "lua";
 
-static PUSH_SEQ: AtomicU64 = AtomicU64::new(0);
 static FABRICATED_HANDLE: AtomicU32 = AtomicU32::new(1);
 static KNOWN_TAGS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
 static FABRICATED_BY_LABEL: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -32,14 +31,6 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
 
 pub(crate) fn log_event(event: impl Into<EventBuilder>) {
     LOGGER.log_event(event);
-}
-
-fn log_event_with_seq(event: impl Into<EventBuilder>) -> u64 {
-    LOGGER.log_event_with_seq(event)
-}
-
-fn next_push_seq() -> u64 {
-    PUSH_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 pub(crate) fn ptr_to_handle(func: *const c_void) -> String {
@@ -61,68 +52,67 @@ pub(crate) fn log_push_cclosure(
     func: *const c_void,
     upvalues: i32,
     symbol_label: Option<&str>,
-) -> u64 {
-    let push_seq = next_push_seq();
+) {
     let mut origin = origin_fields_for_ptr(func);
     if let Some(symbol) = symbol_label {
         origin.symbol = Some(symbol.to_string());
     }
-    log_event_with_seq(LuaEvent::PushCclosure {
+    log_event(LuaEvent::PushCclosure {
         name: label.to_string(),
         func: ptr_to_handle(func),
-        push_seq,
         upvalues,
         origin,
     });
-    push_seq
 }
 
 #[allow(dead_code)]
-pub(crate) fn log_push_number(value: &str) -> u64 {
-    log_event_with_seq(LuaEvent::PushNumber {
+pub(crate) fn log_push_number(value: &str) {
+    log_event(LuaEvent::PushNumber {
         value: value.to_string(),
-    })
+    });
 }
 
 #[allow(dead_code)]
-pub(crate) fn log_push_nil() -> u64 {
-    log_event_with_seq(LuaEvent::PushNil {})
+pub(crate) fn log_push_nil() {
+    log_event(LuaEvent::PushNil {});
 }
 
 #[allow(dead_code)]
-pub(crate) fn log_push_string(len: usize, preview: String) -> u64 {
-    log_event_with_seq(LuaEvent::PushString { len, preview })
+pub(crate) fn log_push_string(len: usize, preview: String) {
+    log_event(LuaEvent::PushString { len, preview });
 }
 
 #[allow(dead_code)]
-pub(crate) fn log_push_object(
-    handle: String,
-    handle_label: Option<String>,
-    values: ValueFields,
-) -> u64 {
-    log_event_with_seq(LuaEvent::PushObject {
+pub(crate) fn log_push_object(handle: String, handle_label: Option<String>, values: ValueFields) {
+    log_event(LuaEvent::PushObject {
         handle,
         handle_label,
         values,
-    })
+    });
 }
 
-pub(crate) fn log_push_from_preview(preview: &UpvaluePreview) -> Option<u64> {
+pub(crate) fn log_push_from_preview(preview: &UpvaluePreview) {
     match preview.kind {
-        ValueType::Nil => Some(log_push_nil()),
-        ValueType::Number => preview.value.as_ref().map(|value| log_push_number(value)),
-        ValueType::String => {
-            let len = preview
-                .value_len
-                .or_else(|| preview.preview.as_ref().map(|value| value.len()))?;
-            let text = preview
-                .preview
-                .clone()
-                .or_else(|| preview.value.clone())
-                .unwrap_or_default();
-            Some(log_push_string(len, text))
+        ValueType::Nil => log_push_nil(),
+        ValueType::Number => {
+            if let Some(value) = preview.value.as_ref() {
+                log_push_number(value);
+            }
         }
-        _ => None,
+        ValueType::String => {
+            if let Some(len) = preview
+                .value_len
+                .or_else(|| preview.preview.as_ref().map(|value| value.len()))
+            {
+                let text = preview
+                    .preview
+                    .clone()
+                    .or_else(|| preview.value.clone())
+                    .unwrap_or_default();
+                log_push_string(len, text);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -132,17 +122,17 @@ pub(crate) fn log_lua_setglobal(
     handle_label: Option<String>,
     values: ValueFields,
     origin: OriginFields,
-) -> u64 {
+) {
     let label = handle_label.clone();
     let bind_handle = handle.clone();
-    log_event_with_seq(LuaEvent::BindGlobal {
+    log_event(LuaEvent::BindGlobal {
         name: name.to_string(),
         handle: bind_handle,
         handle_label: handle_label.clone(),
         label,
         values: values.clone(),
         origin,
-    })
+    });
 }
 
 pub(crate) fn log_registered_global(
@@ -150,7 +140,6 @@ pub(crate) fn log_registered_global(
     handle: String,
     handle_label: Option<String>,
     upvalues: i32,
-    upvalue_previews: Option<Vec<UpvaluePreview>>,
     values: ValueFields,
     origin: OriginFields,
 ) {
@@ -162,7 +151,6 @@ pub(crate) fn log_registered_global(
         label: label.clone(),
         values: values.clone(),
         upvalues: Some(upvalues),
-        upvalue_previews: upvalue_previews.clone(),
         origin: origin.clone(),
     });
 }
@@ -184,16 +172,16 @@ pub(crate) fn log_registered_constant(
     });
 }
 
-pub(crate) fn log_push_usertag(id: i32, tag: i32, payload_hex: String) -> u64 {
+pub(crate) fn log_push_usertag(id: i32, tag: i32, payload_hex: String) {
     let mut values = ValueFields::default();
     values.value_type = Some(ValueType::Userdata);
     values.tag = Some(tag);
     values.value = Some(payload_hex);
-    log_event_with_seq(LuaEvent::PushUsertag {
+    log_event(LuaEvent::PushUsertag {
         id,
         values,
         caller: caller_origin_fields(),
-    })
+    });
 }
 
 pub(crate) fn log_create_table(
@@ -245,11 +233,11 @@ pub(crate) fn log_set_table_entry(
         table_handle_label.clone(),
         table_fields.clone(),
     );
-    let _ = log_push_from_preview(&key);
+    log_push_from_preview(&key);
     if let Some((value_handle, value_label, value_fields)) = value_handle {
         log_push_object(value_handle, value_label, value_fields);
     } else {
-        let _ = log_push_from_preview(&value);
+        log_push_from_preview(&value);
     }
     log_event(LuaEvent::SetTable {
         note: note.clone(),

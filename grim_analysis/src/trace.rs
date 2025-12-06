@@ -29,13 +29,9 @@ use std::{
     ffi::{c_void, CStr},
     mem::MaybeUninit,
     ptr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::{Mutex, OnceLock},
 };
 
-static CLOSURE_PUSH_COUNTER: AtomicU64 = AtomicU64::new(0);
 const PUSH_RING_CAPACITY: usize = 16;
 const MAX_PENDING_REGISTERED_GLOBALS: usize = 8;
 static CALLFUNCTION_TRACKER: OnceLock<Mutex<CallfunctionTracker>> = OnceLock::new();
@@ -96,12 +92,9 @@ pub(crate) unsafe fn trace_lua_newthread(state: LuaState) -> LuaState {
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {
     let func_addr = func as *const c_void as usize;
     let origin = Some(ClosureOrigin::new(func as *const c_void));
-    let sequence = CLOSURE_PUSH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-    let upvalue_snapshot = snapshot_upvalue_previews(upvalues);
     let event = LuaEvent::PushCclosure {
         name: label.to_string(),
         func: format!("0x{func_addr:08x}"),
-        push_seq: sequence,
         upvalues,
         origin: origin_fields(origin.as_ref()),
     };
@@ -117,13 +110,7 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
         },
         None,
     );
-    if let Some(previews) = upvalue_snapshot {
-        let mut previews_only = Vec::with_capacity(previews.len());
-        for item in previews {
-            previews_only.push(item.preview);
-        }
-        remember_registered_global_candidate(func_addr, upvalues, previews_only, origin.clone());
-    }
+    remember_registered_global_candidate(func_addr, upvalues, origin.clone());
     record_non_push_event();
 
     if !call_real_lua_push_c_closure(func, upvalues) {
@@ -664,7 +651,6 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                             handle,
                             handle_label.clone(),
                             candidate.upvalues,
-                            candidate.upvalue_previews,
                             values,
                             merged_origin,
                         );
@@ -1027,7 +1013,6 @@ fn emit_registered_global(
     handle: LuaObject,
     handle_label: String,
     upvalues: c_int,
-    upvalue_previews: Vec<UpvaluePreview>,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
 ) {
@@ -1039,7 +1024,6 @@ fn emit_registered_global(
         label: Some(handle_label.clone()),
         values: values.clone(),
         upvalues: Some(upvalues),
-        upvalue_previews: Some(upvalue_previews.clone()),
         origin: origin_fields.clone(),
     });
 }
@@ -1062,24 +1046,9 @@ fn emit_registered_constant(
     });
 }
 
-fn snapshot_upvalue_previews(upvalues: c_int) -> Option<Vec<TrackedPush>> {
-    if upvalues < 0 {
-        return None;
-    }
-    let required = upvalues as usize;
-    match push_event_tracker().lock() {
-        Ok(tracker) => tracker.snapshot_recent(required),
-        Err(_) => {
-            log_line("push event tracker mutex poisoned; unable to snapshot upvalues");
-            None
-        }
-    }
-}
-
 fn remember_registered_global_candidate(
     func_addr: usize,
     upvalues: c_int,
-    previews: Vec<UpvaluePreview>,
     origin: Option<ClosureOrigin>,
 ) {
     match registered_global_tracker().lock() {
@@ -1087,7 +1056,6 @@ fn remember_registered_global_candidate(
             tracker.remember(PendingRegisteredGlobal {
                 func_addr,
                 upvalues,
-                upvalue_previews: previews,
                 origin,
             });
         }
@@ -1416,7 +1384,6 @@ struct TrackedPush {
 struct PendingRegisteredGlobal {
     func_addr: usize,
     upvalues: c_int,
-    upvalue_previews: Vec<UpvaluePreview>,
     origin: Option<ClosureOrigin>,
 }
 

@@ -176,6 +176,111 @@ pub fn parse_seq_range(text: &str) -> Option<SeqRange> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamKind {
+    Semantic,
+    Raw,
+    Other,
+}
+
+impl StreamKind {
+    pub fn from_field(value: &str) -> Self {
+        match value {
+            "raw" => StreamKind::Raw,
+            "semantic" => StreamKind::Semantic,
+            _ => StreamKind::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamFilter {
+    Semantic,
+    Raw,
+    All,
+}
+
+impl StreamFilter {
+    pub fn matches(self, stream: StreamKind) -> bool {
+        match self {
+            StreamFilter::Semantic => matches!(stream, StreamKind::Semantic),
+            StreamFilter::Raw => !matches!(stream, StreamKind::Semantic),
+            StreamFilter::All => true,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            StreamFilter::Semantic => StreamFilter::Raw,
+            StreamFilter::Raw => StreamFilter::All,
+            StreamFilter::All => StreamFilter::Semantic,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StreamFilter::Semantic => "semantic",
+            StreamFilter::Raw => "raw",
+            StreamFilter::All => "all",
+        }
+    }
+}
+
+pub fn stream_kind_from_line(line: &str) -> StreamKind {
+    for token in line.split_whitespace() {
+        if let Some(value) = token.strip_prefix("stream=") {
+            return StreamKind::from_field(value);
+        }
+    }
+    if line.contains("event=semantic_") {
+        StreamKind::Semantic
+    } else {
+        StreamKind::Other
+    }
+}
+
+pub fn parse_seq_field(line: &str) -> Option<SeqRange> {
+    for token in line.split_whitespace() {
+        if let Some(value) = token.strip_prefix("seq=") {
+            return parse_seq_range(value);
+        }
+    }
+    None
+}
+
+pub fn normalize_seq_for_filter(
+    stream: StreamKind,
+    seq: SeqRange,
+    filter: StreamFilter,
+    semantic_counter: &mut u64,
+) -> Option<SeqRange> {
+    match filter {
+        StreamFilter::Semantic => {
+            if matches!(stream, StreamKind::Semantic) {
+                *semantic_counter = semantic_counter.saturating_add(1);
+                Some(SeqRange::new(*semantic_counter, *semantic_counter))
+            } else {
+                None
+            }
+        }
+        StreamFilter::Raw => {
+            if matches!(stream, StreamKind::Semantic) {
+                None
+            } else {
+                Some(seq)
+            }
+        }
+        StreamFilter::All => {
+            if matches!(stream, StreamKind::Semantic) {
+                *semantic_counter = semantic_counter.saturating_add(1);
+                Some(SeqRange::new(*semantic_counter, *semantic_counter))
+            } else {
+                Some(seq)
+            }
+        }
+    }
+}
+
 pub struct EventBuilder {
     fields: Vec<String>,
 }
@@ -478,8 +583,6 @@ pub enum LuaSemanticEvent {
         values: ValueFields,
         #[serde(skip_serializing_if = "Option::is_none")]
         upvalues: Option<i32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        upvalue_previews: Option<Vec<UpvaluePreview>>,
         #[serde(flatten)]
         origin: OriginFields,
     },
@@ -612,11 +715,8 @@ pub enum LuaEvent {
         handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
-        push_seq: u64,
         func: String,
         upvalues: i32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        upvalue_previews: Option<Vec<UpvaluePreview>>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -732,7 +832,6 @@ pub enum LuaEvent {
     PushCclosure {
         name: String,
         func: String,
-        push_seq: u64,
         upvalues: i32,
         #[serde(flatten)]
         origin: OriginFields,
@@ -824,10 +923,6 @@ pub enum LuaEvent {
         value: UpvaluePreview,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        seq_min: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        seq_max: Option<u64>,
         #[serde(flatten)]
         caller: OriginFields,
     },
@@ -995,6 +1090,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stream_detection_prefers_semantic_tag() {
+        let raw_line = "[grim] seq=000001 stream=raw event=lua_pushnil";
+        assert_eq!(stream_kind_from_line(raw_line), StreamKind::Raw);
+        let semantic_line = "seq=000002 event=semantic_bind_global";
+        assert_eq!(stream_kind_from_line(semantic_line), StreamKind::Semantic);
+    }
+
+    #[test]
+    fn normalize_seq_handles_filters() {
+        let mut counter = 0;
+        let seq = SeqRange::new(5, 5);
+        let semantic = normalize_seq_for_filter(
+            StreamKind::Semantic,
+            seq,
+            StreamFilter::Semantic,
+            &mut counter,
+        )
+        .unwrap();
+        assert_eq!(semantic.min, 1);
+        assert!(normalize_seq_for_filter(
+            StreamKind::Semantic,
+            seq,
+            StreamFilter::Raw,
+            &mut counter
+        )
+        .is_none());
+    }
+
+    #[test]
     fn cutscene_serializes_with_tag_and_fields() {
         let event = LuaEvent::Cutscene {
             movie: "intro.snm".to_string(),
@@ -1072,16 +1196,8 @@ mod tests {
             handle: "0x00000001".to_string(),
             handle_label: Some("global:foo".to_string()),
             label: Some("global:foo".to_string()),
-            push_seq: 3,
             func: "0x0000abcd".to_string(),
             upvalues: 2,
-            upvalue_previews: Some(vec![UpvaluePreview {
-                kind: ValueType::Number,
-                value: Some("7".to_string()),
-                value_len: None,
-                preview: None,
-                tag: None,
-            }]),
             values: ValueFields {
                 value_type: Some(ValueType::Cfunction),
                 ..Default::default()
@@ -1093,11 +1209,7 @@ mod tests {
         };
         let fields = EventBuilder::from(event).finish();
         assert!(fields.iter().any(|f| f == "event=registered_global"));
-        assert!(fields.iter().any(|f| f == "push_seq=3"));
         assert!(fields.iter().any(|f| f == "upvalues=2"));
-        assert!(fields
-            .iter()
-            .any(|f| f.starts_with("upvalue_previews=[{\"kind\":\"number\"")));
     }
 
     #[test]
@@ -1142,8 +1254,6 @@ mod tests {
                 tag: None,
             },
             note: Some("via_rawsettable".to_string()),
-            seq_min: Some(3),
-            seq_max: Some(7),
             caller: OriginFields {
                 origin: Some("0x0000cafe".to_string()),
                 ..Default::default()
@@ -1161,8 +1271,6 @@ mod tests {
         assert!(fields
             .iter()
             .any(|f| f.starts_with("value={\"kind\":\"number\"")));
-        assert!(fields.iter().any(|f| f == "seq_min=3"));
-        assert!(fields.iter().any(|f| f == "seq_max=7"));
         assert!(fields.iter().any(|f| f == "origin=0x0000cafe"));
         assert!(fields.iter().any(|f| f == "note=via_rawsettable"));
     }
@@ -1186,13 +1294,6 @@ mod tests {
                 ..Default::default()
             },
             upvalues: Some(1),
-            upvalue_previews: Some(vec![UpvaluePreview {
-                kind: ValueType::Number,
-                value: Some("1".to_string()),
-                value_len: None,
-                preview: None,
-                tag: None,
-            }]),
             origin: OriginFields::default(),
         };
         let fields = EventBuilder::from(event).finish();
