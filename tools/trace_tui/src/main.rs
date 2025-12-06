@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     fs::File,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
@@ -7,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -29,12 +28,65 @@ struct Args {
     /// Path to one or two telemetry log files (use - for stdin)
     #[arg(num_args = 1..=2)]
     paths: Vec<String>,
+    /// Which telemetry stream to show (semantic/raw/all).
+    #[arg(long, value_enum, default_value_t = StreamFilter::Semantic)]
+    stream: StreamFilter,
     /// Optional label for the first path (defaults to file stem)
     #[arg(long)]
     left_label: Option<String>,
     /// Optional label for the second path (defaults to file stem)
     #[arg(long)]
     right_label: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamKind {
+    Raw,
+    Semantic,
+    Other,
+}
+
+impl StreamKind {
+    fn from_str(value: &str) -> Self {
+        match value {
+            "raw" => StreamKind::Raw,
+            "semantic" => StreamKind::Semantic,
+            _ => StreamKind::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum StreamFilter {
+    Semantic,
+    Raw,
+    All,
+}
+
+impl StreamFilter {
+    fn matches(self, stream: StreamKind) -> bool {
+        match self {
+            StreamFilter::All => true,
+            StreamFilter::Raw => matches!(stream, StreamKind::Raw | StreamKind::Other),
+            StreamFilter::Semantic => matches!(stream, StreamKind::Semantic | StreamKind::Other),
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            StreamFilter::Semantic => StreamFilter::Raw,
+            StreamFilter::Raw => StreamFilter::All,
+            StreamFilter::All => StreamFilter::Semantic,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            StreamFilter::Semantic => "semantic",
+            StreamFilter::Raw => "raw",
+            StreamFilter::All => "all",
+        }
+    }
 }
 
 struct Field {
@@ -46,30 +98,33 @@ struct LogEntry {
     seq_display: String,
     seq_min: u64,
     seq_max: u64,
+    orig_seq_display: String,
+    orig_seq_min: u64,
+    orig_seq_max: u64,
     event: String,
+    stream: StreamKind,
     fields: Vec<Field>,
-    hidden_by: Option<usize>,
     summary: String,
     display: String,
 }
 
 impl LogEntry {
     fn is_composite(&self) -> bool {
-        matches!(
-            self.event.as_str(),
-            "registered_global" | "registered_constant" | "set_table_entry"
-        )
+        self.event.starts_with("semantic_")
     }
 
     fn compute_summary(&self) -> String {
-        if self.event == "set_table_entry" {
+        if matches!(
+            self.event.as_str(),
+            "set_table_entry" | "semantic_set_table_entry"
+        ) {
             if let Some(text) = set_table_entry_summary(self) {
                 return text;
             }
         }
         let mut parts = Vec::new();
         for field in self.fields.iter() {
-            if field.key == "event" || field.key == "seq" {
+            if field.key == "event" || field.key == "seq" || field.key == "stream" {
                 continue;
             }
             parts.push(format!("{}={}", field.key, field.value));
@@ -83,13 +138,12 @@ impl LogEntry {
     fn rebuild_display(&mut self) {
         self.display = render_display_line(self);
     }
-}
 
-#[derive(Clone, Copy)]
-struct CompositeSpan {
-    id: usize,
-    seq_min: u64,
-    seq_max: u64,
+    fn display_event(&self) -> &str {
+        self.event
+            .strip_prefix("semantic_")
+            .unwrap_or(self.event.as_str())
+    }
 }
 
 struct Pane {
@@ -100,8 +154,7 @@ struct Pane {
 }
 
 impl Pane {
-    fn new(title: String, mut entries: Vec<LogEntry>, collapse: bool) -> Self {
-        build_composites(&mut entries);
+    fn new(title: String, mut entries: Vec<LogEntry>, stream_filter: StreamFilter) -> Self {
         rebuild_display_lines(&mut entries);
         let mut pane = Self {
             title,
@@ -109,15 +162,15 @@ impl Pane {
             visible_indices: Vec::new(),
             selected: 0,
         };
-        pane.rebuild_visible(collapse, None);
+        pane.rebuild_visible(stream_filter, None);
         pane
     }
 
-    fn rebuild_visible(&mut self, collapse: bool, target_seq: Option<u64>) {
+    fn rebuild_visible(&mut self, stream_filter: StreamFilter, target_seq: Option<u64>) {
         let target_seq = target_seq.or_else(|| self.selected_seq());
         self.visible_indices.clear();
         for (idx, entry) in self.entries.iter().enumerate() {
-            if collapse && entry.hidden_by.is_some() {
+            if !stream_filter.matches(entry.stream) {
                 continue;
             }
             self.visible_indices.push(idx);
@@ -174,27 +227,21 @@ impl Pane {
     }
 
     fn selected_seq(&self) -> Option<u64> {
-        self.selected_entry().map(|entry| entry.seq_min)
+        self.selected_entry().map(|entry| entry.orig_seq_min)
     }
 }
 
 struct SingleApp {
     pane: Pane,
-    collapse: bool,
+    stream_filter: StreamFilter,
 }
 
 impl SingleApp {
-    fn new(title: String, entries: Vec<LogEntry>) -> Self {
-        let collapse = true;
+    fn new(title: String, entries: Vec<LogEntry>, stream_filter: StreamFilter) -> Self {
         Self {
-            pane: Pane::new(title, entries, collapse),
-            collapse,
+            pane: Pane::new(title, entries, stream_filter),
+            stream_filter,
         }
-    }
-
-    fn toggle_collapse(&mut self) {
-        self.collapse = !self.collapse;
-        self.pane.rebuild_visible(self.collapse, None);
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -208,12 +255,18 @@ impl SingleApp {
     fn move_to_end(&mut self) {
         self.pane.move_to_end();
     }
+
+    fn cycle_stream_filter(&mut self) {
+        let target_seq = self.pane.selected_seq();
+        self.stream_filter = self.stream_filter.next();
+        self.pane.rebuild_visible(self.stream_filter, target_seq);
+    }
 }
 
 struct DualApp {
     panes: [Pane; 2],
-    collapse: bool,
     active: usize,
+    stream_filter: StreamFilter,
 }
 
 impl DualApp {
@@ -222,22 +275,15 @@ impl DualApp {
         left_entries: Vec<LogEntry>,
         right_title: String,
         right_entries: Vec<LogEntry>,
+        stream_filter: StreamFilter,
     ) -> Self {
-        let collapse = true;
         Self {
             panes: [
-                Pane::new(left_title, left_entries, collapse),
-                Pane::new(right_title, right_entries, collapse),
+                Pane::new(left_title, left_entries, stream_filter),
+                Pane::new(right_title, right_entries, stream_filter),
             ],
-            collapse,
             active: 0,
-        }
-    }
-
-    fn toggle_collapse(&mut self) {
-        self.collapse = !self.collapse;
-        for pane in self.panes.iter_mut() {
-            pane.rebuild_visible(self.collapse, None);
+            stream_filter,
         }
     }
 
@@ -264,6 +310,14 @@ impl DualApp {
     fn toggle_focus(&mut self) {
         self.active = 1 - self.active;
     }
+
+    fn cycle_stream_filter(&mut self) {
+        let target_seq = self.panes[self.active].selected_seq();
+        self.stream_filter = self.stream_filter.next();
+        for pane in self.panes.iter_mut() {
+            pane.rebuild_visible(self.stream_filter, target_seq);
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -277,7 +331,7 @@ fn main() -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| label_from_path(single, "trace"));
             let entries = load_entries(single)?;
-            run_single(&mut terminal, SingleApp::new(title, entries))
+            run_single(&mut terminal, SingleApp::new(title, entries, args.stream))
         }
         [left, right] => {
             let left_title = args
@@ -292,7 +346,13 @@ fn main() -> Result<()> {
             let right_entries = load_entries(right)?;
             run_dual(
                 &mut terminal,
-                DualApp::new(left_title, left_entries, right_title, right_entries),
+                DualApp::new(
+                    left_title,
+                    left_entries,
+                    right_title,
+                    right_entries,
+                    args.stream,
+                ),
             )
         }
         _ => unreachable!("clap enforces one or two paths"),
@@ -323,7 +383,7 @@ fn run_single(
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break
                         }
-                        KeyCode::Char('c') => app.toggle_collapse(),
+                        KeyCode::Char('s') => app.cycle_stream_filter(),
                         KeyCode::Up => app.move_selection(-1),
                         KeyCode::Down => app.move_selection(1),
                         KeyCode::PageUp => app.move_selection(-20),
@@ -363,7 +423,6 @@ fn run_dual(
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break
                         }
-                        KeyCode::Char('c') => app.toggle_collapse(),
                         KeyCode::Up => app.move_selection(-1),
                         KeyCode::Down => app.move_selection(1),
                         KeyCode::PageUp => app.move_selection(-20),
@@ -373,6 +432,7 @@ fn run_dual(
                         KeyCode::Left | KeyCode::Char('h') => app.focus_left(),
                         KeyCode::Right | KeyCode::Char('l') => app.focus_right(),
                         KeyCode::Tab => app.toggle_focus(),
+                        KeyCode::Char('s') => app.cycle_stream_filter(),
                         _ => {}
                     }
                     needs_redraw = true;
@@ -408,8 +468,8 @@ fn render_single(frame: &mut Frame, app: &SingleApp) {
             Block::default()
                 .title(Line::from(vec![
                     Span::raw(format!("{} ", app.pane.title)),
-                    Span::raw(if app.collapse { "[collapsed]" } else { "[raw]" }),
-                    Span::raw(" (q/ctrl-c quit, c toggle)"),
+                    Span::raw(format!("[{}] ", app.stream_filter.label())),
+                    Span::raw(" (q/ctrl-c quit, s stream)"),
                 ]))
                 .borders(Borders::ALL),
         )
@@ -459,12 +519,8 @@ fn render_dual(frame: &mut Frame, app: &DualApp) {
         }
 
         let mut title = vec![Span::raw(format!("{} ", pane.title))];
-        title.push(Span::raw(if app.collapse {
-            "[collapsed]"
-        } else {
-            "[raw]"
-        }));
-        title.push(Span::raw(" (q/ctrl-c quit, c collapse, Tab/< /> switch)"));
+        title.push(Span::raw(format!("[{}] ", app.stream_filter.label())));
+        title.push(Span::raw(" (q/ctrl-c quit, s stream, Tab/< /> switch)"));
 
         let mut block = Block::default()
             .title(Line::from(title))
@@ -516,23 +572,33 @@ fn rebuild_display_lines(entries: &mut [LogEntry]) {
 }
 
 fn render_display_line(entry: &LogEntry) -> String {
-    let marker = if entry.is_composite() { "[C]" } else { "   " };
-    let mut text = format!(
+    let marker = if entry.is_composite() { "[S]" } else { "   " };
+    let text = format!(
         "{} {:>10} {:<28} {}",
-        marker, entry.seq_display, entry.event, entry.summary
+        marker,
+        entry.seq_display,
+        entry.display_event(),
+        entry.summary
     );
-    if let Some(hider) = entry.hidden_by {
-        text.push_str(&format!(" (covered by #{})", hider + 1));
-    }
     text
 }
 
 fn detail_lines(entry: &LogEntry) -> Line<'static> {
     let mut parts = Vec::new();
     parts.push(format!("seq={} ", entry.seq_display));
-    parts.push(format!("event={} ", entry.event));
+    if entry.seq_display != entry.orig_seq_display {
+        parts.push(format!("log_seq={} ", entry.orig_seq_display));
+    }
+    parts.push(format!("event={} ", entry.display_event()));
     if entry.seq_min != entry.seq_max {
         parts.push(format!("range={:06}-{:06} ", entry.seq_min, entry.seq_max));
+    } else if entry.seq_display != entry.orig_seq_display
+        && entry.orig_seq_min != entry.orig_seq_max
+    {
+        parts.push(format!(
+            "log_range={:06}-{:06} ",
+            entry.orig_seq_min, entry.orig_seq_max
+        ));
     }
     for field in entry.fields.iter() {
         if field.key == "seq" || field.key == "event" {
@@ -573,6 +639,7 @@ fn load_entries(path: &str) -> Result<Vec<LogEntry>> {
             entries.push(entry);
         }
     }
+    assign_stream_sequences(&mut entries);
     Ok(entries)
 }
 
@@ -612,6 +679,7 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
     let mut fields = Vec::new();
     let mut seq_display = None;
     let mut event = None;
+    let mut stream = StreamKind::Other;
 
     for token in tokens {
         if let Some((key, value)) = token.split_once('=') {
@@ -621,6 +689,8 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
                 seq_display = Some(value.clone());
             } else if key == "event" {
                 event = Some(value.clone());
+            } else if key == "stream" {
+                stream = StreamKind::from_str(&value);
             }
             fields.push(Field { key, value });
         }
@@ -631,17 +701,40 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
     let (seq_min, seq_max) = parse_seq_range(&seq_display);
 
     let mut entry = LogEntry {
-        seq_display,
+        seq_display: seq_display.clone(),
         seq_min,
         seq_max,
+        orig_seq_display: seq_display,
+        orig_seq_min: seq_min,
+        orig_seq_max: seq_max,
         event,
+        stream,
         fields,
-        hidden_by: None,
         summary: String::new(),
         display: String::new(),
     };
     entry.summary = entry.compute_summary();
     Some(entry)
+}
+
+fn assign_stream_sequences(entries: &mut [LogEntry]) {
+    let mut semantic_seq = 0u64;
+
+    for entry in entries.iter_mut() {
+        match entry.stream {
+            StreamKind::Semantic => {
+                semantic_seq = semantic_seq.saturating_add(1);
+                entry.seq_display = format!("{semantic_seq:06}");
+                entry.seq_min = semantic_seq;
+                entry.seq_max = semantic_seq;
+            }
+            _ => {
+                entry.seq_display = entry.orig_seq_display.clone();
+                entry.seq_min = entry.orig_seq_min;
+                entry.seq_max = entry.orig_seq_max;
+            }
+        }
+    }
 }
 
 fn parse_seq_range(text: &str) -> (u64, u64) {
@@ -689,68 +782,6 @@ fn split_fields(line: &str) -> Vec<String> {
     }
 
     tokens
-}
-
-fn build_composites(entries: &mut [LogEntry]) -> Vec<CompositeSpan> {
-    let hide_targets: HashSet<&str> = [
-        "lua_setglobal",
-        "lua_pushcclosure",
-        "lua_pushnumber",
-        "lua_pushnil",
-        "lua_pushstring",
-        "lua_pushlstring",
-        "lua_pushusertag",
-        "lua_pushobject",
-        "lua_settable",
-        "lua_rawsettable",
-    ]
-    .into_iter()
-    .collect();
-
-    let mut composites = Vec::new();
-    for entry in entries.iter() {
-        if entry.is_composite() {
-            composites.push(CompositeSpan {
-                id: composites.len(),
-                seq_min: entry.seq_min,
-                seq_max: entry.seq_max,
-            });
-        }
-    }
-
-    composites.sort_by_key(|c| c.seq_min);
-
-    let mut active: Vec<CompositeSpan> = Vec::new();
-    let mut next_composite = 0;
-
-    for entry in entries.iter_mut() {
-        while next_composite < composites.len()
-            && composites[next_composite].seq_min <= entry.seq_min
-        {
-            active.push(composites[next_composite]);
-            next_composite += 1;
-        }
-
-        while let Some(last) = active.last() {
-            if entry.seq_min > last.seq_max {
-                active.pop();
-            } else {
-                break;
-            }
-        }
-
-        if entry.is_composite() || !hide_targets.contains(entry.event.as_str()) {
-            continue;
-        }
-
-        if let Some(span) = active.last() {
-            if entry.seq_max <= span.seq_max {
-                entry.hidden_by.get_or_insert(span.id);
-            }
-        }
-    }
-
-    composites
 }
 
 fn set_table_entry_summary(entry: &LogEntry) -> Option<String> {

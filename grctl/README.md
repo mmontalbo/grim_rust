@@ -17,9 +17,10 @@ Common subcommands:
 - `parity start [--run-id <tag>] [--engine-release] [--engine-headless] [--retail-vanilla] [--timeout <dur>] [--no-timeout]`
   launches grim_engine and retail together with a shared run id and prints the log
   paths for both (timeout defaults to 20s).
-- `parity logs --run latest|<id> [--follow] [--backfill <n>] [--from-start] [--tui]`
-  shows aligned engine/retail logs. `tail` is an alias for `logs`; `--tui` opens
-  the interactive viewer instead of streaming lines.
+- `parity logs --run latest|<id> [--follow] [--backfill <n>] [--from-start] [--tui] [--raw]`
+  shows aligned engine/retail logs (semantic stream by default; `--raw` shows the
+  full VM trace). `tail` is an alias for `logs`; `--tui` opens the interactive
+  viewer instead of streaming lines.
 - `engine start|stop|status|logs` and `retail start|stop|status|logs` are still
   available. Pass `--run-id <tag>` on `start` to control the telemetry run id,
   or rely on the generated default. Use `--attach` on `start` to follow the log

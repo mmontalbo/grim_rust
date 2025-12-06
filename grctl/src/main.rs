@@ -207,6 +207,9 @@ struct ParityLogsArgs {
     /// Continuously stream log updates after the initial read.
     #[arg(long, short = 'f')]
     follow: bool,
+    /// Display the raw telemetry stream (default is semantic-only).
+    #[arg(long)]
+    raw: bool,
     /// Number of recent seqs to print before following (0 to skip).
     #[arg(long, default_value_t = 30)]
     backfill: usize,
@@ -260,6 +263,7 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
     let run_id = resolve_parity_run_id(paths, &args.run)?;
     let engine_log = paths.run_log_path(ComponentKind::Engine, &run_id)?;
     let retail_log = paths.run_log_path(ComponentKind::Retail, &run_id)?;
+    let semantic_only = !args.raw;
     if !engine_log.exists() {
         bail!(
             "engine log missing for run {} at {}",
@@ -278,6 +282,10 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
     println!("[grctl] parity logs for run {run_id}");
     println!("  engine log: {}", engine_log.display());
     println!("  retail log: {}", retail_log.display());
+    println!(
+        "  stream: {}",
+        if semantic_only { "semantic" } else { "raw" }
+    );
     if args.tui {
         if args.from_start {
             println!("[grctl] --from-start is ignored with --tui (viewer reads full logs)");
@@ -295,7 +303,7 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
             println!("[grctl] --backfill has no effect without --follow; showing full logs");
         }
         println!();
-        return print_full_parity_log(&engine_log, &retail_log);
+        return print_full_parity_log(&engine_log, &retail_log, semantic_only);
     }
     println!("  poll: {}ms", args.poll_ms);
     if args.from_start {
@@ -309,7 +317,7 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
 
     let mut printed: HashMap<u64, (Option<String>, Option<String>)> = HashMap::new();
     if !args.from_start && args.backfill > 0 {
-        let pairs = backfill_pairs(&engine_log, &retail_log, args.backfill)?;
+        let pairs = backfill_pairs(&engine_log, &retail_log, args.backfill, semantic_only)?;
         for (seq, engine_line, retail_line) in pairs {
             print_aligned_row(seq, engine_line.as_deref(), retail_line.as_deref());
             printed.insert(seq, (engine_line, retail_line));
@@ -325,6 +333,16 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
         0
     } else {
         fs::metadata(&retail_log).map(|m| m.len()).unwrap_or(0)
+    };
+    let mut engine_sem_seq = if semantic_only && !args.from_start {
+        collect_lines(&engine_log, true)?.len() as u64
+    } else {
+        0
+    };
+    let mut retail_sem_seq = if semantic_only && !args.from_start {
+        collect_lines(&retail_log, true)?.len() as u64
+    } else {
+        0
     };
 
     let poll = Duration::from_millis(args.poll_ms);
@@ -356,23 +374,22 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
             Err(err) => return Err(err).context(format!("reading {}", retail_log.display())),
         };
 
-        for line in engine_lines {
-            if let Some(seq) = parse_seq_from_line(&line) {
-                let entry = printed.entry(seq).or_insert((None, None));
-                if entry.0.is_none() {
-                    entry.0 = Some(line);
-                }
-                new_seqs.insert(seq);
+        let engine_events = normalize_new_events(engine_lines, semantic_only, &mut engine_sem_seq);
+        let retail_events = normalize_new_events(retail_lines, semantic_only, &mut retail_sem_seq);
+
+        for (seq, line) in engine_events {
+            let entry = printed.entry(seq).or_insert((None, None));
+            if entry.0.is_none() {
+                entry.0 = Some(line);
             }
+            new_seqs.insert(seq);
         }
-        for line in retail_lines {
-            if let Some(seq) = parse_seq_from_line(&line) {
-                let entry = printed.entry(seq).or_insert((None, None));
-                if entry.1.is_none() {
-                    entry.1 = Some(line);
-                }
-                new_seqs.insert(seq);
+        for (seq, line) in retail_events {
+            let entry = printed.entry(seq).or_insert((None, None));
+            if entry.1.is_none() {
+                entry.1 = Some(line);
             }
+            new_seqs.insert(seq);
         }
 
         for seq in new_seqs {
@@ -420,34 +437,62 @@ fn parse_seq_from_line(line: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-fn tail_lines_by_seq(path: &Path, limit: usize) -> Result<Vec<(u64, String)>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut buffer: VecDeque<(u64, String)> = VecDeque::with_capacity(limit.max(1));
-    for line in reader.lines() {
-        let line = line?;
-        let Some(seq) = parse_seq_from_line(&line) else {
-            continue;
-        };
-        if buffer.len() == limit {
-            buffer.pop_front();
-        }
-        buffer.push_back((seq, line));
-    }
-    Ok(buffer.into_iter().collect())
+fn is_semantic_line(line: &str) -> bool {
+    line.split_whitespace()
+        .any(|token| token == "stream=semantic")
+        || line.contains("event=semantic_")
 }
 
-fn backfill_pairs(engine_log: &Path, retail_log: &Path, limit: usize) -> Result<Vec<AlignedRow>> {
+fn collect_lines(path: &Path, semantic_only: bool) -> Result<Vec<(u64, String)>> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    let mut semantic_seq = 0u64;
+    for line in reader.lines() {
+        let line = line?;
+        if semantic_only {
+            if !is_semantic_line(&line) {
+                continue;
+            }
+            semantic_seq = semantic_seq.saturating_add(1);
+            entries.push((semantic_seq, line));
+        } else {
+            if is_semantic_line(&line) {
+                continue;
+            }
+            if let Some(seq) = parse_seq_from_line(&line) {
+                entries.push((seq, line));
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn tail_lines_by_seq(path: &Path, limit: usize, semantic_only: bool) -> Result<Vec<(u64, String)>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
 
-    let engine_events = tail_lines_by_seq(engine_log, limit)?;
-    let retail_events = tail_lines_by_seq(retail_log, limit)?;
+    let mut entries = collect_lines(path, semantic_only)?;
+    if entries.len() > limit {
+        let start = entries.len().saturating_sub(limit);
+        entries = entries.split_off(start);
+    }
+    Ok(entries)
+}
+
+fn backfill_pairs(
+    engine_log: &Path,
+    retail_log: &Path,
+    limit: usize,
+    semantic_only: bool,
+) -> Result<Vec<AlignedRow>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let engine_events = tail_lines_by_seq(engine_log, limit, semantic_only)?;
+    let retail_events = tail_lines_by_seq(retail_log, limit, semantic_only)?;
     let mut engine_map = HashMap::new();
     let mut retail_map = HashMap::new();
     for (seq, line) in engine_events {
@@ -479,28 +524,36 @@ fn print_aligned_row(seq: u64, engine: Option<&str>, retail: Option<&str>) {
     println!("  retail: {retail_text}");
 }
 
-fn print_full_parity_log(engine_log: &Path, retail_log: &Path) -> Result<()> {
+fn print_full_parity_log(engine_log: &Path, retail_log: &Path, semantic_only: bool) -> Result<()> {
+    let engine_entries = collect_lines(engine_log, semantic_only)?;
+    let retail_entries = collect_lines(retail_log, semantic_only)?;
+    let mut engine_map: HashMap<u64, String> = engine_entries.into_iter().collect();
+    let mut retail_map: HashMap<u64, String> = retail_entries.into_iter().collect();
+
     let mut rows: BTreeMap<u64, (Option<String>, Option<String>)> = BTreeMap::new();
-
-    let mut ingest = |path: &Path, slot: usize| -> Result<()> {
-        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if let Some(seq) = parse_seq_from_line(&line) {
-                let entry = rows.entry(seq).or_insert((None, None));
-                match slot {
-                    0 if entry.0.is_none() => entry.0 = Some(line),
-                    1 if entry.1.is_none() => entry.1 = Some(line),
-                    _ => {}
-                }
-            }
+    let mut seqs: BTreeSet<u64> = engine_map
+        .keys()
+        .copied()
+        .chain(retail_map.keys().copied())
+        .collect();
+    if semantic_only && seqs.is_empty() {
+        return Ok(());
+    }
+    if semantic_only {
+        if let Some(max) = seqs.iter().copied().max() {
+            seqs = (1..=max).collect();
         }
-        Ok(())
-    };
+    }
 
-    ingest(engine_log, 0)?;
-    ingest(retail_log, 1)?;
+    for seq in seqs {
+        let entry = rows.entry(seq).or_insert((None, None));
+        if let Some(line) = engine_map.remove(&seq) {
+            entry.0 = Some(line);
+        }
+        if let Some(line) = retail_map.remove(&seq) {
+            entry.1 = Some(line);
+        }
+    }
 
     for (seq, (engine, retail)) in rows {
         print_aligned_row(seq, engine.as_deref(), retail.as_deref());
@@ -529,6 +582,31 @@ fn read_new_lines(path: &Path, position: &mut u64) -> io::Result<Vec<String>> {
     }
     *position = new_pos;
     Ok(lines)
+}
+
+fn normalize_new_events(
+    lines: Vec<String>,
+    semantic_only: bool,
+    semantic_counter: &mut u64,
+) -> Vec<(u64, String)> {
+    let mut events = Vec::new();
+    for line in lines {
+        if semantic_only {
+            if !is_semantic_line(&line) {
+                continue;
+            }
+            *semantic_counter = semantic_counter.saturating_add(1);
+            events.push((*semantic_counter, line));
+        } else {
+            if is_semantic_line(&line) {
+                continue;
+            }
+            if let Some(seq) = parse_seq_from_line(&line) {
+                events.push((seq, line));
+            }
+        }
+    }
+    events
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
