@@ -16,7 +16,7 @@ flow and prototype modern tooling around it.
   read from automatically.
 
 ## Repository Layout
-- `grim_analysis/` – retail telemetry shim (`grim_telemetry_shim`); see
+- `grim_analysis/` – retail telemetry shim (`grim_analysis`); see
   `grim_analysis/README.rust_shim.md`.
 - `grim_engine/` – prototype runtime host; see `grim_engine/README.md`.
 - `grim_formats/` – asset format helpers and CLIs; see `grim_formats/README.md`.

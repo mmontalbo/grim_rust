@@ -986,7 +986,7 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
         let status = layout.instrumentation_status()?;
         if !status.shim_available {
             eprintln!(
-                "[grctl] warning: LD_PRELOAD shim missing. Run 'cargo build -p grim_telemetry_shim --release' so {} exists; retail hooks will be incomplete until the Rust shim is built.",
+                "[grctl] warning: LD_PRELOAD shim missing. Run 'cargo build -p grim_analysis --release' so {} exists; retail hooks will be incomplete until the Rust shim is built.",
                 layout.preferred_shim_path().display(),
             );
         }
@@ -1090,24 +1090,24 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
 
 fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
     ensure_i686_target_installed()?;
-    println!("[grctl] rebuilding grim_telemetry_shim --release...");
+    println!("[grctl] rebuilding grim_analysis --release...");
     let build_cmd = format!(
-        "cargo build -p grim_telemetry_shim --release --target {}",
+        "cargo build -p grim_analysis --release --target {}",
         RUST_SHIM_TARGET
     );
     let status = Command::new("nix-shell")
         .current_dir(&paths.repo_root)
         .args(["--run", &build_cmd])
         .status()
-        .context("building grim_telemetry_shim --release for i686-unknown-linux-gnu")?;
+        .context("building grim_analysis --release for i686-unknown-linux-gnu")?;
     if !status.success() {
-        bail!("grim_telemetry_shim build failed with status {}", status);
+        bail!("grim_analysis build failed with status {}", status);
     }
     if layout.resolved_shim_path().is_some() {
         Ok(())
     } else {
         bail!(
-            "grim_telemetry_shim build succeeded but the shared object is still missing (expected {})",
+            "grim_analysis build succeeded but the shared object is still missing (expected {})",
             layout.preferred_shim_path().display()
         );
     }
@@ -1226,7 +1226,7 @@ fn print_retail_instrumentation(paths: &Paths) -> Result<()> {
 
 fn describe_instrumentation(status: &retail::InstrumentationStatus) -> String {
     if !status.shim_available {
-        return "vanilla (shim missing; build grim_telemetry_shim)".to_string();
+        return "vanilla (shim missing; build grim_analysis)".to_string();
     }
     if status.symbol_map == SymbolMapStatus::Fresh
         && status.liblua_symbol_map == SymbolMapStatus::Fresh
@@ -2108,7 +2108,7 @@ mod tests {
             .join("target")
             .join("i686-unknown-linux-gnu")
             .join("release")
-            .join("libgrim_telemetry_shim.so");
+            .join("libgrim_analysis.so");
         if let Some(parent) = shim_path.parent() {
             fs::create_dir_all(parent)?;
         }

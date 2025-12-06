@@ -358,6 +358,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grim_analysis"
+version = "0.1.0"
+dependencies = [
+ "grim_telemetry_common",
+ "libc",
+]
+
+[[package]]
 name = "grim_engine"
 version = "0.1.0"
 dependencies = [
@@ -402,14 +410,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "grim_telemetry_shim"
-version = "0.1.0"
-dependencies = [
- "grim_telemetry_common",
- "libc",
 ]
 
 [[package]]

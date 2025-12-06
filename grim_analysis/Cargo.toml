@@ -1,5 +1,5 @@
 [package]
-name = "grim_telemetry_shim"
+name = "grim_analysis"
 version = "0.1.0"
 edition = "2021"
 

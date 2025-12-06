@@ -107,16 +107,22 @@ without modifying the game's assets.
 ## Building
 
 ```bash
-nix-shell --run 'cargo build -p grim_telemetry_shim --release --target i686-unknown-linux-gnu'
+nix-shell --run 'cargo build -p grim_analysis --release --target i686-unknown-linux-gnu'
 ```
 
 The resulting shared object lives at
-`target/i686-unknown-linux-gnu/release/libgrim_telemetry_shim.so` (workspace build) or `grim_analysis/target/i686-unknown-linux-gnu/release/libgrim_telemetry_shim.so` if built locally from this crate.
-Preload it before starting the retail executable:
+`target/i686-unknown-linux-gnu/release/libgrim_analysis.so` (workspace build) or `grim_analysis/target/i686-unknown-linux-gnu/release/libgrim_analysis.so` if built locally from this crate. Preload it before starting the retail executable:
 
 ```bash
-LD_PRELOAD=/path/to/libgrim_telemetry_shim.so ./GrimFandango.exe
+LD_PRELOAD=/path/to/libgrim_analysis.so ./GrimFandango.exe
 ```
+
+## New contributor quickstart
+- Build and point `LD_PRELOAD` at `libgrim_analysis.so` using the command above (workspace or crate-local paths both work).
+- Sanity-check that hooks loaded: launch retail with `GRIM_SHIM_LOG=/tmp/grim_shim.log` set and confirm early log lines like `event=lua_pushcclosure`/`event=lua_setglobal` appear. If you see `required Lua C function missing`, the shim couldn't find the retail symbol (common when a wrapper is requested before the engine registers it).
+- Know where to look: most VM tracing lives in `grim_analysis/src/trace.rs` (push helpers near the top, globals/refs mid-file, table/tag plumbing and semantic emitters further down). Cutscene/movie wrappers and post-intro room tracking live in `grim_analysis/src/telemetry.rs`.
+- Movie/room telemetry also writes newline-delimited JSON to `mods/telemetry_events.jsonl` (created on first movie event). Delete the file between runs if you want a clean capture; there is no rotation.
+- Quick smoke loop: `grctl retail start --attach` will LD_PRELOAD the shim from the workspace target; tail the shim log or `mods/telemetry_events.jsonl` to confirm wrappers are firing before making changes.
 
 On startup you should see log lines that look like
 `[grim-rust-shim] engine=retail vm_id=lua32 seq=123 ts=456 event=lua_pushcclosure name=lua_pushCclosure func=0xf7e31234`

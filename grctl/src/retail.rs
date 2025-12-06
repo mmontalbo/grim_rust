@@ -51,7 +51,7 @@ impl RetailLayout {
         let liblua_bin = dev_install.join("libLua.so");
         let liblua_symbol_map = dev_install.join("libLua.so.sym");
         let steam_root = detect_steam_root_path().ok();
-        let shim_name = "libgrim_telemetry_shim.so";
+        let shim_name = "libgrim_analysis.so";
         let rust_workspace_target = repo_root.join("target").join("i686-unknown-linux-gnu");
         let rust_local_target = repo_root
             .join("grim_analysis")

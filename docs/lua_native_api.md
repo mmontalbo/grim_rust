@@ -3,7 +3,7 @@
 This document tracks the native API we need to expose from the engine to the Lua VM while recreating the retail runtime. It treats the retail trace as ground truth and the `grim_engine` host as the implementation that must converge on that shape.
 
 ## Ground truth and signals
-- Retail instrumentation lives in `grim_analysis` (the `grim_telemetry_shim` `LD_PRELOAD` hook) and emits `grim_telemetry_common::LuaEvent` lines with `engine=retail vm_id=lua32`.
+- Retail instrumentation lives in `grim_analysis` (the `grim_analysis` `LD_PRELOAD` hook) and emits `grim_telemetry_common::LuaEvent` lines with `engine=retail vm_id=lua32`.
 - The Rust host logs the same schema from `grim_engine::lua_host::telemetry` (`engine=grim_engine vm_id=lua`). A matching event stream means our exposed surface and sequencing align with retail.
 - The events that define the API surface are the registrations the engine makes into Lua: `registered_global`, `registered_constant`, `set_table_entry` (table population), `lua_setfallback` / `lua_settagmethod` (fallback and tag hook wiring), refs (`lua_ref`/`lua_getref`/`lua_unref`), and any helper pushes (`lua_push*`) that precede those registrations.
 - Telemetry streams should be split into **semantic (composite) events** and **raw VM events**. Semantic events describe what scripts observe (e.g. “set table entry `system.camChangeHandler` to closure X”, “bind global foo”, “store/ref/lookup”), and drive parity. Raw VM events capture stack mechanics (push ordering, call conventions, GC) for debugging and for deriving semantic events from retail traces; parity should not hinge on these implementation details.
@@ -33,7 +33,7 @@ This document tracks the native API we need to expose from the engine to the Lua
 - `dofile` supports retail path variants and short-circuits special files (e.g. `_controls.lua`, menu scripts) to keep intro bootstrap moving while we fill in missing native behaviours.
 
 ## Compatibility goals and how to validate
-- **Match registrations:** The set of `registered_global` / `registered_constant` names, upvalues, and push sequences in `grim_engine` should match the retail trace captured by `grim_telemetry_shim`.
+- **Match registrations:** The set of `registered_global` / `registered_constant` names, upvalues, and push sequences in `grim_engine` should match the retail trace captured by `grim_analysis`.
 - **Match table shape/order:** `set_table_entry` logs for `system` and other bootstrap tables should align (creation, ref/getref usage, and insertion order), including any GC that occurs between steps.
 - **Match fallback/tag wiring:** Ensure `setfallback`/`settagmethod`/`seterrormethod` traffic and tag IDs mirror retail (including default handlers and tag copying).
 - **Match ref usage:** `lua_ref`/`lua_getref`/`lua_unref` patterns (handles, lock values, labels) should line up so anonymous closures and tables are retrievable the same way scripts expect.
