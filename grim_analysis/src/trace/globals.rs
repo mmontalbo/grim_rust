@@ -28,7 +28,7 @@ pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
             log_event(LuaEvent::RawGetGlobal {
                 name: label.clone(),
                 handle: format!("0x{handle:08x}"),
-                handle_label: Some(handle_label.clone()),
+                handle_label: None,
                 label: Some(handle_label),
                 values,
             });
@@ -46,7 +46,6 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     record_non_push_event();
     let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     let mut handle_field = None;
-    let mut handle_label = None;
     let mut values = ValueFields::default();
     let mut note = None;
     let mut computed_label = None;
@@ -56,7 +55,6 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
             handle_field = Some(format!("0x{handle:08x}"));
             let resolved_label = format!("global:{label}");
             computed_label = Some(resolved_label.clone());
-            handle_label = Some(resolved_label.clone());
             remember_handle_label(handle, resolved_label);
             if let Some(details) = describe_lua_value(handle) {
                 values = value_fields_from_details(&details);
@@ -70,7 +68,7 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     log_event(LuaEvent::RawSetGlobal {
         name: label,
         handle: handle_field,
-        handle_label,
+        handle_label: None,
         label: computed_label,
         values,
         note,
@@ -111,7 +109,7 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
             log_event_with_seq(LuaEvent::BindGlobal {
                 name: label.clone(),
                 handle: format!("0x{handle:08x}"),
-                handle_label: Some(handle_label.clone()),
+                handle_label: None,
                 label: Some(handle_label.clone()),
                 values: values.clone(),
                 origin: origin_fields(origin.as_ref()),
@@ -161,7 +159,7 @@ pub(crate) unsafe fn trace_lua_getglobal(name: *const c_char) -> LuaObject {
         log_event(LuaEvent::GetGlobal {
             name: label.clone(),
             handle: format!("0x{handle:08x}"),
-            handle_label: Some(handle_label.clone()),
+            handle_label: None,
             label: handle_label,
             count,
         });

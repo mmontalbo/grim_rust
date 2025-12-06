@@ -180,7 +180,7 @@ fn emit_registered_global(
     log_semantic_event(LuaSemanticEvent::SemanticBindGlobal {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
-        handle_label: Some(handle_label.clone()),
+        handle_label: None,
         label: Some(handle_label.clone()),
         values: values.clone(),
         upvalues: Some(upvalues),
@@ -200,7 +200,7 @@ fn emit_registered_constant(
     log_semantic_event(LuaSemanticEvent::SemanticBindConstant {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
-        handle_label: Some(handle_label.clone()),
+        handle_label: None,
         label: Some(handle_label.clone()),
         values: values.clone(),
         origin: origin_fields.clone(),
