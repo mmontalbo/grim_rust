@@ -115,12 +115,12 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
     let text = if value.is_null() {
         "<null>".to_string()
     } else {
-        let bytes = std::slice::from_raw_parts(value as *const u8, len as usize);
+        let bytes = std::slice::from_raw_parts(value as *const u8, len);
         String::from_utf8_lossy(bytes).into_owned()
     };
     let preview = truncate_for_log(&text, 80);
     let log_seq = log_event_with_seq(LuaEvent::PushLstring {
-        len: len as usize,
+        len,
         preview: preview.clone(),
     });
     record_push_preview(
@@ -140,9 +140,11 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
 }
 
 pub(crate) unsafe fn trace_lua_pushusertag(id: c_int, tag: c_int) {
-    let mut values = ValueFields::default();
-    values.value_type = Some(ValueType::Userdata);
-    values.tag = Some(tag);
+    let values = ValueFields {
+        value_type: Some(ValueType::Userdata),
+        tag: Some(tag),
+        ..ValueFields::default()
+    };
     let caller = caller_origin_fields();
     let log_seq = log_event_with_seq(LuaEvent::PushUsertag { id, values, caller });
     record_push_preview(
@@ -165,17 +167,14 @@ pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
     let value_details = describe_lua_value(object);
     let values = value_details
         .as_ref()
-        .map(|value| value_fields_from_details(value))
+        .map(value_fields_from_details)
         .unwrap_or_default();
     let log_seq = log_event_with_seq(LuaEvent::PushObject {
         handle: format!("0x{object:08x}"),
         handle_label: handle_label_for(object),
         values,
     });
-    if let Some(preview) = value_details
-        .as_ref()
-        .map(|value| upvalue_preview_from_details(value))
-    {
+    if let Some(preview) = value_details.as_ref().map(upvalue_preview_from_details) {
         record_push_preview(log_seq, preview, Some(object));
     }
     if !call_real_lua_pushobject(object) {

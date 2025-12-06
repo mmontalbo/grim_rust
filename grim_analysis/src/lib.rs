@@ -1,13 +1,4 @@
-#![allow(
-    clippy::missing_safety_doc,
-    clippy::redundant_closure,
-    clippy::unnecessary_cast,
-    clippy::field_reassign_with_default,
-    clippy::too_many_arguments,
-    clippy::let_and_return,
-    clippy::missing_const_for_thread_local,
-    clippy::unwrap_or_default
-)]
+#![allow(clippy::missing_safety_doc, clippy::missing_const_for_thread_local)]
 
 mod logging;
 mod lua_api;

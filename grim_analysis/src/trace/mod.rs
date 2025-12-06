@@ -123,9 +123,10 @@ fn emit_set_table_entry(
     let table_fields = describe_lua_value(handle)
         .map(|value| value_fields_from_details(&value))
         .or_else(|| {
-            let mut fields = ValueFields::default();
-            fields.value_type = Some(ValueType::Table);
-            Some(fields)
+            Some(ValueFields {
+                value_type: Some(ValueType::Table),
+                ..ValueFields::default()
+            })
         });
     let semantic_note = note.clone();
     let semantic_caller = caller.clone();
@@ -134,9 +135,7 @@ fn emit_set_table_entry(
     let value_handle = value_push
         .handle
         .map(|value_handle| format!("0x{value_handle:08x}"));
-    let value_handle_label = value_push
-        .handle
-        .and_then(|value_handle| handle_label_for(value_handle));
+    let value_handle_label = value_push.handle.and_then(handle_label_for);
     let value_fields = value_push
         .handle
         .and_then(describe_lua_value)
@@ -287,45 +286,49 @@ fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
 }
 
 fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
-    let mut fields = ValueFields::default();
     match value {
-        ValueDetails::Number(value) => {
-            fields.value_type = Some(ValueType::Number);
-            fields.value = Some(format_number_for_log(*value));
-        }
-        ValueDetails::String(text) => {
-            fields.value_type = Some(ValueType::String);
-            fields.value_len = Some(text.len());
-            fields.value_preview = Some(truncate_for_log(text, 80));
-        }
-        ValueDetails::Nil => {
-            fields.value_type = Some(ValueType::Nil);
-        }
-        ValueDetails::Table { tag } => {
-            fields.value_type = Some(ValueType::Table);
-            fields.tag = *tag;
-        }
-        ValueDetails::Function { tag } => {
-            fields.value_type = Some(ValueType::Function);
-            fields.tag = *tag;
-        }
-        ValueDetails::CFunction { tag, func } => {
-            fields.value_type = Some(ValueType::Cfunction);
-            if let Some(addr) = func {
-                fields.func = Some(format!("0x{addr:08x}"));
-            }
-            fields.tag = *tag;
-        }
-        ValueDetails::Userdata { tag } => {
-            fields.value_type = Some(ValueType::Userdata);
-            fields.tag = *tag;
-        }
-        ValueDetails::Unknown { tag } => {
-            fields.value_type = Some(ValueType::Unknown);
-            fields.tag = *tag;
-        }
+        ValueDetails::Number(value) => ValueFields {
+            value_type: Some(ValueType::Number),
+            value: Some(format_number_for_log(*value)),
+            ..ValueFields::default()
+        },
+        ValueDetails::String(text) => ValueFields {
+            value_type: Some(ValueType::String),
+            value_len: Some(text.len()),
+            value_preview: Some(truncate_for_log(text, 80)),
+            ..ValueFields::default()
+        },
+        ValueDetails::Nil => ValueFields {
+            value_type: Some(ValueType::Nil),
+            ..ValueFields::default()
+        },
+        ValueDetails::Table { tag } => ValueFields {
+            value_type: Some(ValueType::Table),
+            tag: *tag,
+            ..ValueFields::default()
+        },
+        ValueDetails::Function { tag } => ValueFields {
+            value_type: Some(ValueType::Function),
+            tag: *tag,
+            ..ValueFields::default()
+        },
+        ValueDetails::CFunction { tag, func } => ValueFields {
+            value_type: Some(ValueType::Cfunction),
+            func: func.map(|addr| format!("0x{addr:08x}")),
+            tag: *tag,
+            ..ValueFields::default()
+        },
+        ValueDetails::Userdata { tag } => ValueFields {
+            value_type: Some(ValueType::Userdata),
+            tag: *tag,
+            ..ValueFields::default()
+        },
+        ValueDetails::Unknown { tag } => ValueFields {
+            value_type: Some(ValueType::Unknown),
+            tag: *tag,
+            ..ValueFields::default()
+        },
     }
-    fields
 }
 
 fn upvalue_preview_from_details(value: &ValueDetails) -> UpvaluePreview {
@@ -556,10 +559,7 @@ impl RegisteredGlobalTracker {
     }
 
     fn remember(&mut self, candidate: PendingRegisteredGlobal) {
-        let queue = self
-            .pending
-            .entry(candidate.func_addr)
-            .or_insert_with(VecDeque::new);
+        let queue = self.pending.entry(candidate.func_addr).or_default();
         queue.push_back(candidate);
         if queue.len() > self.max_per_func {
             queue.pop_front();
