@@ -54,7 +54,6 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         lock,
                         reference,
                         handle: Some(handle_hex.clone()),
-                        handle_label: None,
                         label: Some(label.clone()),
                         note: None,
                         origin: origin_fields.clone(),
@@ -63,7 +62,6 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         lock,
                         reference,
                         handle: Some(handle_hex),
-                        handle_label: None,
                         label: Some(label),
                         note: None,
                         origin: origin_fields,
@@ -74,7 +72,6 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         lock,
                         reference,
                         handle: Some("<unknown>".to_string()),
-                        handle_label: None,
                         label: Some(format!("ref:{reference}")),
                         note: Some("lua_getref_missing".to_string()),
                         origin: OriginFields::default(),
@@ -83,7 +80,6 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         lock,
                         reference,
                         handle: Some("<unknown>".to_string()),
-                        handle_label: None,
                         label: Some(format!("ref:{reference}")),
                         note: Some("lua_getref_missing".to_string()),
                         origin: OriginFields::default(),
@@ -121,7 +117,6 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             super::log_semantic_event(LuaSemanticEvent::SemanticFetchRef {
                 reference,
                 handle: Some(handle_hex.clone()),
-                handle_label: None,
                 label: Some(label.clone()),
                 note: None,
                 origin: origin_fields.clone(),
@@ -129,7 +124,6 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             log_event(LuaEvent::FetchRef {
                 reference,
                 handle: Some(handle_hex),
-                handle_label: None,
                 label: Some(label),
                 note: None,
                 origin: origin_fields,
@@ -140,7 +134,6 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             super::log_semantic_event(LuaSemanticEvent::SemanticFetchRef {
                 reference,
                 handle: Some("<unknown>".to_string()),
-                handle_label: None,
                 label: None,
                 note: Some("lua_getref_symbol_missing".to_string()),
                 origin: OriginFields::default(),
@@ -148,7 +141,6 @@ pub(crate) unsafe fn trace_lua_getref(reference: c_int) -> LuaObject {
             log_event(LuaEvent::FetchRef {
                 reference,
                 handle: Some("<unknown>".to_string()),
-                handle_label: None,
                 label: None,
                 note: Some("lua_getref_symbol_missing".to_string()),
                 origin: OriginFields::default(),

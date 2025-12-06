@@ -171,7 +171,7 @@ fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
 fn emit_registered_global(
     name: &str,
     handle: LuaObject,
-    handle_label: String,
+    label: String,
     upvalues: c_int,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
@@ -180,8 +180,7 @@ fn emit_registered_global(
     log_semantic_event(LuaSemanticEvent::SemanticBindGlobal {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
-        handle_label: None,
-        label: Some(handle_label.clone()),
+        label: Some(label.clone()),
         values: values.clone(),
         upvalues: Some(upvalues),
         origin: origin_fields.clone(),
@@ -192,7 +191,7 @@ fn emit_registered_global(
 fn emit_registered_constant(
     name: &str,
     handle: LuaObject,
-    handle_label: String,
+    label: String,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
 ) {
@@ -200,8 +199,7 @@ fn emit_registered_constant(
     log_semantic_event(LuaSemanticEvent::SemanticBindConstant {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
-        handle_label: None,
-        label: Some(handle_label.clone()),
+        label: Some(label.clone()),
         values: values.clone(),
         origin: origin_fields.clone(),
     });

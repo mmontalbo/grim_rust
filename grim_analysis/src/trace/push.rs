@@ -12,8 +12,8 @@ use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 
 use super::{
-    caller_origin_fields, describe_lua_value, format_number_for_log, handle_label_for,
-    log_event_with_seq, origin_fields, record_non_push_event, record_push_preview,
+    caller_origin_fields, describe_lua_value, format_number_for_log, log_event_with_seq,
+    origin_fields, record_non_push_event, record_push_preview,
     remember_registered_global_candidate, truncate_for_log, upvalue_preview_from_details,
     value_fields_from_details, ClosureOrigin,
 };
@@ -180,7 +180,6 @@ pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
         .unwrap_or_default();
     let log_seq = log_event_with_seq(LuaEvent::PushObject {
         handle: format!("0x{object:08x}"),
-        handle_label: handle_label_for(object),
         values,
     });
     if let Some(preview) = value_details.as_ref().map(upvalue_preview_from_details) {

@@ -29,23 +29,23 @@ without modifying the game's assets.
 - Value fields (when a value is inspected): `value_type`, `value`, `value_len`,
   `value_preview`, `tag`, `func`
   (pointers are emitted as hex; decimal payload is omitted for userdata pushes).
-- Handles gain a `handle_label` once they've been named via globals/refs or
-  fallback registrations; subsequent events touching that handle will echo it.
+- Handles gain a human-readable `label` once they've been named via globals/refs
+  or fallback registrations; subsequent events touching that handle will echo it.
 - Caller origin is included on table creation/mutator/tag-method operations to
   tie writes and tag setup back to the native sites that performed them.
 - Pushes: `lua_pushcclosure` (name, func, upvalues, origin), `lua_pushnumber`
   (value), `lua_pushnil`, `lua_pushstring`/`lua_pushlstring` (len/preview), `lua_pushusertag`
   (id logged as a hex pointer, value fields include `value_type=userdata`,
   `tag`, plus caller origin fields when available).
-- Globals: `lua_setglobal` (name, handle, handle_label, label, value fields,
-  origin) and `lua_getglobal` (name, handle, label, handle_label, count milestone).
-- Composites: `registered_global` (name/handle/labels/func/upvalues plus value/origin fields for
+- Globals: `lua_setglobal` (name, handle, label, value fields,
+  origin) and `lua_getglobal` (name, handle, label, count milestone).
+- Composites: `registered_global` (name/handle/label/func/upvalues plus value/origin fields for
   closure binds with a matching
   push candidate.
 - Calls: `lua_callfunction` (handle, label, calls milestone, origin), `lua_call`
   (name), `lua_dofile`/`lua_dostring`/`lua_dobuffer` (path/snippet/name + size).
-- Refs: `lua_ref` (lock, ref, handle/handle_label/label), `lua_getref` (ref,
-  handle/handle_label/label, note when missing).
+- Refs: `lua_ref` (lock, ref, handle/label), `lua_getref` (ref,
+  handle/label, note when missing).
 - Tag plumbing: `lua_settag`, `lua_copytagmethods` (to/from/result), `lua_settagmethod`
   (tag, event_name), `lua_setfallback` (event, handle + value fields). The shared schema still
   includes `tag_state`, but the retail shim no longer emits it.

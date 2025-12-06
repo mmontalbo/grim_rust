@@ -80,7 +80,6 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
         log_event(LuaEvent::CallFunc {
             handle: format!("0x{handle:08x}"),
             label: label.clone(),
-            handle_label: None,
             calls: Some(sample.count),
             note: None,
             origin: origin_fields(sample.origin.as_ref()),
@@ -90,7 +89,6 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
         log_event(LuaEvent::CallFunc {
             handle: format!("0x{handle:08x}"),
             label: label.clone(),
-            handle_label: None,
             calls: None,
             note: Some("tracker_poisoned".to_string()),
             origin: OriginFields::default(),

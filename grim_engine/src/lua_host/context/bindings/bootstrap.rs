@@ -128,7 +128,6 @@ fn install_basic_functions(
             name: "type".to_string(),
             handle: type_handle.clone(),
             label: "global:type".to_string(),
-            handle_label: Some("global:type".to_string()),
             count: 1,
         });
         let saved_type = store_registry_value(
@@ -329,19 +328,11 @@ fn install_system_table(
     let system_fields = value_fields_from_lua(&Value::Table(system.clone()));
     // Keep bootstrap registry refs pinned for the lifetime of the process to mirror retail.
     let mut pinned_refs = PinnedRegistryKeys::default();
-    log_create_table(
-        system_handle.clone(),
-        system_handle_label.clone(),
-        system_fields.clone(),
-    );
+    log_create_table(system_handle.clone(), system_fields.clone());
     set_global(lua, globals, "system", system.clone())?;
 
     // Mirror retail bootstrap: stash system in the registry, then set controls via lua_getref flow.
-    log_push_object(
-        system_handle.clone(),
-        system_handle_label.clone(),
-        system_fields.clone(),
-    );
+    log_push_object(system_handle.clone(), system_fields.clone());
     let system_ref = store_registry_value(
         lua,
         Value::Table(system.clone()),
@@ -356,7 +347,7 @@ fn install_system_table(
     let controls = lua.create_table()?;
     let controls_handle = ptr_to_handle(controls.to_pointer());
     let controls_fields = value_fields_from_lua(&Value::Table(controls.clone()));
-    log_create_table(controls_handle.clone(), None, controls_fields.clone());
+    log_create_table(controls_handle.clone(), controls_fields.clone());
 
     let key_preview = value_to_upvalue_preview(&Value::String(lua.create_string("controls")?));
     let value_preview = value_to_upvalue_preview(&Value::Table(controls.clone()));

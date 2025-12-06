@@ -52,13 +52,7 @@ fn install_fallback_globals<'lua>(
             )?;
             let values = value_fields_from_lua(&Value::Function(handler.clone()));
             let handle = ptr_to_handle(handler.to_pointer());
-            log_set_fallback(
-                &event,
-                handle,
-                Some(format!("fallback:{event}")),
-                values,
-                Some(handler.to_pointer()),
-            );
+            log_set_fallback(&event, handle, values, Some(handler.to_pointer()));
             Ok(previous.map(Value::Function).unwrap_or(Value::Nil))
         })?;
     set_global_silent(lua, globals, "setfallback", setfallback)?;
@@ -103,13 +97,7 @@ fn install_fallback_globals<'lua>(
             )?;
             let values = value_fields_from_lua(&Value::Function(handler.clone()));
             let handle = ptr_to_handle(handler.to_pointer());
-            log_set_fallback(
-                "error",
-                handle,
-                Some("fallback:error".to_string()),
-                values,
-                Some(handler.to_pointer()),
-            );
+            log_set_fallback("error", handle, values, Some(handler.to_pointer()));
             Ok(previous.map(Value::Function).unwrap_or(Value::Nil))
         })?;
     set_global_silent(lua, globals, "seterrormethod", seterrormethod)?;
@@ -156,7 +144,6 @@ fn install_fallback_globals<'lua>(
         } else {
             log_fetch_ref(
                 handle,
-                None,
                 None,
                 None,
                 Some("missing_ref".to_string()),
@@ -390,14 +377,7 @@ impl LegacyFallbacks {
             .entry(tag)
             .or_default()
             .insert(event.to_string(), key);
-        log_set_tagmethod(
-            tag,
-            event,
-            Some(handle),
-            Some(format!("tag{tag}:{event}")),
-            values,
-            origin,
-        );
+        log_set_tagmethod(tag, event, Some(handle), values, origin);
         Ok(previous)
     }
 

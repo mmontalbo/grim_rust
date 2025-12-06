@@ -10,8 +10,8 @@ use libc::{c_char, c_int};
 use std::ffi::c_void;
 
 use super::{
-    caller_origin_fields, describe_lua_value, handle_label_for, origin_fields,
-    record_non_push_event, remember_handle_label, value_fields_from_details, ClosureOrigin,
+    caller_origin_fields, describe_lua_value, origin_fields, record_non_push_event,
+    remember_handle_label, value_fields_from_details, ClosureOrigin,
 };
 
 /// Traces installing a fallback handler and emits both raw and semantic events.
@@ -35,7 +35,6 @@ pub(crate) unsafe fn trace_lua_setfallback(
             super::log_semantic_event(LuaSemanticEvent::SemanticSetFallback {
                 fallback: name.clone(),
                 handle: handle_hex.clone(),
-                handle_label: Some(handle_label.clone()),
                 values: values.clone(),
                 origin: origin_fields.clone(),
                 caller: caller.clone(),
@@ -43,7 +42,6 @@ pub(crate) unsafe fn trace_lua_setfallback(
             log_event(LuaEvent::SetFallback {
                 fallback: name,
                 handle: handle_hex,
-                handle_label: Some(handle_label),
                 values,
                 origin: origin_fields,
                 caller,
@@ -114,11 +112,9 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
     let top_handle = call_real_lua_getparam(-1);
     let mut values = ValueFields::default();
     let mut handle_field = None;
-    let mut handle_label = None;
     let mut origin = None;
     if let Some(handle) = top_handle {
         handle_field = Some(format!("0x{handle:08x}"));
-        handle_label = handle_label_for(handle);
         if let Some(details) = describe_lua_value(handle) {
             values = value_fields_from_details(&details);
             if let Some(addr) = call_real_lua_getcfunction(handle) {
@@ -131,7 +127,6 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
         tag,
         event_name: event_label.clone(),
         handle: handle_field.clone(),
-        handle_label: handle_label.clone(),
         values: values.clone(),
         origin: origin_fields.clone(),
     });
@@ -140,7 +135,6 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             tag,
             event_name: event_label.clone(),
             handle: handle_field.clone(),
-            handle_label: handle_label.clone(),
             values: values.clone(),
             origin: origin_fields.clone(),
         });
@@ -149,7 +143,6 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             tag,
             event_name: event_label.clone(),
             handle: handle_field,
-            handle_label,
             values,
             origin: origin_fields,
         });

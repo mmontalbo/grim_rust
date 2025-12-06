@@ -94,11 +94,7 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
             log_push_string(bytes.len(), preview);
         }
         Value::Table(_) => {
-            log_push_object(
-                handle.clone(),
-                Some(handle_label.clone()),
-                value_fields.clone(),
-            );
+            log_push_object(handle.clone(), value_fields.clone());
         }
         _ => {}
     }

@@ -576,8 +576,6 @@ pub enum LuaSemanticEvent {
         name: String,
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
@@ -589,8 +587,6 @@ pub enum LuaSemanticEvent {
     SemanticBindConstant {
         name: String,
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
@@ -624,8 +620,6 @@ pub enum LuaSemanticEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -637,8 +631,6 @@ pub enum LuaSemanticEvent {
         reference: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -655,8 +647,6 @@ pub enum LuaSemanticEvent {
     SemanticSetFallback {
         fallback: String,
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -669,8 +659,6 @@ pub enum LuaSemanticEvent {
         event_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -686,8 +674,6 @@ pub enum LuaEvent {
         name: String,
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
@@ -699,8 +685,6 @@ pub enum LuaEvent {
         name: String,
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
@@ -711,8 +695,6 @@ pub enum LuaEvent {
     RegisteredGlobal {
         name: String,
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         func: String,
@@ -728,8 +710,6 @@ pub enum LuaEvent {
     CallFunc {
         handle: String,
         label: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         calls: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -755,8 +735,6 @@ pub enum LuaEvent {
     #[serde(rename = "lua_createtable")]
     CreateTable {
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -801,8 +779,6 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -814,15 +790,11 @@ pub enum LuaEvent {
         name: String,
         handle: String,
         label: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         count: u64,
     },
     #[serde(rename = "lua_gettable")]
     GetTable {
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -845,8 +817,6 @@ pub enum LuaEvent {
     #[serde(rename = "lua_pushobject")]
     PushObject {
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -877,8 +847,6 @@ pub enum LuaEvent {
         name: String,
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
@@ -888,8 +856,6 @@ pub enum LuaEvent {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(flatten)]
@@ -902,8 +868,6 @@ pub enum LuaEvent {
     #[serde(rename = "lua_rawgettable")]
     RawgetTable {
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
     },
@@ -930,8 +894,6 @@ pub enum LuaEvent {
     RegisterNative {
         name: String,
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         func: String,
         upvalues: i32,
         #[serde(flatten)]
@@ -943,8 +905,6 @@ pub enum LuaEvent {
     SetConstant {
         name: String,
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -954,8 +914,6 @@ pub enum LuaEvent {
     SetFallback {
         fallback: String,
         handle: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -982,8 +940,6 @@ pub enum LuaEvent {
         event_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
         #[serde(flatten)]
@@ -1006,8 +962,6 @@ pub enum LuaEvent {
         reference: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        handle_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1175,17 +1129,15 @@ mod tests {
     }
 
     #[test]
-    fn get_global_carries_handle_label() {
+    fn get_global_carries_label() {
         let event = LuaEvent::GetGlobal {
             name: "foo".to_string(),
             handle: "0x00000001".to_string(),
-            handle_label: Some("global:foo".to_string()),
             label: "global:foo".to_string(),
             count: 2,
         };
         let fields = EventBuilder::from(event).finish();
         assert!(fields.iter().any(|f| f == "event=lua_getglobal"));
-        assert!(fields.iter().any(|f| f == "handle_label=global:foo"));
         assert!(fields.iter().any(|f| f == "label=global:foo"));
     }
 
@@ -1194,7 +1146,6 @@ mod tests {
         let event = LuaEvent::RegisteredGlobal {
             name: "foo".to_string(),
             handle: "0x00000001".to_string(),
-            handle_label: Some("global:foo".to_string()),
             label: Some("global:foo".to_string()),
             func: "0x0000abcd".to_string(),
             upvalues: 2,
@@ -1217,7 +1168,6 @@ mod tests {
         let event = LuaEvent::RegisteredConstant {
             name: "foo".to_string(),
             handle: "0x00000001".to_string(),
-            handle_label: Some("global:foo".to_string()),
             label: Some("global:foo".to_string()),
             values: ValueFields {
                 value_type: Some(ValueType::String),
@@ -1286,7 +1236,6 @@ mod tests {
         let event = LuaSemanticEvent::SemanticBindGlobal {
             name: "foo".to_string(),
             handle: "0x00000002".to_string(),
-            handle_label: Some("global:foo".to_string()),
             label: Some("global:foo".to_string()),
             values: ValueFields {
                 value_type: Some(ValueType::Cfunction),
@@ -1299,6 +1248,6 @@ mod tests {
         let fields = EventBuilder::from(event).finish();
         assert!(fields.iter().any(|f| f == "event=semantic_bind_global"));
         assert!(fields.iter().any(|f| f == "stream=semantic"));
-        assert!(fields.iter().any(|f| f == "handle_label=global:foo"));
+        assert!(fields.iter().any(|f| f == "label=global:foo"));
     }
 }

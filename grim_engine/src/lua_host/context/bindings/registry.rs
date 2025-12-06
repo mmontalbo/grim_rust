@@ -10,7 +10,6 @@ pub(crate) struct RegistryRef {
     pub reference: i32,
     pub key: RegistryKey,
     pub handle: Option<String>,
-    pub handle_label: Option<String>,
     pub label: Option<String>,
 }
 
@@ -19,7 +18,6 @@ impl RegistryRef {
         log_fetch_ref(
             self.reference,
             self.handle.clone(),
-            self.handle_label.clone(),
             self.label.clone(),
             note,
             origin,
@@ -57,18 +55,11 @@ pub(crate) fn store_registry_value<'lua>(
     );
     let key = lua.create_registry_value(value)?;
     let reference = reference.unwrap_or_else(|| key.id());
-    log_store_ref(
-        lock,
-        reference,
-        Some(handle.clone()),
-        handle_label.clone(),
-        label.clone(),
-    );
+    log_store_ref(lock, reference, Some(handle.clone()), label.clone());
     Ok(RegistryRef {
         reference,
         key,
         handle: Some(handle),
-        handle_label,
         label,
     })
 }

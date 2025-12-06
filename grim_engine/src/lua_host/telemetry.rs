@@ -83,12 +83,8 @@ pub(crate) fn log_push_string(len: usize, preview: String) {
 }
 
 #[allow(dead_code)]
-pub(crate) fn log_push_object(handle: String, handle_label: Option<String>, values: ValueFields) {
-    log_event(LuaEvent::PushObject {
-        handle,
-        handle_label,
-        values,
-    });
+pub(crate) fn log_push_object(handle: String, values: ValueFields) {
+    log_event(LuaEvent::PushObject { handle, values });
 }
 
 pub(crate) fn log_push_from_preview(preview: &UpvaluePreview) {
@@ -119,16 +115,14 @@ pub(crate) fn log_push_from_preview(preview: &UpvaluePreview) {
 pub(crate) fn log_lua_setglobal(
     name: &str,
     handle: String,
-    handle_label: Option<String>,
+    label: Option<String>,
     values: ValueFields,
     origin: OriginFields,
 ) {
-    let label = handle_label.clone();
     let bind_handle = handle.clone();
     log_event(LuaEvent::BindGlobal {
         name: name.to_string(),
         handle: bind_handle,
-        handle_label: handle_label.clone(),
         label,
         values: values.clone(),
         origin,
@@ -138,16 +132,14 @@ pub(crate) fn log_lua_setglobal(
 pub(crate) fn log_registered_global(
     name: &str,
     handle: String,
-    handle_label: Option<String>,
+    label: Option<String>,
     upvalues: i32,
     values: ValueFields,
     origin: OriginFields,
 ) {
-    let label = handle_label.clone();
     log_event(LuaSemanticEvent::SemanticBindGlobal {
         name: name.to_string(),
         handle: handle.clone(),
-        handle_label: handle_label.clone(),
         label: label.clone(),
         values: values.clone(),
         upvalues: Some(upvalues),
@@ -158,15 +150,14 @@ pub(crate) fn log_registered_global(
 pub(crate) fn log_registered_constant(
     name: &str,
     handle: String,
-    handle_label: Option<String>,
+    label: Option<String>,
     values: ValueFields,
     origin: OriginFields,
 ) {
     log_event(LuaSemanticEvent::SemanticBindConstant {
         name: name.to_string(),
         handle: handle.clone(),
-        handle_label: handle_label.clone(),
-        label: handle_label.clone(),
+        label: label.clone(),
         values: values.clone(),
         origin: origin.clone(),
     });
@@ -184,17 +175,12 @@ pub(crate) fn log_push_usertag(id: i32, tag: i32, payload_hex: String) {
     });
 }
 
-pub(crate) fn log_create_table(
-    handle: String,
-    handle_label: Option<String>,
-    mut values: ValueFields,
-) {
+pub(crate) fn log_create_table(handle: String, mut values: ValueFields) {
     if values.value_type.is_none() {
         values.value_type = Some(ValueType::Table);
     }
     log_event(LuaEvent::CreateTable {
         handle,
-        handle_label,
         values,
         caller: caller_origin_fields(),
     });
@@ -228,14 +214,10 @@ pub(crate) fn log_set_table_entry(
         .as_ref()
         .and_then(|(_, label, _)| label.clone());
     let semantic_value_fields = value_handle.as_ref().map(|(_, _, fields)| fields.clone());
-    log_push_object(
-        table_handle.clone(),
-        table_handle_label.clone(),
-        table_fields.clone(),
-    );
+    log_push_object(table_handle.clone(), table_fields.clone());
     log_push_from_preview(&key);
-    if let Some((value_handle, value_label, value_fields)) = value_handle {
-        log_push_object(value_handle, value_label, value_fields);
+    if let Some((value_handle, _, value_fields)) = value_handle {
+        log_push_object(value_handle, value_fields);
     } else {
         log_push_from_preview(&value);
     }
@@ -274,7 +256,6 @@ pub(crate) fn log_store_ref(
     lock: i32,
     reference: i32,
     handle: Option<String>,
-    handle_label: Option<String>,
     label: Option<String>,
 ) {
     let origin = caller_origin_fields();
@@ -282,7 +263,6 @@ pub(crate) fn log_store_ref(
         lock,
         reference,
         handle: handle.clone(),
-        handle_label: handle_label.clone(),
         label: label.clone(),
         note: None,
         origin: origin.clone(),
@@ -291,7 +271,6 @@ pub(crate) fn log_store_ref(
         lock,
         reference,
         handle,
-        handle_label,
         label: label.clone(),
         note: None,
         origin,
@@ -302,7 +281,6 @@ pub(crate) fn log_set_tagmethod(
     tag: i64,
     event: &str,
     handle: Option<String>,
-    handle_label: Option<String>,
     values: ValueFields,
     origin: OriginFields,
 ) {
@@ -310,7 +288,6 @@ pub(crate) fn log_set_tagmethod(
         tag: tag as i32,
         event_name: event.to_string(),
         handle: handle.clone(),
-        handle_label: handle_label.clone(),
         values: values.clone(),
         origin: origin.clone(),
     });
@@ -318,7 +295,6 @@ pub(crate) fn log_set_tagmethod(
         tag: tag as i32,
         event_name: event.to_string(),
         handle,
-        handle_label,
         values,
         origin,
     });
@@ -327,7 +303,6 @@ pub(crate) fn log_set_tagmethod(
 pub(crate) fn log_set_fallback(
     fallback: &str,
     handle: String,
-    handle_label: Option<String>,
     values: ValueFields,
     target_ptr: Option<*const c_void>,
 ) {
@@ -336,7 +311,6 @@ pub(crate) fn log_set_fallback(
     log_event(LuaSemanticEvent::SemanticSetFallback {
         fallback: fallback.to_string(),
         handle: handle.clone(),
-        handle_label: handle_label.clone(),
         values: values.clone(),
         origin: origin.clone(),
         caller: caller.clone(),
@@ -344,7 +318,6 @@ pub(crate) fn log_set_fallback(
     log_event(LuaEvent::SetFallback {
         fallback: fallback.to_string(),
         handle,
-        handle_label,
         values,
         origin,
         caller,
@@ -354,7 +327,6 @@ pub(crate) fn log_set_fallback(
 pub(crate) fn log_fetch_ref(
     reference: i32,
     handle: Option<String>,
-    handle_label: Option<String>,
     label: Option<String>,
     note: Option<String>,
     origin: OriginFields,
@@ -362,7 +334,6 @@ pub(crate) fn log_fetch_ref(
     log_event(LuaSemanticEvent::SemanticFetchRef {
         reference,
         handle: handle.clone(),
-        handle_label: handle_label.clone(),
         label: label.clone(),
         note: note.clone(),
         origin: origin.clone(),
@@ -370,7 +341,6 @@ pub(crate) fn log_fetch_ref(
     log_event(LuaEvent::FetchRef {
         reference,
         handle,
-        handle_label,
         label,
         note,
         origin,
