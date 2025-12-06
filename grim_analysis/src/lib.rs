@@ -14,7 +14,6 @@ mod lua_api;
 mod symbol_map;
 mod telemetry;
 mod trace;
-mod vm_state;
 
 use libc::{c_char, c_int, c_void};
 use lua_api::LuaCFunction;

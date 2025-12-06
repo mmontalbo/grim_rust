@@ -364,6 +364,7 @@ dependencies = [
  "clap",
  "grim_formats",
  "grim_telemetry_common",
+ "libc",
  "mlua",
  "serde_json",
 ]

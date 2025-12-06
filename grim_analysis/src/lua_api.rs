@@ -28,7 +28,6 @@ type LuaIsCFunctionFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaIsUserdataFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaGetNumberFn = unsafe extern "C" fn(LuaObject) -> c_double;
 type LuaGetStringFn = unsafe extern "C" fn(LuaObject) -> *const c_char;
-type LuaGetUserdataFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaTagFn = unsafe extern "C" fn(LuaObject) -> c_int;
 type LuaPushNumberFn = unsafe extern "C" fn(c_float);
 type LuaPushStringFn = unsafe extern "C" fn(*const c_char);
@@ -77,7 +76,6 @@ static LUA_ISCFUNCTION: OnceLock<Option<LuaIsCFunctionFn>> = OnceLock::new();
 static LUA_ISUSERDATA: OnceLock<Option<LuaIsUserdataFn>> = OnceLock::new();
 static LUA_GETNUMBER: OnceLock<Option<LuaGetNumberFn>> = OnceLock::new();
 static LUA_GETSTRING: OnceLock<Option<LuaGetStringFn>> = OnceLock::new();
-static LUA_GETUSERDATA: OnceLock<Option<LuaGetUserdataFn>> = OnceLock::new();
 static LUA_TAG: OnceLock<Option<LuaTagFn>> = OnceLock::new();
 static LUA_PUSHNUMBER: OnceLock<Option<LuaPushNumberFn>> = OnceLock::new();
 static LUA_PUSHSTRING: OnceLock<Option<LuaPushStringFn>> = OnceLock::new();
@@ -266,10 +264,6 @@ pub(crate) fn call_real_lua_getstring(object: LuaObject) -> Option<String> {
             }
         })
     }
-}
-
-pub(crate) fn call_real_lua_getuserdata(object: LuaObject) -> Option<c_int> {
-    unsafe { lua_getuserdata_symbol().map(|symbol| symbol(object)) }
 }
 
 pub(crate) fn call_real_lua_tag(object: LuaObject) -> Option<c_int> {
@@ -757,16 +751,6 @@ fn lua_getstring_symbol() -> Option<LuaGetStringFn> {
             label: "lua_getstring",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetStringFn>(ptr))
-    })
-}
-
-fn lua_getuserdata_symbol() -> Option<LuaGetUserdataFn> {
-    *LUA_GETUSERDATA.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_getuserdata\0",
-            label: "lua_getuserdata",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetUserdataFn>(ptr))
     })
 }
 

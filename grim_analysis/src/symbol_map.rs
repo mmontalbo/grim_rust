@@ -11,7 +11,6 @@ use std::{
 pub(crate) struct SymbolMapHit {
     pub(crate) name: String,
     pub(crate) distance: usize,
-    pub(crate) source_label: Option<String>,
 }
 
 struct SymbolEntry {
@@ -26,7 +25,6 @@ struct SymbolMaps {
 struct LoadedSymbolMap {
     entries: Vec<SymbolEntry>,
     module_filter: Option<String>,
-    source_label: Option<String>,
 }
 
 pub(crate) fn lookup_symbol_from_map(
@@ -109,15 +107,9 @@ fn load_symbol_map_at_path(
     }
 
     entries.sort_by_key(|entry| entry.addr);
-    let source_label = path_ref
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_string());
-
     Some(LoadedSymbolMap {
         entries,
         module_filter,
-        source_label,
     })
 }
 
@@ -224,7 +216,6 @@ impl LoadedSymbolMap {
         Some(SymbolMapHit {
             name: entry.name.clone(),
             distance,
-            source_label: self.source_label.clone(),
         })
     }
 }

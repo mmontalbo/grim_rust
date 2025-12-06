@@ -1,5 +1,5 @@
 pub(crate) use grim_telemetry_common::{
-    EventBuilder, LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
+    EventBuilder, LuaEvent, OriginFields, SeqRange, UpvaluePreview, ValueFields, ValueType,
 };
 use grim_telemetry_common::{TelemetryConfig, TelemetryLogger};
 

@@ -24,12 +24,11 @@ without modifying the game's assets.
 ## Event reference (raw Lua VM surface)
 - Common envelope on every line: `seq`, `ts`, `event=<name>`, followed by event
   fields, then `engine=retail vm_id=lua32` (and optional `run_id` if set).
-- Origin fields appear when available: `origin`, `module`, `symbol`, `demangled`,
-  `symbol_source`, `map_source`.
+- Origin fields appear when available: `origin`, `module`, `symbol`,
+  `symbol_source`.
 - Value fields (when a value is inspected): `value_type`, `value`, `value_len`,
-  `value_preview`, `tag`, `tag_label`, `func`, `payload`, `payload_hex`
-  (pointers are emitted as hex; decimal payload is omitted for userdata pushes;
-  `tag_label` comes from built-in tags and cached `settagmethod` names).
+  `value_preview`, `tag`, `func`
+  (pointers are emitted as hex; decimal payload is omitted for userdata pushes).
 - Handles gain a `handle_label` once they've been named via globals/refs or
   fallback registrations; subsequent events touching that handle will echo it.
 - Caller origin is included on table creation/mutator/tag-method operations to
@@ -48,9 +47,8 @@ without modifying the game's assets.
 - Refs: `lua_ref` (lock, ref, handle/handle_label/label), `lua_getref` (ref,
   handle/handle_label/label, note when missing).
 - Tag plumbing: `lua_settag`, `lua_copytagmethods` (to/from/result), `lua_settagmethod`
-  (tag, event_name), `lua_setfallback` (event, handle + value fields). Tagged values
-  now carry `tag_label` when known. The shared schema still includes `tag_state`,
-  but the retail shim no longer emits it.
+  (tag, event_name), `lua_setfallback` (event, handle + value fields). The shared schema still
+  includes `tag_state`, but the retail shim no longer emits it.
 - Cutscenes (retail shim only): `cutscene` (movie/movie_label/phase/playing/elapsed_ms/polls/result),
   `cutscene_skip` (phase/movie/movie_label/elapsed_ms/polls), and `post_intro_room`
   (source/set/setup/after_movie) are typed in the shared schema and emitted

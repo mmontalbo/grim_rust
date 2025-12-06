@@ -72,6 +72,10 @@ impl TelemetryLogger {
         self.log_event_inner(event.into(), seq_display.into());
     }
 
+    pub fn next_seq(&self) -> u64 {
+        self.event_seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     fn log_event_inner(&self, event: EventBuilder, seq_display: String) {
         let ts = elapsed_millis();
         let run_id = self
@@ -101,6 +105,74 @@ impl TelemetryLogger {
             parts.push(format!("run_id={run_id}"));
         }
         self.log_line(&parts.join(" "));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeqRange {
+    pub min: u64,
+    pub max: u64,
+}
+
+impl SeqRange {
+    pub const fn new(seq_a: u64, seq_b: u64) -> Self {
+        if seq_a <= seq_b {
+            Self {
+                min: seq_a,
+                max: seq_b,
+            }
+        } else {
+            Self {
+                min: seq_b,
+                max: seq_a,
+            }
+        }
+    }
+
+    pub fn from_seqs<I>(seqs: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut iter = seqs.into_iter();
+        let first = iter.next()?;
+        let mut min = first;
+        let mut max = first;
+        for seq in iter {
+            min = min.min(seq);
+            max = max.max(seq);
+        }
+        Some(Self { min, max })
+    }
+
+    pub const fn include(self, seq: u64) -> Self {
+        let min = if self.min < seq { self.min } else { seq };
+        let max = if self.max > seq { self.max } else { seq };
+        Self { min, max }
+    }
+
+    pub fn display(&self) -> String {
+        if self.min == self.max {
+            format!("{:06}", self.min)
+        } else {
+            format!("{:06}-{:06}", self.min, self.max)
+        }
+    }
+}
+
+impl fmt::Display for SeqRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.display())
+    }
+}
+
+pub fn parse_seq_range(text: &str) -> Option<SeqRange> {
+    if let Some((min, max)) = text.split_once('-') {
+        let seq_min = min.parse::<u64>().ok()?;
+        let seq_max = max.parse::<u64>().ok()?;
+        Some(SeqRange::new(seq_min, seq_max))
+    } else {
+        let value = text.parse::<u64>().ok()?;
+        Some(SeqRange::new(value, value))
     }
 }
 
@@ -249,11 +321,7 @@ pub struct OriginFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub demangled: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub map_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,13 +448,7 @@ pub struct ValueFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag_label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub func: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -707,15 +769,11 @@ pub enum LuaEvent {
         tag: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tag_label: Option<String>,
     },
     #[serde(rename = "lua_settagmethod")]
     SetTagmethod {
         tag: i32,
         event_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tag_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -754,8 +812,6 @@ pub enum LuaEvent {
     #[serde(rename = "tag_state")]
     TagState {
         tag: i32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tag_label: Option<String>,
         uses: u64,
         changed: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -864,19 +920,6 @@ mod tests {
         assert!(fields.iter().any(|f| f == "id=0x00000007"));
         assert!(fields.iter().any(|f| f == "tag=42"));
         assert!(fields.iter().any(|f| f == "value_type=userdata"));
-        assert!(fields.iter().all(|f| !f.starts_with("payload_hex=")));
-    }
-
-    #[test]
-    fn set_tag_includes_label_when_present() {
-        let event = LuaEvent::SetTag {
-            tag: 9,
-            note: None,
-            tag_label: Some("example".to_string()),
-        };
-        let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "tag=9"));
-        assert!(fields.iter().any(|f| f == "tag_label=example"));
     }
 
     #[test]

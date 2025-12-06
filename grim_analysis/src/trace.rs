@@ -1,17 +1,15 @@
 use crate::{
-    logging::{
-        log_line, EventBuilder, LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
-    },
+    logging::{log_line, LuaEvent, OriginFields, SeqRange, UpvaluePreview, ValueFields, ValueType},
     lua_api::{
         call_real_lua_call, call_real_lua_callfunction, call_real_lua_collectgarbage,
         call_real_lua_copytagmethods, call_real_lua_createtable, call_real_lua_dobuffer,
         call_real_lua_dofile, call_real_lua_dostring, call_real_lua_error,
         call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getnumber,
         call_real_lua_getobjname, call_real_lua_getparam, call_real_lua_getref,
-        call_real_lua_getstring, call_real_lua_gettable, call_real_lua_getuserdata,
-        call_real_lua_iscfunction, call_real_lua_isfunction, call_real_lua_isnumber,
-        call_real_lua_isstring, call_real_lua_istable, call_real_lua_isuserdata,
-        call_real_lua_newstate, call_real_lua_newtag, call_real_lua_newthread, call_real_lua_open,
+        call_real_lua_getstring, call_real_lua_gettable, call_real_lua_iscfunction,
+        call_real_lua_isfunction, call_real_lua_isnumber, call_real_lua_isstring,
+        call_real_lua_istable, call_real_lua_isuserdata, call_real_lua_newstate,
+        call_real_lua_newtag, call_real_lua_newthread, call_real_lua_open,
         call_real_lua_push_c_closure, call_real_lua_pushlstring, call_real_lua_pushnil,
         call_real_lua_pushnumber, call_real_lua_pushobject, call_real_lua_pushstring,
         call_real_lua_pushusertag, call_real_lua_pushvalue, call_real_lua_rawgetglobal,
@@ -21,12 +19,12 @@ use crate::{
         call_real_lua_tag, call_real_lua_unref, LuaCFunction, LuaObject, LuaState,
     },
     symbol_map::lookup_symbol_from_map,
-    telemetry, vm_state,
+    telemetry,
 };
 use libc::{c_char, c_int, size_t, Dl_info};
 use std::{
     collections::{HashMap, VecDeque},
-    ffi::{c_void, CStr, CString},
+    ffi::{c_void, CStr},
     mem::MaybeUninit,
     ptr,
     sync::{
@@ -40,7 +38,6 @@ const PUSH_RING_CAPACITY: usize = 16;
 const MAX_PENDING_REGISTERED_GLOBALS: usize = 8;
 static CALLFUNCTION_TRACKER: OnceLock<Mutex<CallfunctionTracker>> = OnceLock::new();
 static GLOBAL_ACCESS_TRACKER: OnceLock<Mutex<GlobalAccessTracker>> = OnceLock::new();
-static TAG_LABELS: OnceLock<Mutex<TagLabelTracker>> = OnceLock::new();
 static HANDLE_LABELS: OnceLock<Mutex<HandleLabelTracker>> = OnceLock::new();
 static PUSH_EVENT_TRACKER: OnceLock<Mutex<PushEventTracker>> = OnceLock::new();
 static REGISTERED_GLOBAL_CANDIDATES: OnceLock<Mutex<RegisteredGlobalTracker>> = OnceLock::new();
@@ -66,10 +63,7 @@ macro_rules! forward_int_result {
 
 pub(crate) unsafe fn trace_lua_open() -> LuaState {
     match call_real_lua_open() {
-        Some(state) => {
-            vm_state::record_main_state(state);
-            state
-        }
+        Some(state) => state,
         None => {
             log_line("lua_open symbol missing; returning null");
             ptr::null_mut()
@@ -79,10 +73,7 @@ pub(crate) unsafe fn trace_lua_open() -> LuaState {
 
 pub(crate) unsafe fn trace_lua_newstate() -> LuaState {
     match call_real_lua_newstate() {
-        Some(state) => {
-            vm_state::record_main_state(state);
-            state
-        }
+        Some(state) => state,
         None => {
             log_line("lua_newstate symbol missing; returning null");
             ptr::null_mut()
@@ -92,10 +83,7 @@ pub(crate) unsafe fn trace_lua_newstate() -> LuaState {
 
 pub(crate) unsafe fn trace_lua_newthread(state: LuaState) -> LuaState {
     match call_real_lua_newthread(state) {
-        Some(thread) => {
-            vm_state::record_thread_state(thread);
-            thread
-        }
+        Some(thread) => thread,
         None => {
             log_line("lua_newthread symbol missing; returning null");
             ptr::null_mut()
@@ -128,24 +116,20 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
         None,
     );
     if let Some(previews) = upvalue_snapshot {
-        let mut seqs = Vec::with_capacity(previews.len());
+        let mut seqs = Vec::with_capacity(previews.len() + 1);
         let mut previews_only = Vec::with_capacity(previews.len());
         for item in previews {
             seqs.push(item.log_seq);
             previews_only.push(item.preview);
         }
-        let seq_display = seq_range_display(&seqs, Some(closure_log_seq));
-        let seq_bounds = if let Some(display) = seq_display.as_ref() {
-            parse_seq_range(display)
-        } else {
-            None
-        };
+        seqs.push(closure_log_seq);
+        let seq_range = SeqRange::from_seqs(seqs);
         remember_registered_global_candidate(
             func_addr,
             sequence,
             upvalues,
             previews_only,
-            seq_bounds,
+            seq_range,
             origin.clone(),
         );
     }
@@ -252,7 +236,6 @@ pub(crate) unsafe fn trace_lua_pushusertag(id: c_int, tag: c_int) {
     let mut values = ValueFields::default();
     values.value_type = Some(ValueType::Userdata);
     values.tag = Some(tag);
-    attach_tag_label(&mut values);
     let caller = caller_origin_fields();
     let log_seq = log_event_with_seq(LuaEvent::PushUsertag { id, values, caller });
     record_push_preview(
@@ -550,7 +533,6 @@ pub(crate) unsafe fn trace_lua_newtag() -> c_int {
             log_event(LuaEvent::SetTag {
                 tag,
                 note: Some("created_via_newtag".to_string()),
-                tag_label: None,
             });
             tag
         }
@@ -565,19 +547,13 @@ pub(crate) unsafe fn trace_lua_copytagmethods(tagto: c_int, tagfrom: c_int) -> c
     record_non_push_event();
     match call_real_lua_copytagmethods(tagto, tagfrom) {
         Some(result) => {
-            let caller = caller_origin_fields();
-            let from_label = tag_label_for(tagfrom);
-            if let Some(label) = &from_label {
-                remember_tag_label_if_missing(tagto, label.clone());
-            }
-            let to_label = tag_label_for(tagto);
             log_event(LuaEvent::CopyTagmethods {
                 to: tagto,
                 from: tagfrom,
-                to_label,
-                from_label,
+                to_label: None,
+                from_label: None,
                 result: Some(result),
-                caller,
+                caller: caller_origin_fields(),
             });
             result
         }
@@ -595,11 +571,7 @@ pub(crate) unsafe fn trace_lua_settag(tag: c_int) {
     } else {
         Some("lua_settag_missing".to_string())
     };
-    log_event(LuaEvent::SetTag {
-        tag,
-        note,
-        tag_label: tag_label_for(tag),
-    });
+    log_event(LuaEvent::SetTag { tag, note });
 }
 pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
     record_non_push_event();
@@ -708,14 +680,7 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                 handle_label,
                 values,
                 origin,
-                seq_range_display(
-                    last_push_seq
-                        .as_ref()
-                        .map(|seq| vec![*seq])
-                        .unwrap_or_default()
-                        .as_slice(),
-                    Some(raw_seq),
-                ),
+                SeqRange::from_seqs(last_push_seq.into_iter().chain(Some(raw_seq))),
             );
         }
     }
@@ -859,11 +824,9 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
         }
     }
     if call_real_lua_settagmethod(tag, event) {
-        remember_tag_label_if_missing(tag, event_label.clone());
         log_event(LuaEvent::SetTagmethod {
             tag,
             event_name: event_label.clone(),
-            tag_label: tag_label_for(tag),
             handle: handle_field.clone(),
             handle_label: handle_label.clone(),
             values: values.clone(),
@@ -873,7 +836,6 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
         log_event(LuaEvent::SetTagmethod {
             tag,
             event_name: event_label.clone(),
-            tag_label: tag_label_for(tag),
             handle: handle_field,
             handle_label,
             values,
@@ -948,36 +910,6 @@ fn record_non_push_event() {
     }
 }
 
-fn seq_range_display(upvalue_seqs: &[u64], closure_seq: Option<u64>) -> Option<String> {
-    let mut seqs: Vec<u64> = upvalue_seqs.to_vec();
-    if let Some(seq) = closure_seq {
-        seqs.push(seq);
-    }
-    if seqs.is_empty() {
-        return None;
-    }
-    let min = *seqs.iter().min().unwrap();
-    let max = *seqs.iter().max().unwrap();
-    let min_rendered = format!("{min:06}");
-    let max_rendered = format!("{max:06}");
-    if min == max {
-        Some(min_rendered)
-    } else {
-        Some(format!("{min_rendered}-{max_rendered}"))
-    }
-}
-
-fn parse_seq_range(text: &str) -> Option<(u64, u64)> {
-    if let Some((min, max)) = text.split_once('-') {
-        let seq_min = min.parse::<u64>().ok()?;
-        let seq_max = max.parse::<u64>().ok()?;
-        Some((seq_min, seq_max))
-    } else {
-        let value = text.parse::<u64>().ok()?;
-        Some((value, value))
-    }
-}
-
 fn take_recent_pushes(count: usize) -> Option<Vec<TrackedPush>> {
     match push_event_tracker().lock() {
         Ok(mut tracker) => {
@@ -1018,11 +950,8 @@ fn emit_set_table_entry(
     if let Some(seq) = table_push_seq {
         seqs.push(seq);
     }
-    let seq_display = seq_range_display(&seqs, Some(raw_seq));
-    let seq_range = seq_display
-        .as_ref()
-        .and_then(|display| parse_seq_range(display));
-    if let Some(display) = seq_display {
+    seqs.push(raw_seq);
+    if let Some(seq_range) = SeqRange::from_seqs(seqs) {
         log_event_with_seq_display(
             LuaEvent::SetTableEntry {
                 table_handle: format!("0x{handle:08x}"),
@@ -1030,11 +959,11 @@ fn emit_set_table_entry(
                 key: key_push.preview.clone(),
                 value: value_push.preview.clone(),
                 note,
-                seq_min: seq_range.map(|(min, _)| min),
-                seq_max: seq_range.map(|(_, max)| max),
+                seq_min: Some(seq_range.min),
+                seq_max: Some(seq_range.max),
                 caller,
             },
-            display,
+            seq_range.display(),
         );
     }
 }
@@ -1057,18 +986,12 @@ fn emit_registered_global(
     upvalue_previews: Vec<UpvaluePreview>,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
-    seq_range: Option<(u64, u64)>,
+    seq_range: Option<SeqRange>,
     raw_setglobal_seq: u64,
 ) {
-    let (seq_min, seq_max) = match seq_range {
-        Some((min, max)) => (min.min(raw_setglobal_seq), max.max(raw_setglobal_seq)),
-        None => (raw_setglobal_seq, raw_setglobal_seq),
-    };
-    let seq_display = if seq_min == seq_max {
-        format!("{seq_min:06}")
-    } else {
-        format!("{:06}-{:06}", seq_min, seq_max)
-    };
+    let seq_range = seq_range
+        .map(|range| range.include(raw_setglobal_seq))
+        .unwrap_or_else(|| SeqRange::new(raw_setglobal_seq, raw_setglobal_seq));
     let event = LuaEvent::RegisteredGlobal {
         name: name.to_string(),
         handle: format!("0x{handle:08x}"),
@@ -1081,7 +1004,7 @@ fn emit_registered_global(
         values,
         origin: origin_fields(origin.as_ref()),
     };
-    log_event_with_seq_display(event, seq_display);
+    log_event_with_seq_display(event, seq_range.display());
 }
 
 fn emit_registered_constant(
@@ -1090,7 +1013,7 @@ fn emit_registered_constant(
     handle_label: String,
     values: ValueFields,
     origin: Option<ClosureOrigin>,
-    seq_display: Option<String>,
+    seq_range: Option<SeqRange>,
 ) {
     let constant_event = LuaEvent::RegisteredConstant {
         name: name.to_string(),
@@ -1100,8 +1023,8 @@ fn emit_registered_constant(
         values,
         origin: origin_fields(origin.as_ref()),
     };
-    if let Some(display) = seq_display {
-        log_event_with_seq_display(constant_event, display);
+    if let Some(range) = seq_range {
+        log_event_with_seq_display(constant_event, range.display());
     } else {
         log_event(constant_event);
     }
@@ -1138,7 +1061,7 @@ fn remember_registered_global_candidate(
     push_seq: u64,
     upvalues: c_int,
     previews: Vec<UpvaluePreview>,
-    seq_range: Option<(u64, u64)>,
+    seq_range: Option<SeqRange>,
     origin: Option<ClosureOrigin>,
 ) {
     match registered_global_tracker().lock() {
@@ -1184,10 +1107,6 @@ fn format_number_for_log(value: f64) -> String {
     }
 }
 
-fn format_pointer_hex(value: c_int) -> String {
-    format!("0x{addr:08x}", addr = value as u32)
-}
-
 fn truncate_for_log(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         return text.to_string();
@@ -1223,8 +1142,7 @@ fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
         return Some(ValueDetails::Function { tag });
     }
     if call_real_lua_isuserdata(handle) {
-        let payload = call_real_lua_getuserdata(handle);
-        return Some(ValueDetails::Userdata { tag, payload });
+        return Some(ValueDetails::Userdata { tag });
     }
     Some(ValueDetails::Unknown { tag })
 }
@@ -1259,17 +1177,15 @@ fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
             }
             fields.tag = *tag;
         }
-        ValueDetails::Userdata { tag, payload } => {
+        ValueDetails::Userdata { tag } => {
             fields.value_type = Some(ValueType::Userdata);
             fields.tag = *tag;
-            fields.payload_hex = payload.map(|value| format_pointer_hex(value));
         }
         ValueDetails::Unknown { tag } => {
             fields.value_type = Some(ValueType::Unknown);
             fields.tag = *tag;
         }
     }
-    attach_tag_label(&mut fields);
     fields
 }
 
@@ -1334,14 +1250,6 @@ fn upvalue_preview_from_details(value: &ValueDetails) -> UpvaluePreview {
     }
 }
 
-fn attach_tag_label(fields: &mut ValueFields) {
-    if let Some(tag) = fields.tag {
-        if let Some(label) = tag_label_for(tag) {
-            fields.tag_label = Some(label);
-        }
-    }
-}
-
 enum ValueDetails {
     Number(f64),
     String(String),
@@ -1358,7 +1266,6 @@ enum ValueDetails {
     },
     Userdata {
         tag: Option<c_int>,
-        payload: Option<c_int>,
     },
     Unknown {
         tag: Option<c_int>,
@@ -1376,9 +1283,6 @@ fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
         if let Some(symbol) = &origin.symbol {
             has_symbol = true;
             fields.symbol = Some(symbol.clone());
-            if let Some(demangled) = &origin.demangled {
-                fields.demangled = Some(demangled.clone());
-            }
         }
         if let Some(map_symbol) = &origin.map_symbol {
             if !has_symbol {
@@ -1387,14 +1291,6 @@ fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
                     value.push_str(&format!("+0x{delta:x}", delta = map_symbol.distance));
                 }
                 fields.symbol = Some(value);
-                fields.symbol_source = Some(
-                    map_symbol
-                        .source_label
-                        .clone()
-                        .unwrap_or_else(|| "map".to_string()),
-                );
-            } else if let Some(source) = &map_symbol.source_label {
-                fields.map_source = Some(source.clone());
             }
         }
     }
@@ -1407,21 +1303,6 @@ fn caller_origin_fields() -> OriginFields {
     if depth <= 0 {
         return OriginFields::default();
     }
-    for addr in frames.iter().take(depth as usize).skip(1) {
-        if addr.is_null() {
-            continue;
-        }
-        let origin = ClosureOrigin::new(*addr as *const c_void);
-        if origin
-            .module
-            .as_deref()
-            .map(|module| module.contains("grim_telemetry_shim"))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        return origin_fields(Some(&origin));
-    }
     OriginFields::default()
 }
 
@@ -1429,7 +1310,6 @@ struct ClosureDetails {
     module: Option<String>,
     module_base: Option<usize>,
     symbol: Option<String>,
-    demangled: Option<String>,
 }
 
 fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
@@ -1440,7 +1320,6 @@ fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
                 module: None,
                 module_base: None,
                 symbol: None,
-                demangled: None,
             };
         }
         let info = info.assume_init();
@@ -1451,14 +1330,10 @@ fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
             Some(info.dli_fbase as usize)
         };
         let symbol = cstr_opt(info.dli_sname);
-        let demangled = symbol
-            .as_ref()
-            .and_then(|symbol| demangle_symbol(symbol.as_str()));
         ClosureDetails {
             module,
             module_base,
             symbol,
-            demangled,
         }
     }
 }
@@ -1469,39 +1344,6 @@ unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
     } else {
         Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     }
-}
-
-fn demangle_symbol(symbol: &str) -> Option<String> {
-    // retail binaries are C++ and often expose mangled names; try to recover readable signatures
-    let Ok(symbol) = CString::new(symbol) else {
-        return None;
-    };
-    let mut status: c_int = 0;
-    let ptr = unsafe {
-        __cxa_demangle(
-            symbol.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut status,
-        )
-    };
-    if ptr.is_null() || status != 0 {
-        return None;
-    }
-    let demangled = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
-    unsafe {
-        libc::free(ptr as *mut c_void);
-    }
-    Some(demangled)
-}
-
-extern "C" {
-    fn __cxa_demangle(
-        mangled_name: *const c_char,
-        output_buffer: *mut c_char,
-        length: *mut usize,
-        status: *mut c_int,
-    ) -> *mut c_char;
 }
 
 struct PushEventTracker {
@@ -1560,7 +1402,7 @@ struct PendingRegisteredGlobal {
     push_seq: u64,
     upvalues: c_int,
     upvalue_previews: Vec<UpvaluePreview>,
-    seq_range: Option<(u64, u64)>,
+    seq_range: Option<SeqRange>,
     origin: Option<ClosureOrigin>,
 }
 
@@ -1684,28 +1526,6 @@ impl GlobalAccessTracker {
     }
 }
 
-struct TagLabelTracker {
-    labels: HashMap<i32, String>,
-}
-
-impl TagLabelTracker {
-    fn new() -> Self {
-        let mut labels = HashMap::new();
-        labels.insert(-3, "table".to_string());
-        labels.insert(-4, "function".to_string());
-        labels.insert(-5, "cfunction".to_string());
-        Self { labels }
-    }
-
-    fn remember_label_if_missing(&mut self, tag: i32, label: String) {
-        self.labels.entry(tag).or_insert(label);
-    }
-
-    fn label_for(&self, tag: i32) -> Option<String> {
-        self.labels.get(&tag).cloned()
-    }
-}
-
 struct HandleLabelTracker {
     labels: HashMap<LuaObject, String>,
 }
@@ -1762,27 +1582,8 @@ fn global_access_tracker() -> &'static Mutex<GlobalAccessTracker> {
     GLOBAL_ACCESS_TRACKER.get_or_init(|| Mutex::new(GlobalAccessTracker::new()))
 }
 
-fn tag_label_tracker() -> &'static Mutex<TagLabelTracker> {
-    TAG_LABELS.get_or_init(|| Mutex::new(TagLabelTracker::new()))
-}
-
 fn handle_label_tracker() -> &'static Mutex<HandleLabelTracker> {
     HANDLE_LABELS.get_or_init(|| Mutex::new(HandleLabelTracker::new()))
-}
-
-fn tag_label_for(tag: i32) -> Option<String> {
-    tag_label_tracker()
-        .lock()
-        .ok()
-        .and_then(|tracker| tracker.label_for(tag))
-}
-
-fn remember_tag_label_if_missing(tag: i32, label: impl Into<String>) {
-    if let Ok(mut tracker) = tag_label_tracker().lock() {
-        tracker.remember_label_if_missing(tag, label.into());
-    } else {
-        log_line("tag label tracker mutex poisoned; skipping label update");
-    }
 }
 
 fn remember_handle_label(handle: LuaObject, label: impl Into<String>) {
@@ -1822,7 +1623,6 @@ struct ClosureOrigin {
     func_addr: usize,
     module: Option<String>,
     symbol: Option<String>,
-    demangled: Option<String>,
     map_symbol: Option<MapSymbol>,
 }
 
@@ -1834,13 +1634,11 @@ impl ClosureOrigin {
                 .map(|hit| MapSymbol {
                     name: hit.name,
                     distance: hit.distance,
-                    source_label: hit.source_label,
                 });
         Self {
             func_addr: ptr as usize,
             module: details.module,
             symbol: details.symbol,
-            demangled: details.demangled,
             map_symbol,
         }
     }
@@ -1850,51 +1648,16 @@ impl ClosureOrigin {
 struct MapSymbol {
     name: String,
     distance: usize,
-    source_label: Option<String>,
 }
 
 fn log_event(event: LuaEvent) {
-    log_event_with_state(event, None);
+    crate::logging::log_event(event);
 }
 
 fn log_event_with_seq(event: LuaEvent) -> u64 {
-    log_event_with_seq_state(event, None)
+    crate::logging::log_event_with_seq(event)
 }
 
 fn log_event_with_seq_display(event: LuaEvent, seq_display: impl Into<String>) {
-    log_event_with_seq_display_state(event, seq_display, None);
-}
-
-fn log_event_with_state(event: LuaEvent, preferred_state: Option<LuaState>) {
-    let mut builder: EventBuilder = event.into();
-    inject_state_field(&mut builder, preferred_state);
-    crate::logging::log_event(builder);
-}
-
-fn log_event_with_seq_state(event: LuaEvent, preferred_state: Option<LuaState>) -> u64 {
-    let mut builder: EventBuilder = event.into();
-    inject_state_field(&mut builder, preferred_state);
-    crate::logging::log_event_with_seq(builder)
-}
-
-fn log_event_with_seq_display_state(
-    event: LuaEvent,
-    seq_display: impl Into<String>,
-    preferred_state: Option<LuaState>,
-) {
-    let mut builder: EventBuilder = event.into();
-    inject_state_field(&mut builder, preferred_state);
-    crate::logging::log_event_with_seq_display(builder, seq_display);
-}
-
-fn inject_state_field(builder: &mut EventBuilder, preferred_state: Option<LuaState>) {
-    if let Some(addr) = active_state(preferred_state) {
-        builder.kv_mut("lua_state", format!("0x{addr:08x}"));
-    }
-}
-
-fn active_state(preferred_state: Option<LuaState>) -> Option<usize> {
-    preferred_state
-        .map(|ptr| ptr as usize)
-        .or_else(vm_state::main_state_addr)
+    crate::logging::log_event_with_seq_display(event, seq_display);
 }

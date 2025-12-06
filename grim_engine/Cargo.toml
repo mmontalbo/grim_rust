@@ -11,3 +11,4 @@ grim_formats = { path = "../grim_formats" }
 grim_telemetry_common = { path = "../grim_telemetry_common" }
 serde_json = "1"
 mlua = { version = "0.9", features = ["lua51", "vendored"] }
+libc = "0.2"

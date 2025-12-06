@@ -2,13 +2,17 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use grim_telemetry_common::OriginFields;
 use mlua::{
     Error as LuaError, Function, Lua, RegistryKey, Result as LuaResult, Table, Value, Variadic,
 };
 
-use crate::lua_host::telemetry::{log_set_tagmethod, log_store_ref};
+use crate::lua_host::telemetry::{
+    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_store_ref, log_unref, normalize_handle,
+    origin_fields_for_ptr, ptr_to_handle,
+};
 
-use super::util::set_global;
+use super::util::{handle_from_value, set_global_silent, value_fields_from_lua, TaggedHandle};
 use crate::lua_host::context::EngineContext;
 
 pub(super) fn install_legacy_compat<'lua>(
@@ -40,12 +44,23 @@ fn install_fallback_globals<'lua>(
             {
                 eprintln!("[lua][setfallback] installing stubbed handler for {event}");
             }
-            let previous = setfallback_state
-                .borrow_mut()
-                .set_fallback_for_all(lua_ctx, &event, handler)?;
+            let previous = setfallback_state.borrow_mut().set_fallback_for_all(
+                lua_ctx,
+                &event,
+                handler.clone(),
+            )?;
+            let values = value_fields_from_lua(&Value::Function(handler.clone()));
+            let handle = ptr_to_handle(handler.to_pointer());
+            log_set_fallback(
+                &event,
+                handle,
+                Some(format!("fallback:{event}")),
+                values,
+                Some(handler.to_pointer()),
+            );
             Ok(previous.map(Value::Function).unwrap_or(Value::Nil))
         })?;
-    set_global(lua, globals, "setfallback", setfallback)?;
+    set_global_silent(lua, globals, "setfallback", setfallback)?;
 
     let gettag_state = fallbacks.clone();
     let gettagmethod = lua.create_function(
@@ -56,7 +71,7 @@ fn install_fallback_globals<'lua>(
             Ok(method.map(Value::Function).unwrap_or(Value::Nil))
         },
     )?;
-    set_global(lua, globals, "gettagmethod", gettagmethod)?;
+    set_global_silent(lua, globals, "gettagmethod", gettagmethod)?;
 
     let settag_state = fallbacks.clone();
     let settagmethod = lua.create_function(
@@ -75,47 +90,87 @@ fn install_fallback_globals<'lua>(
             Ok(previous.map(Value::Function).unwrap_or(Value::Nil))
         },
     )?;
-    set_global(lua, globals, "settagmethod", settagmethod)?;
+    set_global_silent(lua, globals, "settagmethod", settagmethod)?;
 
     let seterror_state = fallbacks.clone();
     let seterrormethod =
         lua.create_function(move |lua_ctx, handler: Function| -> LuaResult<Value> {
-            let previous = seterror_state
-                .borrow_mut()
-                .set_fallback_for_all(lua_ctx, "error", handler)?;
+            let previous = seterror_state.borrow_mut().set_fallback_for_all(
+                lua_ctx,
+                "error",
+                handler.clone(),
+            )?;
+            let values = value_fields_from_lua(&Value::Function(handler.clone()));
+            let handle = ptr_to_handle(handler.to_pointer());
+            log_set_fallback(
+                "error",
+                handle,
+                Some("fallback:error".to_string()),
+                values,
+                Some(handler.to_pointer()),
+            );
             Ok(previous.map(Value::Function).unwrap_or(Value::Nil))
         })?;
-    set_global(lua, globals, "seterrormethod", seterrormethod)?;
+    set_global_silent(lua, globals, "seterrormethod", seterrormethod)?;
 
     let tag =
         lua.create_function(|_, value: Value| Ok(LegacyFallbacks::tag_id_for_value(&value)))?;
-    set_global(lua, globals, "tag", tag)?;
+    set_global_silent(lua, globals, "tag", tag)?;
 
     let refs = RegistryRefs::new();
     let refs_state = refs.clone();
     let lua_ref = lua.create_function(move |lua_ctx, value: Value| -> LuaResult<i32> {
-        let handle = refs_state.next_handle();
+        let reference = refs_state.next_handle();
+        let snapshot = value.clone();
         let key = lua_ctx.create_registry_value(value)?;
-        refs_state.store(handle, key);
-        log_store_ref(1, handle, Some("lua_ref".to_string()));
-        Ok(handle)
+        refs_state.store(reference, key);
+        let label = format!("ref:{reference}");
+        let handle = normalize_handle(&label, handle_from_value(&snapshot));
+        log_store_ref(1, reference, Some(handle), Some(label.clone()), Some(label));
+        Ok(reference)
     })?;
-    set_global(lua, globals, "lua_ref", lua_ref)?;
+    set_global_silent(lua, globals, "lua_ref", lua_ref)?;
 
     let refs_state = refs.clone();
     let lua_unref = lua.create_function(move |_, handle: i32| {
         refs_state.remove(handle);
-        log_store_ref(1, handle, Some("lua_unref".to_string()));
+        log_unref(handle, None);
         Ok(())
     })?;
-    set_global(lua, globals, "lua_unref", lua_unref)?;
+    set_global_silent(lua, globals, "lua_unref", lua_unref)?;
 
     let refs_state = refs.clone();
     let lua_getref = lua.create_function(move |lua_ctx, handle: i32| -> LuaResult<Value> {
         let value = refs_state.resolve_value(lua_ctx, handle)?;
-        Ok(value.unwrap_or(Value::Nil))
+        if let Some(value) = value {
+            let label = format!("ref:{handle}");
+            let handle_hex = normalize_handle(&label, handle_from_value(&value));
+            let origin = match &value {
+                Value::Function(func) => origin_fields_for_ptr(func.to_pointer()),
+                _ => OriginFields::default(),
+            };
+            log_fetch_ref(
+                handle,
+                Some(handle_hex),
+                Some(label.clone()),
+                Some(label),
+                None,
+                origin,
+            );
+            Ok(value)
+        } else {
+            log_fetch_ref(
+                handle,
+                None,
+                None,
+                None,
+                Some("missing_ref".to_string()),
+                OriginFields::default(),
+            );
+            Ok(Value::Nil)
+        }
     })?;
-    set_global(lua, globals, "lua_getref", lua_getref)?;
+    set_global_silent(lua, globals, "lua_getref", lua_getref)?;
 
     Ok(())
 }
@@ -158,7 +213,7 @@ fn install_error_wrapper<'lua>(
         let call_error: Function = lua_ctx.registry_value(&original_error_key)?;
         call_error.call::<_, Value>(args)
     })?;
-    set_global(lua, globals, "error", wrapped_error)?;
+    set_global_silent(lua, globals, "error", wrapped_error)?;
     Ok(())
 }
 
@@ -331,12 +386,23 @@ impl LegacyFallbacks {
         handler: Function<'lua>,
     ) -> LuaResult<Option<Function<'lua>>> {
         let previous = self.get_tag_method(lua, tag, event)?;
+        let handle = ptr_to_handle(handler.to_pointer());
+        let mut values = value_fields_from_lua(&Value::Function(handler.clone()));
+        values.tag = Some(tag as i32);
+        let origin = origin_fields_for_ptr(handler.to_pointer());
         let key = lua.create_registry_value(handler)?;
         self.tag_methods
             .entry(tag)
             .or_default()
             .insert(event.to_string(), key);
-        log_set_tagmethod(tag, event);
+        log_set_tagmethod(
+            tag,
+            event,
+            Some(handle),
+            Some(format!("tag{tag}:{event}")),
+            values,
+            origin,
+        );
         Ok(previous)
     }
 
@@ -371,7 +437,10 @@ impl LegacyFallbacks {
             Value::Table(_) => Self::TAG_TABLE,
             Value::Function(_) => Self::TAG_FUNCTION,
             Value::Thread(_) => Self::TAG_THREAD,
-            Value::UserData(_) => Self::TAG_USERDATA,
+            Value::UserData(data) => data
+                .borrow::<TaggedHandle>()
+                .map(|handle| handle.tag as i64)
+                .unwrap_or(Self::TAG_USERDATA),
             Value::LightUserData(_) => Self::TAG_LIGHTUSERDATA,
             Value::Error(_) => Self::TAG_ERROR,
         }

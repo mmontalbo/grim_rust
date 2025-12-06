@@ -5,12 +5,18 @@ use std::rc::Rc;
 use anyhow::{Context, Result};
 use mlua::{Function, Lua, MultiValue, Result as LuaResult, Table, Value, Variadic};
 
-use crate::lua_host::telemetry::{log_event, log_push_cclosure, log_set_tagmethod, log_store_ref};
-use grim_telemetry_common::LuaEvent;
+use crate::lua_host::telemetry::{
+    log_create_table, log_event, log_push_cclosure, log_push_number, log_push_usertag,
+    log_set_table_entry, log_store_ref, next_fabricated_handle, ptr_to_handle, register_tag,
+};
+use grim_telemetry_common::{LuaEvent, UpvaluePreview, ValueFields, ValueType};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::install_legacy_compat;
-use super::util::{set_global, value_to_string};
+use super::util::{
+    set_global, value_fields_from_lua, value_to_string, value_to_upvalue_preview,
+    with_registered_global_hint, RegisteredGlobalMeta, RegisteredPush, TaggedHandle,
+};
 use crate::lua_host::context::EngineContext;
 
 pub(crate) fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
@@ -35,18 +41,29 @@ pub(crate) fn install_globals(
     let globals = lua.globals();
 
     // Ensure legacy version string is the first bound global to mirror retail traces.
-    set_global(lua, &globals, "_VERSION", "Lua 3.1")?;
+    set_global(lua, &globals, "_VERSION", "Lua 3.1 (alpha)")?;
 
     install_legacy_io(lua, &globals)?;
     // Retail pushes errorfb before _TRIGMODE is bound; log a stub push to align traces.
     let errorfb = lua.create_function(|_, ()| Ok(Value::Nil))?;
-    log_push_cclosure("lua_pushCclosure", errorfb.to_pointer());
-    set_global(lua, &globals, "_TRIGMODE", 1)?;
-    // Retail pushes math_pow before setting the pow tagmethod; log a stub push to align traces.
-    let math_pow = lua.create_function(|_, (a, b): (f64, f64)| Ok(Value::Number(a.powf(b))))?;
-    log_push_cclosure("lua_pushCclosure", math_pow.to_pointer());
-    log_set_tagmethod(-1, "pow");
-
+    log_push_cclosure("lua_pushCclosure", errorfb.to_pointer(), 0);
+    set_global(lua, &globals, "_TRIGMODE", "deg")?;
+    install_legacy_compat(lua, &globals, context.clone())?;
+    if let (Ok(settagmethod), Some(pow_fn)) = (
+        globals.get::<_, Function>("settagmethod"),
+        globals
+            .get::<_, Table>("math")
+            .ok()
+            .and_then(|math| math.get::<_, Function>("pow").ok())
+            .or_else(|| {
+                lua.create_function(|_, (a, b): (f64, f64)| Ok(Value::Number(a.powf(b))))
+                    .ok()
+            }),
+    ) {
+        log_push_cclosure("lua_pushCclosure", pow_fn.to_pointer(), 0);
+        log_push_number("0");
+        let _ = settagmethod.call::<_, Value>((-1, "pow", pow_fn));
+    }
     install_pi_constant(lua, &globals)?;
     // Retail triggers the first GC after PI is bound.
     lua.gc_collect()?;
@@ -56,19 +73,15 @@ pub(crate) fn install_globals(
     log_event(LuaEvent::CollectGarbage {});
     // Retail pushes default camera/control handlers before rebinding type; log stub pushes to align.
     let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-    log_push_cclosure("lua_pushCclosure", default_cam_change.to_pointer());
+    log_push_cclosure("lua_pushCclosure", default_cam_change.to_pointer(), 0);
     let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     for _ in 0..3 {
-        log_push_cclosure("lua_pushCclosure", default_control.to_pointer());
+        log_push_cclosure("lua_pushCclosure", default_control.to_pointer(), 0);
     }
 
     install_basic_functions(lua, &globals, context.clone())?;
 
     install_stubbed_tables(lua, &globals, context.clone())?;
-
-    // Defer legacy compat hooks until after core globals/consts are in place to better mirror
-    // retail boot ordering (type/PI/system bound before setfallback/tag helpers).
-    install_legacy_compat(lua, &globals, context.clone())?;
 
     let root = data_root.to_path_buf();
     let verbose = context.borrow().verbose();
@@ -119,15 +132,22 @@ fn install_basic_functions(
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
         // Retail saves the stock type and wraps it so userdata can report richer tags.
         let type_ptr = type_fn.to_pointer();
+        let type_handle = ptr_to_handle(type_ptr);
         log_event(LuaEvent::GetGlobal {
             name: "type".to_string(),
-            handle: format!("0x{:08x}", type_ptr as usize),
+            handle: type_handle.clone(),
             label: "global:type".to_string(),
             handle_label: Some("global:type".to_string()),
             count: 1,
         });
         let saved_type = lua.create_registry_value(type_fn)?;
-        log_store_ref(1, 1, Some("global:type".to_string()));
+        log_store_ref(
+            1,
+            1,
+            Some(type_handle),
+            Some("global:type".to_string()),
+            Some("global:type".to_string()),
+        );
         let type_key = saved_type;
         let type_override = lua.create_function(move |lua_ctx, value: Value| {
             let original: Function = lua_ctx.registry_value(&type_key)?;
@@ -312,107 +332,193 @@ fn install_system_table(
     manny.set("is_holding", Value::Nil)?;
 
     let system = lua.create_table()?;
+    let system_handle = ptr_to_handle(system.to_pointer());
+    let system_handle_label = Some("global:system".to_string());
+    let system_fields = value_fields_from_lua(&Value::Table(system.clone()));
+    log_create_table(
+        system_handle.clone(),
+        system_handle_label.clone(),
+        system_fields,
+    );
+    set_global(lua, globals, "system", system.clone())?;
+
     system.set("setTable", lua.create_table()?)?;
     system.set("currentActor", manny)?;
-    set_global(lua, globals, "system", system)?;
-    log_store_ref(1, 0, Some("global:system".to_string()));
+    let controls = lua.create_table()?;
+    let controls_handle = ptr_to_handle(controls.to_pointer());
+    let controls_fields = value_fields_from_lua(&Value::Table(controls.clone()));
+    log_create_table(
+        controls_handle.clone(),
+        Some("system.controls".to_string()),
+        controls_fields,
+    );
+    system.set("controls", controls.clone())?;
+    let key_preview = value_to_upvalue_preview(&Value::String(lua.create_string("controls")?));
+    let value_preview = value_to_upvalue_preview(&Value::Table(controls));
+    log_set_table_entry(
+        system_handle,
+        system_handle_label,
+        key_preview,
+        value_preview,
+        None,
+    );
     Ok(())
 }
 
 fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
     // Legacy Lua 3 I/O shims expected by retail boot scripts.
+    const IO_HANDLE_TAG: i32 = -16;
+    const IO_FALLBACK_TAG: i32 = -17;
+
+    register_tag(IO_HANDLE_TAG, Some("io_handle".to_string()));
+    register_tag(IO_FALLBACK_TAG, Some("io_fallback".to_string()));
+
     let io_handle = Rc::new(RefCell::new(None::<String>));
     let current_input = io_handle.clone();
-    set_global(
+    let readfrom = lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
+        let mut handle_ref = current_input.borrow_mut();
+        if let Some(Value::String(path)) = args.first() {
+            *handle_ref = Some(path.to_str().unwrap_or("<input>").to_string());
+            return Ok(Value::String(path.clone()));
+        }
+        *handle_ref = None;
+        Ok(Value::Nil)
+    })?;
+
+    let current_output = io_handle.clone();
+    let writeto = lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
+        let mut handle_ref = current_output.borrow_mut();
+        if let Some(Value::String(path)) = args.first() {
+            *handle_ref = Some(path.to_str().unwrap_or("<output>").to_string());
+            return Ok(Value::String(path.clone()));
+        }
+        if let Some(Value::String(handle)) = args.first() {
+            *handle_ref = Some(handle.to_str().unwrap_or("<output>").to_string());
+            return Ok(Value::String(handle.clone()));
+        }
+        *handle_ref = None;
+        Ok(Value::Nil)
+    })?;
+
+    let append_state = io_handle.clone();
+    let appendto = lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
+        let mut handle_ref = append_state.borrow_mut();
+        if let Some(Value::String(path)) = args.first() {
+            *handle_ref = Some(path.to_str().unwrap_or("<append>").to_string());
+            return Ok(Value::String(path.clone()));
+        }
+        Ok(Value::Nil)
+    })?;
+
+    let read_state = io_handle.clone();
+    let read = lua.create_function(move |_, args: Variadic<Value>| {
+        let _handle = args
+            .first()
+            .and_then(value_to_string)
+            .or_else(|| read_state.borrow().clone());
+        Ok(Value::Nil)
+    })?;
+
+    let write_state = io_handle.clone();
+    let write = lua.create_function(move |_, args: Variadic<Value>| {
+        let handle = args
+            .first()
+            .and_then(value_to_string)
+            .or_else(|| write_state.borrow().clone())
+            .unwrap_or_else(|| "<stdout>".to_string());
+        let text: Vec<String> = args.iter().skip(1).filter_map(value_to_string).collect();
+        if !text.is_empty() {
+            eprintln!("[lua][write] {handle}: {}", text.join(""));
+        }
+        Ok(())
+    })?;
+
+    let upvalue_values: Vec<Value> = vec![
+        Value::Integer(IO_HANDLE_TAG as i64),
+        Value::Integer(IO_FALLBACK_TAG as i64),
+    ];
+    let upvalue_previews: Vec<UpvaluePreview> = upvalue_values
+        .iter()
+        .map(value_to_upvalue_preview)
+        .collect();
+
+    bind_io_function(
         lua,
         globals,
         "readfrom",
-        lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
-            let mut handle_ref = current_input.borrow_mut();
-            if let Some(Value::String(path)) = args.first() {
-                *handle_ref = Some(path.to_str().unwrap_or("<input>").to_string());
-                return Ok(Value::String(path.clone()));
-            }
-            *handle_ref = None;
-            Ok(Value::Nil)
-        })?,
+        readfrom,
+        &upvalue_values,
+        &upvalue_previews,
     )?;
-
-    let current_output = io_handle.clone();
-    set_global(
+    bind_io_function(
         lua,
         globals,
         "writeto",
-        lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
-            let mut handle_ref = current_output.borrow_mut();
-            if let Some(Value::String(path)) = args.first() {
-                *handle_ref = Some(path.to_str().unwrap_or("<output>").to_string());
-                return Ok(Value::String(path.clone()));
-            }
-            if let Some(Value::String(handle)) = args.first() {
-                *handle_ref = Some(handle.to_str().unwrap_or("<output>").to_string());
-                return Ok(Value::String(handle.clone()));
-            }
-            *handle_ref = None;
-            Ok(Value::Nil)
-        })?,
+        writeto,
+        &upvalue_values,
+        &upvalue_previews,
     )?;
-
-    let append_state = io_handle.clone();
-    set_global(
+    bind_io_function(
         lua,
         globals,
         "appendto",
-        lua.create_function(move |_lua_ctx, args: Variadic<Value>| {
-            let mut handle_ref = append_state.borrow_mut();
-            if let Some(Value::String(path)) = args.first() {
-                *handle_ref = Some(path.to_str().unwrap_or("<append>").to_string());
-                return Ok(Value::String(path.clone()));
-            }
-            Ok(Value::Nil)
-        })?,
+        appendto,
+        &upvalue_values,
+        &upvalue_previews,
     )?;
-
-    let read_state = io_handle.clone();
-    set_global(
+    bind_io_function(
         lua,
         globals,
         "read",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let _handle = args
-                .first()
-                .and_then(value_to_string)
-                .or_else(|| read_state.borrow().clone());
-            Ok(Value::Nil)
-        })?,
+        read,
+        &upvalue_values,
+        &upvalue_previews,
     )?;
-
-    let write_state = io_handle.clone();
-    set_global(
+    bind_io_function(
         lua,
         globals,
         "write",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let handle = args
-                .first()
-                .and_then(value_to_string)
-                .or_else(|| write_state.borrow().clone())
-                .unwrap_or_else(|| "<stdout>".to_string());
-            let text: Vec<String> = args.iter().skip(1).filter_map(value_to_string).collect();
-            if !text.is_empty() {
-                eprintln!("[lua][write] {handle}: {}", text.join(""));
-            }
-            Ok(())
-        })?,
+        write,
+        &upvalue_values,
+        &upvalue_previews,
     )?;
 
-    set_global(lua, globals, "_INPUT", "stdin")?;
-    set_global(lua, globals, "_OUTPUT", "stdout")?;
-    set_global(lua, globals, "_STDIN", "stdin")?;
-    set_global(lua, globals, "_STDOUT", "stdout")?;
-    set_global(lua, globals, "_STDERR", "stderr")?;
+    for name in ["_INPUT", "_OUTPUT", "_STDIN", "_STDOUT", "_STDERR"] {
+        let fabricated = next_fabricated_handle();
+        let userdata = lua.create_userdata(TaggedHandle::new(IO_HANDLE_TAG))?;
+        let handle = ptr_to_handle(userdata.to_pointer());
+        let push_seq = log_push_usertag(fabricated.raw, IO_HANDLE_TAG, handle);
+        let meta = RegisteredGlobalMeta {
+            push: Some(RegisteredPush::log_only(push_seq)),
+            ..Default::default()
+        };
+        with_registered_global_hint(meta, || set_global(lua, globals, name, userdata))?;
+    }
 
     Ok(())
+}
+
+fn bind_io_function<'lua>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    name: &str,
+    func: Function<'lua>,
+    upvalue_values: &[Value<'lua>],
+    upvalue_previews: &[UpvaluePreview],
+) -> LuaResult<()> {
+    let value_override = {
+        let mut override_fields = ValueFields::default();
+        override_fields.value_type = Some(ValueType::Cfunction);
+        override_fields.tag = Some(-5);
+        override_fields
+    };
+    let meta = RegisteredGlobalMeta {
+        upvalues: upvalue_values.len() as i32,
+        upvalue_previews: Some(upvalue_previews.to_vec()),
+        value_overrides: Some(value_override),
+        push: None,
+    };
+    with_registered_global_hint(meta, || set_global(lua, globals, name, func))
 }
 
 fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {

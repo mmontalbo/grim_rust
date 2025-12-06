@@ -1,9 +1,101 @@
-use std::ptr;
+use std::cell::RefCell;
 
-use grim_telemetry_common::{ValueFields, ValueType};
-use mlua::{IntoLua, Lua, Result as LuaResult, Table, Value};
+use grim_telemetry_common::{OriginFields, SeqRange, UpvaluePreview, ValueFields, ValueType};
+use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 
-use crate::lua_host::telemetry::{log_lua_setglobal, log_push_cclosure};
+use crate::lua_host::telemetry::{
+    log_lua_setglobal, log_push_cclosure, log_push_from_preview, log_push_nil, log_push_number,
+    log_push_object, log_push_string, log_registered_constant, log_registered_global,
+    normalize_handle, origin_fields_for_ptr, ptr_to_handle,
+};
+
+#[derive(Clone)]
+pub(crate) struct TaggedHandle {
+    pub tag: i32,
+}
+
+impl TaggedHandle {
+    pub(crate) fn new(tag: i32) -> Self {
+        Self { tag }
+    }
+}
+
+impl UserData for TaggedHandle {}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RegisteredPush {
+    pub log_seq: u64,
+    pub push_seq: Option<u64>,
+}
+
+impl RegisteredPush {
+    pub(crate) fn log_only(log_seq: u64) -> Self {
+        Self {
+            log_seq,
+            push_seq: None,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RegisteredGlobalMeta {
+    pub upvalues: i32,
+    pub upvalue_previews: Option<Vec<UpvaluePreview>>,
+    pub value_overrides: Option<ValueFields>,
+    pub push: Option<RegisteredPush>,
+}
+
+thread_local! {
+    static REGISTERED_GLOBAL_HINT: RefCell<Option<RegisteredGlobalMeta>> = RefCell::new(None);
+}
+
+pub(crate) fn with_registered_global_hint<R>(
+    meta: RegisteredGlobalMeta,
+    f: impl FnOnce() -> R,
+) -> R {
+    REGISTERED_GLOBAL_HINT.with(|cell| {
+        let previous = cell.replace(Some(meta));
+        let result = f();
+        cell.replace(previous);
+        result
+    })
+}
+
+fn take_registered_global_hint() -> Option<RegisteredGlobalMeta> {
+    REGISTERED_GLOBAL_HINT.with(|cell| cell.replace(None))
+}
+
+fn merge_value_fields(target: &mut ValueFields, overrides: &ValueFields) {
+    if overrides.value_type.is_some() {
+        target.value_type = overrides.value_type.clone();
+    }
+    if overrides.value.is_some() {
+        target.value = overrides.value.clone();
+    }
+    if overrides.value_len.is_some() {
+        target.value_len = overrides.value_len;
+    }
+    if overrides.value_preview.is_some() {
+        target.value_preview = overrides.value_preview.clone();
+    }
+    if overrides.tag.is_some() {
+        target.tag = overrides.tag;
+    }
+    if overrides.func.is_some() {
+        target.func = overrides.func.clone();
+    }
+}
+
+pub(super) fn handle_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Function(func) => Some(ptr_to_handle(func.to_pointer())),
+        Value::Table(table) => Some(ptr_to_handle(table.to_pointer())),
+        Value::UserData(data) => Some(ptr_to_handle(data.to_pointer())),
+        Value::String(text) => Some(ptr_to_handle(text.to_pointer())),
+        Value::Thread(thread) => Some(ptr_to_handle(thread.to_pointer())),
+        _ => None,
+    }
+}
 
 pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     lua: &'lua Lua,
@@ -12,15 +104,117 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     value: T,
 ) -> LuaResult<()> {
     let value = value.into_lua(lua)?;
-    let value_fields = value_fields_from_lua(&value);
+    let mut value_fields = value_fields_from_lua(&value);
+    let hint = take_registered_global_hint();
+    if let Some(overrides) = hint.as_ref().and_then(|meta| meta.value_overrides.clone()) {
+        merge_value_fields(&mut value_fields, &overrides);
+    }
+    let upvalues = hint.as_ref().map(|meta| meta.upvalues).unwrap_or(0);
+    let upvalue_previews = hint.as_ref().and_then(|meta| meta.upvalue_previews.clone());
+    let hint_push = hint.as_ref().and_then(|meta| meta.push);
+    let mut func_push_seq = hint_push.and_then(|push| push.push_seq);
+    let mut seqs: Vec<u64> = Vec::new();
+
+    if let Some(push) = hint_push {
+        seqs.push(push.log_seq);
+    }
+
+    if matches!(value, Value::Function(_)) {
+        if let Some(previews) = upvalue_previews.as_ref() {
+            for preview in previews {
+                if let Some(seq) = log_push_from_preview(preview) {
+                    seqs.push(seq);
+                }
+            }
+        }
+    }
+
+    let handle_label = format!("global:{name}");
+    let handle = normalize_handle(&handle_label, handle_from_value(&value));
+
+    let mut origin = OriginFields::default();
+    match &value {
+        Value::Function(func) => {
+            origin = origin_fields_for_ptr(func.to_pointer());
+            if func_push_seq.is_none() {
+                let push = log_push_cclosure("lua_pushCclosure", func.to_pointer(), upvalues);
+                func_push_seq = Some(push.push_seq);
+                seqs.push(push.log_seq);
+            }
+        }
+        Value::Nil => {
+            seqs.push(log_push_nil());
+        }
+        Value::Integer(num) => {
+            seqs.push(log_push_number(&format_number_for_log(*num as f64)));
+        }
+        Value::Number(num) => {
+            seqs.push(log_push_number(&format_number_for_log(*num)));
+        }
+        Value::String(text) => {
+            let bytes = text.as_bytes();
+            let rendered = String::from_utf8_lossy(bytes).into_owned();
+            let preview = truncate_for_log(&rendered, 80);
+            seqs.push(log_push_string(bytes.len(), preview));
+        }
+        Value::Table(_) => {
+            let push_seq = log_push_object(
+                handle.clone(),
+                Some(handle_label.clone()),
+                value_fields.clone(),
+            );
+            seqs.push(push_seq);
+        }
+        _ => {}
+    }
+
+    let bind_seq = log_lua_setglobal(
+        name,
+        handle.clone(),
+        Some(handle_label.clone()),
+        value_fields.clone(),
+        origin.clone(),
+    );
+    seqs.push(bind_seq);
+    let seq_range = SeqRange::from_seqs(seqs.iter().copied());
 
     if let Value::Function(ref func) = value {
-        let ptr = func.to_pointer();
-        log_push_cclosure("lua_pushCclosure", ptr);
-        log_lua_setglobal(name, ptr, value_fields);
+        let func_handle = ptr_to_handle(func.to_pointer());
+        let push_seq =
+            func_push_seq.expect("cclosure push should be recorded for function globals");
+        log_registered_global(
+            name,
+            handle,
+            Some(handle_label),
+            push_seq,
+            func_handle,
+            upvalues,
+            upvalue_previews,
+            value_fields,
+            seq_range,
+            origin,
+        );
     } else {
-        log_lua_setglobal(name, ptr::null(), value_fields);
+        log_registered_constant(
+            name,
+            handle,
+            Some(handle_label),
+            value_fields,
+            seq_range,
+            origin,
+        );
     }
+
+    globals.set(name, value)
+}
+
+pub(super) fn set_global_silent<'lua, T: IntoLua<'lua>>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    name: &str,
+    value: T,
+) -> LuaResult<()> {
+    let value = value.into_lua(lua)?;
     globals.set(name, value)
 }
 
@@ -68,7 +262,7 @@ pub(crate) fn value_to_string(value: &Value) -> Option<String> {
     }
 }
 
-fn value_fields_from_lua(value: &Value) -> ValueFields {
+pub(crate) fn value_fields_from_lua(value: &Value) -> ValueFields {
     let mut fields = ValueFields::default();
     match value {
         Value::Nil => {
@@ -93,22 +287,41 @@ fn value_fields_from_lua(value: &Value) -> ValueFields {
             fields.value_len = Some(bytes.len());
             fields.value_preview = Some(truncate_for_log(&rendered, 80));
         }
-        Value::Table(_) => {
+        Value::Table(_table) => {
             fields.value_type = Some(ValueType::Table);
         }
         Value::Function(func) => {
-            fields.value_type = Some(ValueType::Cfunction);
+            let info = func.info();
+            let what = info.what.as_ref();
+            fields.value_type = Some(match what {
+                "C" | "Rust" => ValueType::Cfunction,
+                _ => ValueType::Function,
+            });
             let ptr = func.to_pointer();
             fields.func = Some(format!("0x{:08x}", ptr as usize));
         }
-        Value::UserData(_) => {
+        Value::UserData(data) => {
             fields.value_type = Some(ValueType::Userdata);
+            if let Ok(handle) = data.borrow::<TaggedHandle>() {
+                fields.tag = Some(handle.tag);
+            }
         }
         Value::Thread(_) | Value::LightUserData(_) | Value::Error(_) => {
             fields.value_type = Some(ValueType::Unknown);
         }
     }
     fields
+}
+
+pub(crate) fn value_to_upvalue_preview(value: &Value) -> UpvaluePreview {
+    let fields = value_fields_from_lua(value);
+    UpvaluePreview {
+        kind: fields.value_type.unwrap_or(ValueType::Unknown),
+        value: fields.value,
+        value_len: fields.value_len,
+        preview: fields.value_preview,
+        tag: fields.tag,
+    }
 }
 
 fn format_number_for_log(value: f64) -> String {
