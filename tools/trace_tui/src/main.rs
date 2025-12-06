@@ -57,7 +57,6 @@ impl From<CliStreamFilter> for StreamFilter {
     }
 }
 
-
 struct Field {
     key: String,
     value: String,
@@ -301,10 +300,7 @@ fn main() -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| label_from_path(single, "trace"));
             let entries = load_entries(single)?;
-            run_single(
-                &mut terminal,
-                SingleApp::new(title, entries, stream_filter),
-            )
+            run_single(&mut terminal, SingleApp::new(title, entries, stream_filter))
         }
         [left, right] => {
             let left_title = args

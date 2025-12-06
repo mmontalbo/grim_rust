@@ -1,0 +1,795 @@
+use crate::{
+    logging::{
+        log_line, LuaEvent, LuaSemanticEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
+    },
+    lua_api::{
+        call_real_lua_getcfunction, call_real_lua_getnumber, call_real_lua_getobjname,
+        call_real_lua_getstring, call_real_lua_iscfunction, call_real_lua_isfunction,
+        call_real_lua_isnumber, call_real_lua_isstring, call_real_lua_istable,
+        call_real_lua_isuserdata, call_real_lua_tag, LuaObject,
+    },
+    symbol_map::lookup_symbol_from_map,
+};
+use libc::{c_char, c_int, Dl_info};
+use std::{
+    collections::{HashMap, VecDeque},
+    ffi::{c_void, CStr},
+    mem::MaybeUninit,
+    ptr,
+    sync::{Mutex, OnceLock},
+};
+
+mod calls;
+mod globals;
+mod push;
+mod refs;
+mod state;
+mod tables;
+mod tags;
+
+pub(crate) use calls::{
+    trace_lua_call, trace_lua_callfunction, trace_lua_collectgarbage, trace_lua_dobuffer,
+    trace_lua_dofile, trace_lua_dostring, trace_lua_error,
+};
+pub(crate) use globals::{
+    trace_lua_getglobal, trace_lua_rawgetglobal, trace_lua_rawsetglobal, trace_lua_setglobal,
+};
+pub(crate) use push::{
+    trace_lua_push_closure, trace_lua_pushlstring, trace_lua_pushnil, trace_lua_pushnumber,
+    trace_lua_pushobject, trace_lua_pushstring, trace_lua_pushusertag, trace_lua_pushvalue,
+};
+pub(crate) use refs::{trace_lua_getref, trace_lua_ref, trace_lua_unref};
+pub(crate) use state::{trace_lua_newstate, trace_lua_newthread, trace_lua_open};
+pub(crate) use tables::{
+    trace_lua_createtable, trace_lua_gettable, trace_lua_rawgettable, trace_lua_rawsettable,
+    trace_lua_settable,
+};
+pub(crate) use tags::{
+    trace_lua_copytagmethods, trace_lua_newtag, trace_lua_setfallback, trace_lua_settag,
+    trace_lua_settagmethod,
+};
+
+const PUSH_RING_CAPACITY: usize = 16;
+const MAX_PENDING_REGISTERED_GLOBALS: usize = 8;
+static CALLFUNCTION_TRACKER: OnceLock<Mutex<CallfunctionTracker>> = OnceLock::new();
+static GLOBAL_ACCESS_TRACKER: OnceLock<Mutex<GlobalAccessTracker>> = OnceLock::new();
+static HANDLE_LABELS: OnceLock<Mutex<HandleLabelTracker>> = OnceLock::new();
+static PUSH_EVENT_TRACKER: OnceLock<Mutex<PushEventTracker>> = OnceLock::new();
+static REGISTERED_GLOBAL_CANDIDATES: OnceLock<Mutex<RegisteredGlobalTracker>> = OnceLock::new();
+
+extern "C" {
+    fn backtrace(buffer: *mut *mut c_void, size: c_int) -> c_int;
+}
+
+fn forward_int_result(label: &str, result: Option<c_int>) -> c_int {
+    match result {
+        Some(value) => value,
+        None => {
+            log_line(&format!(
+                "{} symbol missing; returning failure to keep engine alive",
+                label
+            ));
+            -1
+        }
+    }
+}
+
+fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
+    if let Ok(mut tracker) = push_event_tracker().lock() {
+        tracker.record_push(log_seq, preview, handle);
+    } else {
+        log_line("push event tracker mutex poisoned; skipping push capture");
+    }
+}
+
+fn record_non_push_event() {
+    if let Ok(mut tracker) = push_event_tracker().lock() {
+        tracker.record_non_push();
+    } else {
+        log_line("push event tracker mutex poisoned; skipping activity record");
+    }
+}
+
+fn take_recent_pushes(count: usize) -> Option<Vec<TrackedPush>> {
+    match push_event_tracker().lock() {
+        Ok(mut tracker) => {
+            let pushes = tracker.snapshot_recent(count);
+            tracker.clear();
+            pushes
+        }
+        Err(_) => {
+            log_line("push event tracker mutex poisoned; skipping push capture");
+            None
+        }
+    }
+}
+
+fn emit_set_table_entry(
+    table_handle: Option<LuaObject>,
+    pushes: Option<Vec<TrackedPush>>,
+    caller: OriginFields,
+    note: Option<String>,
+) {
+    let pushes = match pushes {
+        Some(pushes) if pushes.len() >= 2 => pushes,
+        _ => return,
+    };
+    let handle = match table_handle.or_else(|| table_handle_from_pushes(&pushes)) {
+        Some(handle) => handle,
+        None => return,
+    };
+    let table_handle_hex = format!("0x{handle:08x}");
+    let table_handle_label = handle_label_for(handle);
+    let table_fields = describe_lua_value(handle)
+        .map(|value| value_fields_from_details(&value))
+        .or_else(|| {
+            let mut fields = ValueFields::default();
+            fields.value_type = Some(ValueType::Table);
+            Some(fields)
+        });
+    let semantic_note = note.clone();
+    let semantic_caller = caller.clone();
+    let key_push = &pushes[pushes.len() - 2];
+    let value_push = pushes.last().unwrap();
+    let value_handle = value_push
+        .handle
+        .map(|value_handle| format!("0x{value_handle:08x}"));
+    let value_handle_label = value_push
+        .handle
+        .and_then(|value_handle| handle_label_for(value_handle));
+    let value_fields = value_push
+        .handle
+        .and_then(describe_lua_value)
+        .map(|details| value_fields_from_details(&details));
+    log_semantic_event(LuaSemanticEvent::SemanticSetTableEntry {
+        table_handle: table_handle_hex,
+        table_handle_label,
+        table_fields,
+        key: key_push.preview.clone(),
+        value: value_push.preview.clone(),
+        value_handle,
+        value_handle_label,
+        value_fields,
+        note: semantic_note,
+        caller: semantic_caller,
+    });
+}
+
+fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
+    pushes
+        .iter()
+        .filter(|push| matches!(push.preview.kind, ValueType::Table) && push.handle.is_some())
+        .min_by_key(|push| push.log_seq)
+        .and_then(|push| push.handle)
+}
+
+fn emit_registered_global(
+    name: &str,
+    handle: LuaObject,
+    handle_label: String,
+    upvalues: c_int,
+    values: ValueFields,
+    origin: Option<ClosureOrigin>,
+) {
+    let origin_fields = origin_fields(origin.as_ref());
+    log_semantic_event(LuaSemanticEvent::SemanticBindGlobal {
+        name: name.to_string(),
+        handle: format!("0x{handle:08x}"),
+        handle_label: Some(handle_label.clone()),
+        label: Some(handle_label.clone()),
+        values: values.clone(),
+        upvalues: Some(upvalues),
+        origin: origin_fields.clone(),
+    });
+}
+
+fn emit_registered_constant(
+    name: &str,
+    handle: LuaObject,
+    handle_label: String,
+    values: ValueFields,
+    origin: Option<ClosureOrigin>,
+) {
+    let origin_fields = origin_fields(origin.as_ref());
+    log_semantic_event(LuaSemanticEvent::SemanticBindConstant {
+        name: name.to_string(),
+        handle: format!("0x{handle:08x}"),
+        handle_label: Some(handle_label.clone()),
+        label: Some(handle_label.clone()),
+        values: values.clone(),
+        origin: origin_fields.clone(),
+    });
+}
+
+fn remember_registered_global_candidate(
+    func_addr: usize,
+    upvalues: c_int,
+    origin: Option<ClosureOrigin>,
+) {
+    match registered_global_tracker().lock() {
+        Ok(mut tracker) => {
+            tracker.remember(PendingRegisteredGlobal {
+                func_addr,
+                upvalues,
+                origin,
+            });
+        }
+        Err(_) => {
+            log_line("registered global tracker mutex poisoned; dropping candidate");
+        }
+    }
+}
+
+fn take_registered_global_candidate(func_addr: usize) -> Option<PendingRegisteredGlobal> {
+    match registered_global_tracker().lock() {
+        Ok(mut tracker) => tracker.take(func_addr),
+        Err(_) => {
+            log_line("registered global tracker mutex poisoned; skipping candidate lookup");
+            None
+        }
+    }
+}
+fn push_event_tracker() -> &'static Mutex<PushEventTracker> {
+    PUSH_EVENT_TRACKER.get_or_init(|| Mutex::new(PushEventTracker::new(PUSH_RING_CAPACITY)))
+}
+
+fn registered_global_tracker() -> &'static Mutex<RegisteredGlobalTracker> {
+    REGISTERED_GLOBAL_CANDIDATES
+        .get_or_init(|| Mutex::new(RegisteredGlobalTracker::new(MAX_PENDING_REGISTERED_GLOBALS)))
+}
+
+fn format_number_for_log(value: f64) -> String {
+    if (value.fract() - 0.0).abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value}")
+    }
+}
+
+fn truncate_for_log(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+    let mut truncated = text[..max_len].to_string();
+    truncated.push_str("...");
+    truncated
+}
+
+fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
+    if handle == 0 {
+        return Some(ValueDetails::Nil);
+    }
+    let tag = call_real_lua_tag(handle);
+    if call_real_lua_isnumber(handle) {
+        if let Some(value) = call_real_lua_getnumber(handle) {
+            return Some(ValueDetails::Number(value));
+        }
+    }
+    if call_real_lua_isstring(handle) {
+        if let Some(value) = call_real_lua_getstring(handle) {
+            return Some(ValueDetails::String(value));
+        }
+    }
+    if call_real_lua_istable(handle) {
+        return Some(ValueDetails::Table { tag });
+    }
+    if call_real_lua_iscfunction(handle) {
+        let func = call_real_lua_getcfunction(handle).map(|f| f as *const c_void as usize);
+        return Some(ValueDetails::CFunction { tag, func });
+    }
+    if call_real_lua_isfunction(handle) {
+        return Some(ValueDetails::Function { tag });
+    }
+    if call_real_lua_isuserdata(handle) {
+        return Some(ValueDetails::Userdata { tag });
+    }
+    Some(ValueDetails::Unknown { tag })
+}
+
+fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
+    let mut fields = ValueFields::default();
+    match value {
+        ValueDetails::Number(value) => {
+            fields.value_type = Some(ValueType::Number);
+            fields.value = Some(format_number_for_log(*value));
+        }
+        ValueDetails::String(text) => {
+            fields.value_type = Some(ValueType::String);
+            fields.value_len = Some(text.len());
+            fields.value_preview = Some(truncate_for_log(text, 80));
+        }
+        ValueDetails::Nil => {
+            fields.value_type = Some(ValueType::Nil);
+        }
+        ValueDetails::Table { tag } => {
+            fields.value_type = Some(ValueType::Table);
+            fields.tag = *tag;
+        }
+        ValueDetails::Function { tag } => {
+            fields.value_type = Some(ValueType::Function);
+            fields.tag = *tag;
+        }
+        ValueDetails::CFunction { tag, func } => {
+            fields.value_type = Some(ValueType::Cfunction);
+            if let Some(addr) = func {
+                fields.func = Some(format!("0x{addr:08x}"));
+            }
+            fields.tag = *tag;
+        }
+        ValueDetails::Userdata { tag } => {
+            fields.value_type = Some(ValueType::Userdata);
+            fields.tag = *tag;
+        }
+        ValueDetails::Unknown { tag } => {
+            fields.value_type = Some(ValueType::Unknown);
+            fields.tag = *tag;
+        }
+    }
+    fields
+}
+
+fn upvalue_preview_from_details(value: &ValueDetails) -> UpvaluePreview {
+    match value {
+        ValueDetails::Number(value) => UpvaluePreview {
+            kind: ValueType::Number,
+            value: Some(format_number_for_log(*value)),
+            value_len: None,
+            preview: None,
+            tag: None,
+        },
+        ValueDetails::String(text) => UpvaluePreview {
+            kind: ValueType::String,
+            value: None,
+            value_len: Some(text.len()),
+            preview: Some(truncate_for_log(text, 80)),
+            tag: None,
+        },
+        ValueDetails::Nil => UpvaluePreview {
+            kind: ValueType::Nil,
+            value: None,
+            value_len: None,
+            preview: None,
+            tag: None,
+        },
+        ValueDetails::Table { tag } => UpvaluePreview {
+            kind: ValueType::Table,
+            value: None,
+            value_len: None,
+            preview: None,
+            tag: *tag,
+        },
+        ValueDetails::Function { tag } => UpvaluePreview {
+            kind: ValueType::Function,
+            value: None,
+            value_len: None,
+            preview: None,
+            tag: *tag,
+        },
+        ValueDetails::CFunction { tag, .. } => UpvaluePreview {
+            kind: ValueType::Cfunction,
+            value: None,
+            value_len: None,
+            preview: None,
+            tag: *tag,
+        },
+        ValueDetails::Userdata { tag, .. } => UpvaluePreview {
+            kind: ValueType::Userdata,
+            value: None,
+            value_len: None,
+            preview: None,
+            tag: *tag,
+        },
+        ValueDetails::Unknown { tag } => UpvaluePreview {
+            kind: ValueType::Unknown,
+            value: None,
+            value_len: None,
+            preview: None,
+            tag: *tag,
+        },
+    }
+}
+
+enum ValueDetails {
+    Number(f64),
+    String(String),
+    Nil,
+    Table {
+        tag: Option<c_int>,
+    },
+    Function {
+        tag: Option<c_int>,
+    },
+    CFunction {
+        tag: Option<c_int>,
+        func: Option<usize>,
+    },
+    Userdata {
+        tag: Option<c_int>,
+    },
+    Unknown {
+        tag: Option<c_int>,
+    },
+}
+
+fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
+    let mut fields = OriginFields::default();
+    if let Some(origin) = origin {
+        fields.origin = Some(format!("0x{addr:08x}", addr = origin.func_addr));
+        if let Some(module) = &origin.module {
+            fields.module = Some(module.clone());
+        }
+        let mut has_symbol = false;
+        if let Some(symbol) = &origin.symbol {
+            has_symbol = true;
+            fields.symbol = Some(symbol.clone());
+        }
+        if let Some(map_symbol) = &origin.map_symbol {
+            if !has_symbol {
+                let mut value = map_symbol.name.clone();
+                if map_symbol.distance > 0 {
+                    value.push_str(&format!("+0x{delta:x}", delta = map_symbol.distance));
+                }
+                fields.symbol = Some(value);
+            }
+        }
+    }
+    fields
+}
+
+fn caller_origin_fields() -> OriginFields {
+    let mut frames: [*mut c_void; 32] = [ptr::null_mut(); 32];
+    let depth = unsafe { backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
+    if depth <= 0 {
+        return OriginFields::default();
+    }
+    OriginFields::default()
+}
+
+struct ClosureDetails {
+    module: Option<String>,
+    module_base: Option<usize>,
+    symbol: Option<String>,
+}
+
+fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
+    unsafe {
+        let mut info = MaybeUninit::<Dl_info>::zeroed();
+        if libc::dladdr(ptr, info.as_mut_ptr()) == 0 {
+            return ClosureDetails {
+                module: None,
+                module_base: None,
+                symbol: None,
+            };
+        }
+        let info = info.assume_init();
+        let module = cstr_opt(info.dli_fname);
+        let module_base = if info.dli_fbase.is_null() {
+            None
+        } else {
+            Some(info.dli_fbase as usize)
+        };
+        let symbol = cstr_opt(info.dli_sname);
+        ClosureDetails {
+            module,
+            module_base,
+            symbol,
+        }
+    }
+}
+
+unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    }
+}
+
+struct PushEventTracker {
+    pushes: VecDeque<TrackedPush>,
+    capacity: usize,
+}
+
+impl PushEventTracker {
+    fn new(capacity: usize) -> Self {
+        Self {
+            pushes: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn record_push(&mut self, log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
+        if self.pushes.len() == self.capacity {
+            self.pushes.pop_front();
+        }
+        self.pushes.push_back(TrackedPush {
+            log_seq,
+            preview,
+            handle,
+        });
+    }
+
+    fn record_non_push(&mut self) {
+        self.pushes.clear();
+    }
+
+    fn snapshot_recent(&self, count: usize) -> Option<Vec<TrackedPush>> {
+        if count == 0 {
+            return Some(Vec::new());
+        }
+        if self.pushes.len() < count {
+            return None;
+        }
+        let start = self.pushes.len() - count;
+        Some(self.pushes.iter().skip(start).cloned().collect())
+    }
+
+    fn clear(&mut self) {
+        self.pushes.clear();
+    }
+}
+
+#[derive(Clone)]
+struct TrackedPush {
+    log_seq: u64,
+    preview: UpvaluePreview,
+    handle: Option<LuaObject>,
+}
+
+struct PendingRegisteredGlobal {
+    func_addr: usize,
+    upvalues: c_int,
+    origin: Option<ClosureOrigin>,
+}
+
+struct RegisteredGlobalTracker {
+    pending: HashMap<usize, VecDeque<PendingRegisteredGlobal>>,
+    max_per_func: usize,
+}
+
+impl RegisteredGlobalTracker {
+    fn new(max_per_func: usize) -> Self {
+        Self {
+            pending: HashMap::new(),
+            max_per_func,
+        }
+    }
+
+    fn remember(&mut self, candidate: PendingRegisteredGlobal) {
+        let queue = self
+            .pending
+            .entry(candidate.func_addr)
+            .or_insert_with(VecDeque::new);
+        queue.push_back(candidate);
+        if queue.len() > self.max_per_func {
+            queue.pop_front();
+        }
+    }
+
+    fn take(&mut self, func_addr: usize) -> Option<PendingRegisteredGlobal> {
+        let candidate = self
+            .pending
+            .get_mut(&func_addr)
+            .and_then(|queue| queue.pop_back());
+        let should_remove = self
+            .pending
+            .get(&func_addr)
+            .map(|queue| queue.is_empty())
+            .unwrap_or(false);
+        if should_remove {
+            self.pending.remove(&func_addr);
+        }
+        candidate
+    }
+}
+
+struct CallfunctionTracker {
+    counts: HashMap<LuaObject, u64>,
+    labels: HashMap<LuaObject, String>,
+    origins: HashMap<LuaObject, ClosureOrigin>,
+}
+
+impl CallfunctionTracker {
+    fn new() -> Self {
+        Self {
+            counts: HashMap::new(),
+            labels: HashMap::new(),
+            origins: HashMap::new(),
+        }
+    }
+
+    fn remember_label<S: Into<String>>(&mut self, handle: LuaObject, label: S) {
+        self.labels.insert(handle, label.into());
+    }
+
+    fn remember_label_if_missing<S: Into<String>>(&mut self, handle: LuaObject, label: S) {
+        self.labels.entry(handle).or_insert_with(|| label.into());
+    }
+
+    fn remember_origin(&mut self, handle: LuaObject, origin: ClosureOrigin) {
+        self.origins.insert(handle, origin);
+    }
+
+    fn remember_origin_if_missing(&mut self, handle: LuaObject, origin: ClosureOrigin) {
+        self.origins.entry(handle).or_insert(origin);
+    }
+
+    fn label_for(&self, handle: LuaObject) -> Option<String> {
+        self.labels.get(&handle).cloned()
+    }
+
+    fn origin_for(&self, handle: LuaObject) -> Option<ClosureOrigin> {
+        self.origins.get(&handle).cloned()
+    }
+
+    fn record(&mut self, handle: LuaObject, label: &str) -> CallSample {
+        let count = {
+            let entry = self.counts.entry(handle).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        self.labels
+            .entry(handle)
+            .or_insert_with(|| label.to_string());
+        let origin = self.origin_for(handle);
+        CallSample { count, origin }
+    }
+}
+
+struct CallSample {
+    count: u64,
+    origin: Option<ClosureOrigin>,
+}
+
+struct GlobalAccessTracker {
+    counts: HashMap<String, u64>,
+}
+
+impl GlobalAccessTracker {
+    fn new() -> Self {
+        Self {
+            counts: HashMap::new(),
+        }
+    }
+
+    fn record(&mut self, label: &str) -> u64 {
+        let count = {
+            let entry = self.counts.entry(label.to_string()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        count
+    }
+}
+
+struct HandleLabelTracker {
+    labels: HashMap<LuaObject, String>,
+}
+
+impl HandleLabelTracker {
+    fn new() -> Self {
+        Self {
+            labels: HashMap::new(),
+        }
+    }
+
+    fn remember_label(&mut self, handle: LuaObject, label: String) {
+        self.labels.insert(handle, label);
+    }
+
+    fn remember_label_if_missing(&mut self, handle: LuaObject, label: String) {
+        self.labels.entry(handle).or_insert(label);
+    }
+
+    fn label_for(&self, handle: LuaObject) -> Option<String> {
+        self.labels.get(&handle).cloned()
+    }
+}
+
+fn resolve_lua_function_label(handle: LuaObject) -> String {
+    if let Ok(tracker) = callfunction_tracker().lock() {
+        if let Some(label) = tracker.label_for(handle) {
+            return label;
+        }
+    }
+
+    if let Some((kind, name)) = call_real_lua_getobjname(handle) {
+        match (kind.as_deref(), name.as_deref()) {
+            (Some(kind), Some(name)) if !kind.is_empty() => {
+                return format!("{kind}:{name}");
+            }
+            (_, Some(name)) => {
+                return format!("function:{name}");
+            }
+            (Some(kind), None) if !kind.is_empty() => {
+                return format!("{kind} handle=0x{handle:08x}");
+            }
+            _ => {}
+        }
+    }
+    format!("handle=0x{handle:08x}")
+}
+
+fn callfunction_tracker() -> &'static Mutex<CallfunctionTracker> {
+    CALLFUNCTION_TRACKER.get_or_init(|| Mutex::new(CallfunctionTracker::new()))
+}
+
+fn global_access_tracker() -> &'static Mutex<GlobalAccessTracker> {
+    GLOBAL_ACCESS_TRACKER.get_or_init(|| Mutex::new(GlobalAccessTracker::new()))
+}
+
+fn handle_label_tracker() -> &'static Mutex<HandleLabelTracker> {
+    HANDLE_LABELS.get_or_init(|| Mutex::new(HandleLabelTracker::new()))
+}
+
+fn remember_handle_label(handle: LuaObject, label: impl Into<String>) {
+    if handle == 0 {
+        return;
+    }
+    if let Ok(mut tracker) = handle_label_tracker().lock() {
+        tracker.remember_label(handle, label.into());
+    } else {
+        log_line("handle label tracker mutex poisoned; skipping label update");
+    }
+}
+
+fn remember_handle_label_if_missing(handle: LuaObject, label: impl Into<String>) {
+    if handle == 0 {
+        return;
+    }
+    if let Ok(mut tracker) = handle_label_tracker().lock() {
+        tracker.remember_label_if_missing(handle, label.into());
+    } else {
+        log_line("handle label tracker mutex poisoned; skipping label update");
+    }
+}
+
+fn handle_label_for(handle: LuaObject) -> Option<String> {
+    if handle == 0 {
+        return None;
+    }
+    handle_label_tracker()
+        .lock()
+        .ok()
+        .and_then(|tracker| tracker.label_for(handle))
+}
+
+#[derive(Clone)]
+struct ClosureOrigin {
+    func_addr: usize,
+    module: Option<String>,
+    symbol: Option<String>,
+    map_symbol: Option<MapSymbol>,
+}
+
+impl ClosureOrigin {
+    fn new(ptr: *const c_void) -> Self {
+        let details = describe_closure_target(ptr);
+        let map_symbol =
+            lookup_symbol_from_map(ptr as usize, details.module.as_deref(), details.module_base)
+                .map(|hit| MapSymbol {
+                    name: hit.name,
+                    distance: hit.distance,
+                });
+        Self {
+            func_addr: ptr as usize,
+            module: details.module,
+            symbol: details.symbol,
+            map_symbol,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MapSymbol {
+    name: String,
+    distance: usize,
+}
+
+fn log_semantic_event(event: LuaSemanticEvent) {
+    crate::logging::log_event(event);
+}
+
+fn log_event_with_seq(event: LuaEvent) -> u64 {
+    crate::logging::log_event_with_seq(event)
+}
