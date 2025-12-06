@@ -1,3 +1,7 @@
+//! Minimal logging facade that forwards events to `grim_telemetry_common`.
+//!
+//! The shim uses this to emit both line-based diagnostics and structured Lua
+//! events with consistent engine/VM identifiers.
 pub(crate) use grim_telemetry_common::{
     EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
 };

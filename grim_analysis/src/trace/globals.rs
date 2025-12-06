@@ -115,6 +115,8 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
             });
 
             if is_closure {
+                // If this closure was just pushed, consume the pending candidate to emit a
+                // SemanticBindGlobal (with upvalue count + origin) instead of a constant bind.
                 if let Some(func_addr) = func_ptr.map(|func| func as *const c_void as usize) {
                     if let Some(mut candidate) = take_registered_global_candidate(func_addr) {
                         let merged_origin = candidate.origin.take().or(origin.clone());

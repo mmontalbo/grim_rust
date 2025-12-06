@@ -1,3 +1,8 @@
+//! Cutscene and room telemetry wrappers for the retail Lua runtime.
+//!
+//! This module replaces a small set of engine-exposed Lua C functions to observe
+//! movie playback, skip requests, and post-intro room transitions. State is stored
+//! in `TelemetryHooks` and emitted both as structured events and as a JSONL file.
 use crate::{
     logging::{log_event, log_line, LuaEvent},
     lua_api::{
@@ -24,6 +29,10 @@ const TELEMETRY_PATH: &str = "mods/telemetry_events.jsonl";
 
 static TELEMETRY: OnceLock<Mutex<TelemetryHooks>> = OnceLock::new();
 
+// Cutscene telemetry wraps the engine-facing movie functions (start/poll/stop) to keep a
+// small state machine: track the active movie label/name, poll counts, skip requests,
+// per-movie timers, and post-intro room follow-ups. When wrappers run, the struct below
+// emits both structured telemetry events and a JSONL timeline for intro sequencing.
 struct TelemetryHooks {
     start_fullscreen_original: Option<LuaCFunction>,
     start_movie_original: Option<LuaCFunction>,
@@ -153,6 +162,8 @@ impl TelemetryHooks {
     }
 
     fn record_fullscreen_start(&mut self, movie_name: &str) {
+        // Treat overlapping starts as a replacement: end the prior movie, normalize the new
+        // label, reset counters, and emit intro timeline + start cutscene events.
         if self.active_movie_name.is_some() || self.active_movie_label.is_some() {
             self.end_active_movie(PlayingState::Known(false), Some(EndReason::Replaced));
         }
@@ -200,6 +211,8 @@ impl TelemetryHooks {
     }
 
     fn end_active_movie(&mut self, playing: PlayingState, reason: Option<EndReason>) {
+        // Close out the current movie: finalize skip state, flag post-intro tracking,
+        // emit end events with elapsed/poll counts, and clear active fields.
         if self.skip_requested {
             self.record_cutscene_skip_complete();
         }
@@ -636,6 +649,8 @@ fn format_number_arg(value: f64) -> String {
 }
 
 fn capture_playing_from_poll<F: FnOnce() -> Option<()>>(call_original: F) -> PlayingState {
+    // Poll wrappers mark capture active, let the original call run (which may push
+    // a boolean-ish value), then latch the pushed number/nil into POLL_CAPTURE_RESULT.
     POLL_CAPTURE_ACTIVE.with(|active| {
         POLL_CAPTURE_RESULT.with(|result| {
             let already_active = active.replace(true);
@@ -652,6 +667,8 @@ fn capture_playing_from_poll<F: FnOnce() -> Option<()>>(call_original: F) -> Pla
 }
 
 pub(crate) fn record_pushed_number(value: f64) {
+    // record_pushed_* are invoked from push hooks; when a poll is active they capture
+    // the effective playing flag for the surrounding call.
     POLL_CAPTURE_ACTIVE.with(|active| {
         if !active.get() {
             return;

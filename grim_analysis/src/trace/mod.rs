@@ -1,3 +1,9 @@
+//! Trace instrumentation for the Lua 3.1 C API.
+//! 
+//! Each `trace_lua_*` function mirrors the retail VM behavior while logging both
+//! raw events and higher-level semantics (push previews, table mutations, globals,
+//! references, and tag operations). Symbol resolution and value inspection are
+//! delegated to `lua_api`, and telemetry is emitted via `logging`.
 use crate::{
     logging::{
         log_line, LuaEvent, LuaSemanticEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
@@ -75,6 +81,9 @@ fn forward_int_result(label: &str, result: Option<c_int>) -> c_int {
 }
 
 fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
+    // We keep a tiny ring buffer of recent push events so table set operations can pair
+    // their key/value pushes with the destination table. Any non-push clears the ring
+    // to avoid crossing event boundaries.
     if let Ok(mut tracker) = push_event_tracker().lock() {
         tracker.record_push(log_seq, preview, handle);
     } else {
@@ -83,6 +92,7 @@ fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<Lua
 }
 
 fn record_non_push_event() {
+    // A non-push (e.g. call, get) means pending push context is no longer meaningful.
     if let Ok(mut tracker) = push_event_tracker().lock() {
         tracker.record_non_push();
     } else {
@@ -110,6 +120,9 @@ fn emit_set_table_entry(
     caller: OriginFields,
     note: Option<String>,
 ) {
+    // settable/rawsettable expect the last two pushes to be key then value; we only log
+    // when we have both, falling back to the table handle passed on the stack or the
+    // first table push we observed.
     let pushes = match pushes {
         Some(pushes) if pushes.len() >= 2 => pushes,
         _ => return,
@@ -590,6 +603,8 @@ struct CallfunctionTracker {
 }
 
 impl CallfunctionTracker {
+    // Provides shared labeling/origin metadata across call/ref/global hooks so we only
+    // resolve expensive symbols once and can keep per-handle call counts.
     fn new() -> Self {
         Self {
             counts: HashMap::new(),
@@ -687,6 +702,8 @@ impl HandleLabelTracker {
 }
 
 fn resolve_lua_function_label(handle: LuaObject) -> String {
+    // Prefer cached labels/origins from prior binds/refs, falling back to Lua's
+    // getobjname and finally a hex handle to ensure every function log has a label.
     if let Ok(tracker) = callfunction_tracker().lock() {
         if let Some(label) = tracker.label_for(handle) {
             return label;

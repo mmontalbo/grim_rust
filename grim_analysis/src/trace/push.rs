@@ -39,6 +39,8 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
         },
         None,
     );
+    // Remember that this closure was just pushed so a subsequent lua_setglobal can
+    // treat it as a registered global (function) instead of a constant value.
     remember_registered_global_candidate(func_addr, upvalues, origin.clone());
     record_non_push_event();
 

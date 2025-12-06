@@ -1,8 +1,13 @@
+//! Low-level bindings that resolve the retail Lua 3.1 symbols at runtime.
+//!
+//! Functions here perform lazy `dlsym` lookups for the real VM entry points and
+//! provide thin wrappers that return `Option`/`bool` for easier error handling in
+//! the tracing layer.
 use crate::logging::log_line;
 use libc::{c_char, c_double, c_float, c_int, c_void, size_t};
 use std::{ffi::CStr, sync::OnceLock};
 
-/// Retail Lua 3.2 uses a `void (*)(void)` callback type for C functions.
+/// Retail Lua 3.1 uses a `void (*)(void)` callback type for C functions.
 pub(crate) type LuaCFunction = unsafe extern "C" fn();
 pub(crate) type LuaObject = u32;
 pub(crate) type LuaState = *mut c_void;

@@ -1,3 +1,8 @@
+//! Simple symbol-map lookup used to enrich telemetry with module-relative names.
+//!
+//! Maps are loaded from paths specified by `GRIM_SHIM_SYMBOL_MAP` and
+//! `GRIM_SHIM_SYMBOL_MAP_LUALIB` (with optional module filters), then used to
+//! resolve addresses into function names when native symbols are missing.
 use crate::logging::log_line;
 use std::{
     env,
