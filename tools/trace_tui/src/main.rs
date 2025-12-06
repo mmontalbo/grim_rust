@@ -12,6 +12,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use grim_telemetry_common::{parse_seq_range, stream_kind_from_line, StreamFilter, StreamKind};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -28,9 +29,9 @@ struct Args {
     /// Path to one or two telemetry log files (use - for stdin)
     #[arg(num_args = 1..=2)]
     paths: Vec<String>,
-    /// Which telemetry stream to show (semantic/raw/all).
-    #[arg(long, value_enum, default_value_t = StreamFilter::Semantic)]
-    stream: StreamFilter,
+    /// Which telemetry stream to show (semantic/raw/all). See grim_telemetry_common/README.md for stream details.
+    #[arg(long, value_enum, default_value_t = CliStreamFilter::Semantic)]
+    stream: CliStreamFilter,
     /// Optional label for the first path (defaults to file stem)
     #[arg(long)]
     left_label: Option<String>,
@@ -39,55 +40,23 @@ struct Args {
     right_label: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StreamKind {
-    Raw,
-    Semantic,
-    Other,
-}
-
-impl StreamKind {
-    fn from_str(value: &str) -> Self {
-        match value {
-            "raw" => StreamKind::Raw,
-            "semantic" => StreamKind::Semantic,
-            _ => StreamKind::Other,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum StreamFilter {
+enum CliStreamFilter {
     Semantic,
     Raw,
     All,
 }
 
-impl StreamFilter {
-    fn matches(self, stream: StreamKind) -> bool {
-        match self {
-            StreamFilter::All => true,
-            StreamFilter::Raw => matches!(stream, StreamKind::Raw | StreamKind::Other),
-            StreamFilter::Semantic => matches!(stream, StreamKind::Semantic | StreamKind::Other),
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            StreamFilter::Semantic => StreamFilter::Raw,
-            StreamFilter::Raw => StreamFilter::All,
-            StreamFilter::All => StreamFilter::Semantic,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            StreamFilter::Semantic => "semantic",
-            StreamFilter::Raw => "raw",
-            StreamFilter::All => "all",
+impl From<CliStreamFilter> for StreamFilter {
+    fn from(value: CliStreamFilter) -> Self {
+        match value {
+            CliStreamFilter::Semantic => StreamFilter::Semantic,
+            CliStreamFilter::Raw => StreamFilter::Raw,
+            CliStreamFilter::All => StreamFilter::All,
         }
     }
 }
+
 
 struct Field {
     key: String,
@@ -323,6 +292,7 @@ impl DualApp {
 fn main() -> Result<()> {
     let args = Args::parse();
     let mut terminal = setup_terminal()?;
+    let stream_filter: StreamFilter = args.stream.into();
 
     let result = match args.paths.as_slice() {
         [single] => {
@@ -331,7 +301,10 @@ fn main() -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| label_from_path(single, "trace"));
             let entries = load_entries(single)?;
-            run_single(&mut terminal, SingleApp::new(title, entries, args.stream))
+            run_single(
+                &mut terminal,
+                SingleApp::new(title, entries, stream_filter),
+            )
         }
         [left, right] => {
             let left_title = args
@@ -351,7 +324,7 @@ fn main() -> Result<()> {
                     left_entries,
                     right_title,
                     right_entries,
-                    args.stream,
+                    stream_filter,
                 ),
             )
         }
@@ -690,15 +663,21 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
             } else if key == "event" {
                 event = Some(value.clone());
             } else if key == "stream" {
-                stream = StreamKind::from_str(&value);
+                stream = StreamKind::from_field(&value);
             }
             fields.push(Field { key, value });
         }
     }
 
+    if matches!(stream, StreamKind::Other) {
+        stream = stream_kind_from_line(&content);
+    }
+
     let seq_display = seq_display?;
     let event = event?;
-    let (seq_min, seq_max) = parse_seq_range(&seq_display);
+    let seq_range = parse_seq_range(&seq_display)?;
+    let seq_min = seq_range.min;
+    let seq_max = seq_range.max;
 
     let mut entry = LogEntry {
         seq_display: seq_display.clone(),
@@ -734,17 +713,6 @@ fn assign_stream_sequences(entries: &mut [LogEntry]) {
                 entry.seq_max = entry.orig_seq_max;
             }
         }
-    }
-}
-
-fn parse_seq_range(text: &str) -> (u64, u64) {
-    if let Some((min, max)) = text.split_once('-') {
-        let seq_min = min.parse::<u64>().unwrap_or(0);
-        let seq_max = max.parse::<u64>().unwrap_or(seq_min);
-        (seq_min, seq_max)
-    } else {
-        let seq = text.parse::<u64>().unwrap_or(0);
-        (seq, seq)
     }
 }
 

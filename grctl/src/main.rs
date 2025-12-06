@@ -17,6 +17,11 @@ use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use grim_telemetry_common::{
+    normalize_seq_for_filter, parse_seq_field, stream_kind_from_line, SeqRange, StreamFilter,
+    StreamKind,
+};
+
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 #[cfg(unix)]
@@ -207,7 +212,7 @@ struct ParityLogsArgs {
     /// Continuously stream log updates after the initial read.
     #[arg(long, short = 'f')]
     follow: bool,
-    /// Display the raw telemetry stream (default is semantic-only).
+    /// Display the raw telemetry stream (default is semantic-only; see grim_telemetry_common/README.md).
     #[arg(long)]
     raw: bool,
     /// Number of recent seqs to print before following (0 to skip).
@@ -259,11 +264,22 @@ fn validate_run_id(value: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+fn classify_line(line: &str) -> Option<(StreamKind, SeqRange)> {
+    let stream = stream_kind_from_line(line);
+    let seq = parse_seq_field(line)?;
+    Some((stream, seq))
+}
+
 fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
     let run_id = resolve_parity_run_id(paths, &args.run)?;
     let engine_log = paths.run_log_path(ComponentKind::Engine, &run_id)?;
     let retail_log = paths.run_log_path(ComponentKind::Retail, &run_id)?;
-    let semantic_only = !args.raw;
+    let stream_filter = if args.raw {
+        StreamFilter::Raw
+    } else {
+        StreamFilter::Semantic
+    };
+    let semantic_only = matches!(stream_filter, StreamFilter::Semantic);
     if !engine_log.exists() {
         bail!(
             "engine log missing for run {} at {}",
@@ -303,7 +319,7 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
             println!("[grctl] --backfill has no effect without --follow; showing full logs");
         }
         println!();
-        return print_full_parity_log(&engine_log, &retail_log, semantic_only);
+        return print_full_parity_log(&engine_log, &retail_log, stream_filter);
     }
     println!("  poll: {}ms", args.poll_ms);
     if args.from_start {
@@ -317,7 +333,7 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
 
     let mut printed: HashMap<u64, (Option<String>, Option<String>)> = HashMap::new();
     if !args.from_start && args.backfill > 0 {
-        let pairs = backfill_pairs(&engine_log, &retail_log, args.backfill, semantic_only)?;
+        let pairs = backfill_pairs(&engine_log, &retail_log, args.backfill, stream_filter)?;
         for (seq, engine_line, retail_line) in pairs {
             print_aligned_row(seq, engine_line.as_deref(), retail_line.as_deref());
             printed.insert(seq, (engine_line, retail_line));
@@ -335,12 +351,12 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
         fs::metadata(&retail_log).map(|m| m.len()).unwrap_or(0)
     };
     let mut engine_sem_seq = if semantic_only && !args.from_start {
-        collect_lines(&engine_log, true)?.len() as u64
+        collect_lines(&engine_log, StreamFilter::Semantic)?.len() as u64
     } else {
         0
     };
     let mut retail_sem_seq = if semantic_only && !args.from_start {
-        collect_lines(&retail_log, true)?.len() as u64
+        collect_lines(&retail_log, StreamFilter::Semantic)?.len() as u64
     } else {
         0
     };
@@ -374,8 +390,8 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
             Err(err) => return Err(err).context(format!("reading {}", retail_log.display())),
         };
 
-        let engine_events = normalize_new_events(engine_lines, semantic_only, &mut engine_sem_seq);
-        let retail_events = normalize_new_events(retail_lines, semantic_only, &mut retail_sem_seq);
+        let engine_events = normalize_new_events(engine_lines, stream_filter, &mut engine_sem_seq);
+        let retail_events = normalize_new_events(retail_lines, stream_filter, &mut retail_sem_seq);
 
         for (seq, line) in engine_events {
             let entry = printed.entry(seq).or_insert((None, None));
@@ -420,60 +436,34 @@ fn resolve_parity_run_id(paths: &Paths, selection: &RunSelection) -> Result<Stri
     }
 }
 
-fn parse_seq_from_line(line: &str) -> Option<u64> {
-    let idx = line.find(" seq=")?;
-    let rest = &line[idx + " seq=".len()..];
-    let mut digits = String::new();
-    for ch in rest.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
-        } else {
-            break;
-        }
-    }
-    if digits.is_empty() {
-        return None;
-    }
-    digits.parse().ok()
-}
-
-fn is_semantic_line(line: &str) -> bool {
-    line.split_whitespace()
-        .any(|token| token == "stream=semantic")
-        || line.contains("event=semantic_")
-}
-
-fn collect_lines(path: &Path, semantic_only: bool) -> Result<Vec<(u64, String)>> {
+fn collect_lines(path: &Path, filter: StreamFilter) -> Result<Vec<(u64, String)>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
     let mut semantic_seq = 0u64;
     for line in reader.lines() {
         let line = line?;
-        if semantic_only {
-            if !is_semantic_line(&line) {
-                continue;
-            }
-            semantic_seq = semantic_seq.saturating_add(1);
-            entries.push((semantic_seq, line));
-        } else {
-            if is_semantic_line(&line) {
-                continue;
-            }
-            if let Some(seq) = parse_seq_from_line(&line) {
-                entries.push((seq, line));
-            }
+        let Some((stream, seq)) = classify_line(&line) else {
+            continue;
+        };
+        if let Some(display_seq) = normalize_seq_for_filter(stream, seq, filter, &mut semantic_seq)
+        {
+            entries.push((display_seq.min, line));
         }
     }
     Ok(entries)
 }
 
-fn tail_lines_by_seq(path: &Path, limit: usize, semantic_only: bool) -> Result<Vec<(u64, String)>> {
+fn tail_lines_by_seq(
+    path: &Path,
+    limit: usize,
+    filter: StreamFilter,
+) -> Result<Vec<(u64, String)>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
 
-    let mut entries = collect_lines(path, semantic_only)?;
+    let mut entries = collect_lines(path, filter)?;
     if entries.len() > limit {
         let start = entries.len().saturating_sub(limit);
         entries = entries.split_off(start);
@@ -485,14 +475,14 @@ fn backfill_pairs(
     engine_log: &Path,
     retail_log: &Path,
     limit: usize,
-    semantic_only: bool,
+    filter: StreamFilter,
 ) -> Result<Vec<AlignedRow>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
 
-    let engine_events = tail_lines_by_seq(engine_log, limit, semantic_only)?;
-    let retail_events = tail_lines_by_seq(retail_log, limit, semantic_only)?;
+    let engine_events = tail_lines_by_seq(engine_log, limit, filter)?;
+    let retail_events = tail_lines_by_seq(retail_log, limit, filter)?;
     let mut engine_map = HashMap::new();
     let mut retail_map = HashMap::new();
     for (seq, line) in engine_events {
@@ -524,9 +514,10 @@ fn print_aligned_row(seq: u64, engine: Option<&str>, retail: Option<&str>) {
     println!("  retail: {retail_text}");
 }
 
-fn print_full_parity_log(engine_log: &Path, retail_log: &Path, semantic_only: bool) -> Result<()> {
-    let engine_entries = collect_lines(engine_log, semantic_only)?;
-    let retail_entries = collect_lines(retail_log, semantic_only)?;
+fn print_full_parity_log(engine_log: &Path, retail_log: &Path, filter: StreamFilter) -> Result<()> {
+    let semantic_only = matches!(filter, StreamFilter::Semantic);
+    let engine_entries = collect_lines(engine_log, filter)?;
+    let retail_entries = collect_lines(retail_log, filter)?;
     let mut engine_map: HashMap<u64, String> = engine_entries.into_iter().collect();
     let mut retail_map: HashMap<u64, String> = retail_entries.into_iter().collect();
 
@@ -586,24 +577,16 @@ fn read_new_lines(path: &Path, position: &mut u64) -> io::Result<Vec<String>> {
 
 fn normalize_new_events(
     lines: Vec<String>,
-    semantic_only: bool,
+    filter: StreamFilter,
     semantic_counter: &mut u64,
 ) -> Vec<(u64, String)> {
     let mut events = Vec::new();
     for line in lines {
-        if semantic_only {
-            if !is_semantic_line(&line) {
-                continue;
-            }
-            *semantic_counter = semantic_counter.saturating_add(1);
-            events.push((*semantic_counter, line));
-        } else {
-            if is_semantic_line(&line) {
-                continue;
-            }
-            if let Some(seq) = parse_seq_from_line(&line) {
-                events.push((seq, line));
-            }
+        let Some((stream, seq_range)) = classify_line(&line) else {
+            continue;
+        };
+        if let Some(seq) = normalize_seq_for_filter(stream, seq_range, filter, semantic_counter) {
+            events.push((seq.min, line));
         }
     }
     events

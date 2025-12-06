@@ -347,6 +347,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "grim_telemetry_common",
  "humantime",
  "nix",
  "serde",
@@ -961,6 +962,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "grim_telemetry_common",
  "ratatui",
  "serde_json",
 ]
