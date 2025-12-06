@@ -6,10 +6,11 @@ use anyhow::{Context, Result};
 use mlua::{Function, Lua, MultiValue, Result as LuaResult, Table, Value, Variadic};
 
 use crate::lua_host::telemetry::{
-    log_create_table, log_event, log_push_cclosure, log_push_number, log_push_usertag,
-    log_set_table_entry, log_store_ref, next_fabricated_handle, ptr_to_handle, register_tag,
+    log_create_table, log_event, log_fetch_ref, log_push_cclosure, log_push_number,
+    log_push_object, log_push_usertag, log_set_table_entry, log_store_ref, next_fabricated_handle,
+    ptr_to_handle, register_tag,
 };
-use grim_telemetry_common::{LuaEvent, UpvaluePreview, ValueFields, ValueType};
+use grim_telemetry_common::{LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::install_legacy_compat;
@@ -68,8 +69,6 @@ pub(crate) fn install_globals(
     lua.gc_collect()?;
     log_event(LuaEvent::CollectGarbage {});
     install_system_table(lua, &globals, context.clone())?;
-    lua.gc_collect()?;
-    log_event(LuaEvent::CollectGarbage {});
     let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     log_push_cclosure("lua_pushCclosure", default_cam_change.to_pointer(), 0, None);
     let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
@@ -335,30 +334,51 @@ fn install_system_table(
     log_create_table(
         system_handle.clone(),
         system_handle_label.clone(),
-        system_fields,
+        system_fields.clone(),
     );
     set_global(lua, globals, "system", system.clone())?;
 
-    system.set("setTable", lua.create_table()?)?;
-    system.set("currentActor", manny)?;
+    // Mirror retail bootstrap: stash system as ref 0, then set controls via lua_getref flow.
+    log_push_object(
+        system_handle.clone(),
+        system_handle_label.clone(),
+        system_fields.clone(),
+    );
+    log_store_ref(
+        1,
+        0,
+        Some(system_handle.clone()),
+        system_handle_label.clone(),
+        Some("global:system".to_string()),
+    );
+
     let controls = lua.create_table()?;
     let controls_handle = ptr_to_handle(controls.to_pointer());
     let controls_fields = value_fields_from_lua(&Value::Table(controls.clone()));
-    log_create_table(
-        controls_handle.clone(),
-        Some("system.controls".to_string()),
-        controls_fields,
+    log_create_table(controls_handle.clone(), None, controls_fields.clone());
+
+    log_fetch_ref(
+        0,
+        Some(system_handle.clone()),
+        system_handle_label.clone(),
+        Some("global:system".to_string()),
+        None,
+        OriginFields::default(),
     );
-    system.set("controls", controls.clone())?;
     let key_preview = value_to_upvalue_preview(&Value::String(lua.create_string("controls")?));
-    let value_preview = value_to_upvalue_preview(&Value::Table(controls));
+    let value_preview = value_to_upvalue_preview(&Value::Table(controls.clone()));
     log_set_table_entry(
-        system_handle,
-        system_handle_label,
+        system_handle.clone(),
+        system_handle_label.clone(),
         key_preview,
         value_preview,
         None,
+        Some(system_fields.clone()),
+        Some((controls_handle, None, controls_fields)),
     );
+    system.set("controls", controls)?;
+    system.set("setTable", lua.create_table()?)?;
+    system.set("currentActor", manny)?;
     Ok(())
 }
 

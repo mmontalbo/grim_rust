@@ -244,13 +244,29 @@ pub(crate) fn log_set_table_entry(
     key: UpvaluePreview,
     value: UpvaluePreview,
     note: Option<String>,
+    table_fields: Option<ValueFields>,
+    value_handle: Option<(String, Option<String>, ValueFields)>,
 ) {
     let caller = caller_origin_fields();
     let mut seqs = Vec::new();
+    // Retail telemetry records pushing the target table before setting entries.
+    let table_fields = table_fields.unwrap_or_else(|| {
+        let mut fields = ValueFields::default();
+        fields.value_type = Some(ValueType::Table);
+        fields
+    });
+    let table_seq = log_push_object(
+        table_handle.clone(),
+        table_handle_label.clone(),
+        table_fields.clone(),
+    );
+    seqs.push(table_seq);
     if let Some(seq) = log_push_from_preview(&key) {
         seqs.push(seq);
     }
-    if let Some(seq) = log_push_from_preview(&value) {
+    if let Some((value_handle, value_label, value_fields)) = value_handle {
+        seqs.push(log_push_object(value_handle, value_label, value_fields));
+    } else if let Some(seq) = log_push_from_preview(&value) {
         seqs.push(seq);
     }
     let set_seq = log_event_with_seq(LuaEvent::SetTable {

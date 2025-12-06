@@ -137,8 +137,7 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
         Value::Function(func) => {
             origin = origin_fields_for_ptr(func.to_pointer());
             if func_push_seq.is_none() {
-                let push =
-                    log_push_cclosure("lua_pushCclosure", func.to_pointer(), upvalues, None);
+                let push = log_push_cclosure("lua_pushCclosure", func.to_pointer(), upvalues, None);
                 func_push_seq = Some(push.push_seq);
                 seqs.push(push.log_seq);
             }
