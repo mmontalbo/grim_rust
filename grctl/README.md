@@ -14,9 +14,12 @@ nix-shell --run 'cargo run -p grctl -- status'
 
 Common subcommands:
 
-- `compare boot [--run-id <tag>] [--engine-release] [--engine-headless] [--retail-vanilla] [--retail-no-timeout]`
-  starts grim_engine and retail together with a shared run id and prints the log
-  paths for both.
+- `parity start [--run-id <tag>] [--engine-release] [--engine-headless] [--retail-vanilla] [--timeout <dur>] [--no-timeout]`
+  launches grim_engine and retail together with a shared run id and prints the log
+  paths for both (timeout defaults to 20s).
+- `parity logs --run latest|<id> [--follow] [--backfill <n>] [--from-start] [--tui]`
+  shows aligned engine/retail logs. `tail` is an alias for `logs`; `--tui` opens
+  the interactive viewer instead of streaming lines.
 - `engine start|stop|status|logs` and `retail start|stop|status|logs` are still
   available. Pass `--run-id <tag>` on `start` to control the telemetry run id,
   or rely on the generated default. Use `--attach` on `start` to follow the log
@@ -33,7 +36,6 @@ GRCTL_SESSION_ID=<uuid>
 GRCTL_COMPONENT=<component label>
 GRCTL_LOG_PATH=<per-run log path>
 GRCTL_STATE_DIR=<target/grctl/state>
-GRIM_TRACE_RUN_ID=<run id injected into grim_engine and the retail shim>
 ```
 
 State files live in `target/grctl/state/*.json`. Logs are per-run at

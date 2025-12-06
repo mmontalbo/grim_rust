@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -86,7 +87,7 @@ struct EngineStart {
     /// Stream the engine log to this terminal until you Ctrl-C.
     #[arg(long)]
     attach: bool,
-    /// Override the GRIM_TRACE_RUN_ID for this launch.
+    /// Set the run_id for this launch.
     #[arg(long, value_parser = parse_run_id)]
     run_id: Option<String>,
     /// Additional arguments forwarded directly to grim_engine after '--'.
@@ -122,7 +123,7 @@ struct RetailStart {
     /// Launch retail under gdb with the grctl-managed environment.
     #[arg(long, value_enum)]
     debugger: Option<RetailDebugger>,
-    /// Override the GRIM_TRACE_RUN_ID for this launch.
+    /// Set the run_id for this launch.
     #[arg(long, value_parser = parse_run_id)]
     run_id: Option<String>,
     /// Additional arguments passed directly to the retail binary after '--'.
@@ -160,8 +161,9 @@ struct LogArgs {
 enum ParityCommand {
     /// Launch grim_engine and retail with a shared run_id for parity checks.
     Start(ParityStartArgs),
-    /// Tail engine/retail logs aligned by seq for a given run_id.
-    Tail(ParityTailArgs),
+    /// View engine/retail logs for a run_id.
+    #[command(alias = "tail")]
+    Logs(ParityLogsArgs),
     /// Stop both engine and retail sessions launched by grctl.
     Stop(ParityStopArgs),
     /// Show engine/retail status together.
@@ -182,9 +184,12 @@ struct ParityStartArgs {
     /// Run retail without the Rust shim (vanilla).
     #[arg(long)]
     retail_vanilla: bool,
-    /// Disable the retail timeout (defaults to 20s).
+    /// Time limit for the retail session (examples: 20s, 5m). Use 0 to disable.
+    #[arg(long, default_value = "20s")]
+    timeout: String,
+    /// Disable the timeout entirely (overrides --timeout).
     #[arg(long)]
-    retail_no_timeout: bool,
+    no_timeout: bool,
 }
 
 #[derive(Args, Debug)]
@@ -195,10 +200,13 @@ struct ParityStopArgs {
 }
 
 #[derive(Args, Debug)]
-struct ParityTailArgs {
+struct ParityLogsArgs {
     /// Run selection to stream (defaults to latest).
     #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
     run: RunSelection,
+    /// Continuously stream log updates after the initial read.
+    #[arg(long, short = 'f')]
+    follow: bool,
     /// Number of recent seqs to print before following (0 to skip).
     #[arg(long, default_value_t = 30)]
     backfill: usize,
@@ -208,6 +216,9 @@ struct ParityTailArgs {
     /// Poll interval in milliseconds when watching for new lines.
     #[arg(long, default_value_t = 300)]
     poll_ms: u64,
+    /// Open an interactive TUI viewer instead of streaming aligned rows.
+    #[arg(long)]
+    tui: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -245,7 +256,7 @@ fn validate_run_id(value: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn parity_tail(args: ParityTailArgs, paths: &Paths) -> Result<()> {
+fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
     let run_id = resolve_parity_run_id(paths, &args.run)?;
     let engine_log = paths.run_log_path(ComponentKind::Engine, &run_id)?;
     let retail_log = paths.run_log_path(ComponentKind::Retail, &run_id)?;
@@ -264,9 +275,28 @@ fn parity_tail(args: ParityTailArgs, paths: &Paths) -> Result<()> {
         );
     }
 
-    println!("[grctl] parity tail for run {run_id}");
+    println!("[grctl] parity logs for run {run_id}");
     println!("  engine log: {}", engine_log.display());
     println!("  retail log: {}", retail_log.display());
+    if args.tui {
+        if args.from_start {
+            println!("[grctl] --from-start is ignored with --tui (viewer reads full logs)");
+        } else if args.backfill > 0 {
+            println!("[grctl] --backfill is ignored with --tui (viewer reads full logs)");
+        }
+        println!();
+        return launch_parity_tui(paths, &engine_log, &retail_log);
+    }
+    if !args.follow {
+        if args.from_start {
+            println!("[grctl] --from-start has no effect without --follow; showing full logs");
+        }
+        if args.backfill > 0 {
+            println!("[grctl] --backfill has no effect without --follow; showing full logs");
+        }
+        println!();
+        return print_full_parity_log(&engine_log, &retail_log);
+    }
     println!("  poll: {}ms", args.poll_ms);
     if args.from_start {
         println!("  starting from beginning of both logs");
@@ -447,6 +477,36 @@ fn print_aligned_row(seq: u64, engine: Option<&str>, retail: Option<&str>) {
     println!("seq={seq:06}");
     println!("  engine: {engine_text}");
     println!("  retail: {retail_text}");
+}
+
+fn print_full_parity_log(engine_log: &Path, retail_log: &Path) -> Result<()> {
+    let mut rows: BTreeMap<u64, (Option<String>, Option<String>)> = BTreeMap::new();
+
+    let mut ingest = |path: &Path, slot: usize| -> Result<()> {
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if let Some(seq) = parse_seq_from_line(&line) {
+                let entry = rows.entry(seq).or_insert((None, None));
+                match slot {
+                    0 if entry.0.is_none() => entry.0 = Some(line),
+                    1 if entry.1.is_none() => entry.1 = Some(line),
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    };
+
+    ingest(engine_log, 0)?;
+    ingest(retail_log, 1)?;
+
+    for (seq, (engine, retail)) in rows {
+        print_aligned_row(seq, engine.as_deref(), retail.as_deref());
+    }
+
+    Ok(())
 }
 
 fn read_new_lines(path: &Path, position: &mut u64) -> io::Result<Vec<String>> {
@@ -689,7 +749,7 @@ fn handle_retail(cmd: RetailCommand, paths: &Paths) -> Result<()> {
 fn handle_parity(cmd: ParityCommand, paths: &Paths) -> Result<()> {
     match cmd {
         ParityCommand::Start(args) => parity_start(args, paths),
-        ParityCommand::Tail(args) => parity_tail(args, paths),
+        ParityCommand::Logs(args) => parity_logs(args, paths),
         ParityCommand::Stop(args) => parity_stop(args, paths),
         ParityCommand::Status => {
             print_component_status(paths, ComponentKind::Engine)?;
@@ -719,12 +779,12 @@ fn parity_start(args: ParityStartArgs, paths: &Paths) -> Result<()> {
     guard.push(ComponentKind::Engine);
 
     let retail_args = RetailStart {
-        timeout: if args.retail_no_timeout {
+        timeout: if args.no_timeout {
             "0".to_string()
         } else {
-            "20s".to_string()
+            args.timeout.clone()
         },
-        no_timeout: args.retail_no_timeout,
+        no_timeout: args.no_timeout,
         vanilla: args.retail_vanilla,
         attach: false,
         debugger: None,
@@ -900,7 +960,6 @@ fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInfo> {
         command.env("GRCTL_COMPONENT", ComponentKind::Retail.as_str());
         command.env("GRCTL_LOG_PATH", &log_path);
         command.env("GRCTL_STATE_DIR", &paths.state_dir);
-        command.env("GRIM_TRACE_RUN_ID", &run_id);
         command.env_remove("LD_PRELOAD");
         command.env_remove("LD_PRELOAD_32");
 
@@ -1422,7 +1481,6 @@ fn launch_component(
     command.env("GRCTL_COMPONENT", component.as_str());
     command.env("GRCTL_LOG_PATH", &log_path);
     command.env("GRCTL_STATE_DIR", &paths.state_dir);
-    command.env("GRIM_TRACE_RUN_ID", &run_id);
 
     if log_path.exists() {
         fs::remove_file(&log_path).with_context(|| format!("clearing {}", log_path.display()))?;
@@ -1778,12 +1836,34 @@ fn show_logs(paths: &Paths, component: ComponentKind, args: &LogArgs) -> Result<
 
 fn launch_trace_tui(paths: &Paths, log_path: &Path) -> Result<()> {
     println!("[grctl] launching trace_tui for {}", log_path.display());
+    let args = vec![log_path.as_os_str().to_owned()];
+    launch_trace_tui_with_args(paths, &args)
+}
+
+fn launch_parity_tui(paths: &Paths, engine_log: &Path, retail_log: &Path) -> Result<()> {
+    println!(
+        "[grctl] launching trace_tui for {} (engine) and {} (retail)",
+        engine_log.display(),
+        retail_log.display()
+    );
+    let args = vec![
+        engine_log.as_os_str().to_owned(),
+        retail_log.as_os_str().to_owned(),
+        OsString::from("--left-label"),
+        OsString::from("engine"),
+        OsString::from("--right-label"),
+        OsString::from("retail"),
+    ];
+    launch_trace_tui_with_args(paths, &args)
+}
+
+fn launch_trace_tui_with_args(paths: &Paths, args: &[OsString]) -> Result<()> {
     let status = Command::new("cargo")
         .arg("run")
         .arg("-p")
         .arg("trace_tui")
         .arg("--")
-        .arg(log_path)
+        .args(args)
         .current_dir(&paths.repo_root)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

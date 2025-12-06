@@ -2,14 +2,14 @@ use std::{
     collections::HashSet,
     fs::File,
     io::{self, BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -26,8 +26,15 @@ use serde_json::Value as JsonValue;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Minimal TUI for grim telemetry logs")]
 struct Args {
-    /// Path to a telemetry log file (use - for stdin)
-    path: String,
+    /// Path to one or two telemetry log files (use - for stdin)
+    #[arg(num_args = 1..=2)]
+    paths: Vec<String>,
+    /// Optional label for the first path (defaults to file stem)
+    #[arg(long)]
+    left_label: Option<String>,
+    /// Optional label for the second path (defaults to file stem)
+    #[arg(long)]
+    right_label: Option<String>,
 }
 
 struct Field {
@@ -78,36 +85,60 @@ impl LogEntry {
     }
 }
 
+#[derive(Clone, Copy)]
 struct CompositeSpan {
     id: usize,
     seq_min: u64,
     seq_max: u64,
 }
 
-struct App {
+struct Pane {
+    title: String,
     entries: Vec<LogEntry>,
-    collapse: bool,
     visible_indices: Vec<usize>,
     selected: usize,
 }
 
-impl App {
-    fn new(entries: Vec<LogEntry>) -> Self {
-        let mut app = Self {
+impl Pane {
+    fn new(title: String, mut entries: Vec<LogEntry>, collapse: bool) -> Self {
+        build_composites(&mut entries);
+        rebuild_display_lines(&mut entries);
+        let mut pane = Self {
+            title,
             entries,
-            collapse: true,
             visible_indices: Vec::new(),
             selected: 0,
         };
-        build_composites(&mut app.entries);
-        rebuild_display_lines(&mut app.entries);
-        app.rebuild_visible();
-        app
+        pane.rebuild_visible(collapse, None);
+        pane
     }
 
-    fn toggle_collapse(&mut self) {
-        self.collapse = !self.collapse;
-        self.rebuild_visible();
+    fn rebuild_visible(&mut self, collapse: bool, target_seq: Option<u64>) {
+        let target_seq = target_seq.or_else(|| self.selected_seq());
+        self.visible_indices.clear();
+        for (idx, entry) in self.entries.iter().enumerate() {
+            if collapse && entry.hidden_by.is_some() {
+                continue;
+            }
+            self.visible_indices.push(idx);
+        }
+        if self.visible_indices.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if let Some(seq) = target_seq {
+            if let Some(pos) = self
+                .visible_indices
+                .iter()
+                .position(|idx| self.entries[*idx].seq_min == seq)
+            {
+                self.selected = pos;
+                return;
+            }
+        }
+        if self.selected >= self.visible_indices.len() {
+            self.selected = self.visible_indices.len() - 1;
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -115,8 +146,7 @@ impl App {
             return;
         }
         let len = self.visible_indices.len() as isize;
-        let current = self.selected as isize;
-        let mut next = current + delta;
+        let mut next = self.selected as isize + delta;
         if next < 0 {
             next = 0;
         } else if next >= len {
@@ -143,49 +173,143 @@ impl App {
             .and_then(|idx| self.entries.get(*idx))
     }
 
-    fn rebuild_visible(&mut self) {
-        let previous = self.selected_entry().map(|entry| entry.seq_min);
-        self.visible_indices.clear();
-        for (idx, entry) in self.entries.iter().enumerate() {
-            if self.collapse && entry.hidden_by.is_some() {
-                continue;
-            }
-            self.visible_indices.push(idx);
+    fn selected_seq(&self) -> Option<u64> {
+        self.selected_entry().map(|entry| entry.seq_min)
+    }
+}
+
+struct SingleApp {
+    pane: Pane,
+    collapse: bool,
+}
+
+impl SingleApp {
+    fn new(title: String, entries: Vec<LogEntry>) -> Self {
+        let collapse = true;
+        Self {
+            pane: Pane::new(title, entries, collapse),
+            collapse,
         }
-        if self.visible_indices.is_empty() {
-            self.selected = 0;
-            return;
+    }
+
+    fn toggle_collapse(&mut self) {
+        self.collapse = !self.collapse;
+        self.pane.rebuild_visible(self.collapse, None);
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        self.pane.move_selection(delta);
+    }
+
+    fn move_to_start(&mut self) {
+        self.pane.move_to_start();
+    }
+
+    fn move_to_end(&mut self) {
+        self.pane.move_to_end();
+    }
+}
+
+struct DualApp {
+    panes: [Pane; 2],
+    collapse: bool,
+    active: usize,
+}
+
+impl DualApp {
+    fn new(
+        left_title: String,
+        left_entries: Vec<LogEntry>,
+        right_title: String,
+        right_entries: Vec<LogEntry>,
+    ) -> Self {
+        let collapse = true;
+        Self {
+            panes: [
+                Pane::new(left_title, left_entries, collapse),
+                Pane::new(right_title, right_entries, collapse),
+            ],
+            collapse,
+            active: 0,
         }
-        if let Some(target_seq) = previous {
-            if let Some(pos) = self
-                .visible_indices
-                .iter()
-                .position(|idx| self.entries[*idx].seq_min == target_seq)
-            {
-                self.selected = pos;
-                return;
-            }
+    }
+
+    fn toggle_collapse(&mut self) {
+        self.collapse = !self.collapse;
+        for pane in self.panes.iter_mut() {
+            pane.rebuild_visible(self.collapse, None);
         }
-        if self.selected >= self.visible_indices.len() {
-            self.selected = self.visible_indices.len() - 1;
-        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        self.panes[self.active].move_selection(delta);
+    }
+
+    fn move_to_start(&mut self) {
+        self.panes[self.active].move_to_start();
+    }
+
+    fn move_to_end(&mut self) {
+        self.panes[self.active].move_to_end();
+    }
+
+    fn focus_left(&mut self) {
+        self.active = 0;
+    }
+
+    fn focus_right(&mut self) {
+        self.active = 1;
+    }
+
+    fn toggle_focus(&mut self) {
+        self.active = 1 - self.active;
     }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let entries = load_entries(&args.path)?;
     let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal, App::new(entries));
+
+    let result = match args.paths.as_slice() {
+        [single] => {
+            let title = args
+                .left_label
+                .clone()
+                .unwrap_or_else(|| label_from_path(single, "trace"));
+            let entries = load_entries(single)?;
+            run_single(&mut terminal, SingleApp::new(title, entries))
+        }
+        [left, right] => {
+            let left_title = args
+                .left_label
+                .clone()
+                .unwrap_or_else(|| label_from_path(left, "left"));
+            let right_title = args
+                .right_label
+                .clone()
+                .unwrap_or_else(|| label_from_path(right, "right"));
+            let left_entries = load_entries(left)?;
+            let right_entries = load_entries(right)?;
+            run_dual(
+                &mut terminal,
+                DualApp::new(left_title, left_entries, right_title, right_entries),
+            )
+        }
+        _ => unreachable!("clap enforces one or two paths"),
+    };
+
     cleanup_terminal(&mut terminal)?;
     result
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: App) -> Result<()> {
+fn run_single(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    mut app: SingleApp,
+) -> Result<()> {
     let mut needs_redraw = true;
     loop {
         if needs_redraw {
-            terminal.draw(|f| render(f, &app))?;
+            terminal.draw(|f| render_single(f, &app))?;
             needs_redraw = false;
         }
         if event::poll(Duration::from_millis(250))? {
@@ -195,7 +319,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                         continue;
                     }
                     match key.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break
+                        }
                         KeyCode::Char('c') => app.toggle_collapse(),
                         KeyCode::Up => app.move_selection(-1),
                         KeyCode::Down => app.move_selection(1),
@@ -215,35 +342,83 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
     Ok(())
 }
 
-fn render(frame: &mut Frame, app: &App) {
+fn run_dual(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    mut app: DualApp,
+) -> Result<()> {
+    let mut needs_redraw = true;
+    loop {
+        if needs_redraw {
+            terminal.draw(|f| render_dual(f, &app))?;
+            needs_redraw = false;
+        }
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break
+                        }
+                        KeyCode::Char('c') => app.toggle_collapse(),
+                        KeyCode::Up => app.move_selection(-1),
+                        KeyCode::Down => app.move_selection(1),
+                        KeyCode::PageUp => app.move_selection(-20),
+                        KeyCode::PageDown => app.move_selection(20),
+                        KeyCode::Home | KeyCode::Char('g') => app.move_to_start(),
+                        KeyCode::End | KeyCode::Char('G') => app.move_to_end(),
+                        KeyCode::Left | KeyCode::Char('h') => app.focus_left(),
+                        KeyCode::Right | KeyCode::Char('l') => app.focus_right(),
+                        KeyCode::Tab => app.toggle_focus(),
+                        _ => {}
+                    }
+                    needs_redraw = true;
+                }
+                Event::Resize(_, _) => needs_redraw = true,
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_single(frame: &mut Frame, app: &SingleApp) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(frame.size());
 
     let items: Vec<ListItem> = app
+        .pane
         .visible_indices
         .iter()
-        .map(|idx| ListItem::new(app.entries[*idx].display.as_str()))
+        .map(|idx| ListItem::new(app.pane.entries[*idx].display.as_str()))
         .collect();
+
+    let mut list_state = ListState::default();
+    if !app.pane.visible_indices.is_empty() {
+        list_state.select(Some(app.pane.selected));
+    }
 
     let list = List::new(items)
         .block(
             Block::default()
                 .title(Line::from(vec![
-                    Span::raw("Trace "),
+                    Span::raw(format!("{} ", app.pane.title)),
                     Span::raw(if app.collapse { "[collapsed]" } else { "[raw]" }),
-                    Span::raw(" (q to quit, c to toggle)"),
+                    Span::raw(" (q/ctrl-c quit, c toggle)"),
                 ]))
                 .borders(Borders::ALL),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-    let mut list_state = ListState::default();
-    list_state.select(Some(app.selected));
     frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
     let detail = app
+        .pane
         .selected_entry()
         .map(detail_lines)
         .unwrap_or_else(|| Line::raw("no selection"));
@@ -253,6 +428,85 @@ fn render(frame: &mut Frame, app: &App) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(detail_widget, chunks[1]);
+}
+
+fn render_dual(frame: &mut Frame, app: &DualApp) {
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(frame.size());
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(root[0]);
+
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(root[1]);
+
+    for (idx, pane) in app.panes.iter().enumerate() {
+        let items: Vec<ListItem> = pane
+            .visible_indices
+            .iter()
+            .map(|row| ListItem::new(pane.entries[*row].display.as_str()))
+            .collect();
+
+        let mut list_state = ListState::default();
+        if !pane.visible_indices.is_empty() {
+            list_state.select(Some(pane.selected));
+        }
+
+        let mut title = vec![Span::raw(format!("{} ", pane.title))];
+        title.push(Span::raw(if app.collapse {
+            "[collapsed]"
+        } else {
+            "[raw]"
+        }));
+        title.push(Span::raw(" (q/ctrl-c quit, c collapse, Tab/< /> switch)"));
+
+        let mut block = Block::default()
+            .title(Line::from(title))
+            .borders(Borders::ALL);
+
+        if app.active == idx {
+            block = block.border_style(Style::default().add_modifier(Modifier::BOLD));
+        }
+
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        frame.render_stateful_widget(list, top[idx], &mut list_state);
+    }
+
+    let left_detail = app.panes[0]
+        .selected_entry()
+        .map(detail_lines)
+        .unwrap_or_else(|| Line::raw("no selection"));
+    let right_detail = app.panes[1]
+        .selected_entry()
+        .map(detail_lines)
+        .unwrap_or_else(|| Line::raw("no selection"));
+
+    let left_widget = Paragraph::new(left_detail)
+        .block(
+            Block::default()
+                .title(Line::from(format!("{} details", app.panes[0].title)))
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: false });
+    let right_widget = Paragraph::new(right_detail)
+        .block(
+            Block::default()
+                .title(Line::from(format!("{} details", app.panes[1].title)))
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(left_widget, bottom[0]);
+    frame.render_widget(right_widget, bottom[1]);
 }
 
 fn rebuild_display_lines(entries: &mut [LogEntry]) {
@@ -320,6 +574,17 @@ fn load_entries(path: &str) -> Result<Vec<LogEntry>> {
         }
     }
     Ok(entries)
+}
+
+fn label_from_path(path: &str, fallback: &str) -> String {
+    if path == "-" {
+        return fallback.to_string();
+    }
+    Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn parse_line(raw: &str) -> Option<LogEntry> {
@@ -427,18 +692,6 @@ fn split_fields(line: &str) -> Vec<String> {
 }
 
 fn build_composites(entries: &mut [LogEntry]) -> Vec<CompositeSpan> {
-    let mut composites = Vec::new();
-    for entry in entries.iter() {
-        if entry.is_composite() {
-            let span = CompositeSpan {
-                id: composites.len(),
-                seq_min: entry.seq_min,
-                seq_max: entry.seq_max,
-            };
-            composites.push(span);
-        }
-    }
-
     let hide_targets: HashSet<&str> = [
         "lua_setglobal",
         "lua_pushcclosure",
@@ -454,13 +707,45 @@ fn build_composites(entries: &mut [LogEntry]) -> Vec<CompositeSpan> {
     .into_iter()
     .collect();
 
-    for comp in composites.iter() {
-        for entry in entries.iter_mut() {
-            if entry.is_composite() || !hide_targets.contains(entry.event.as_str()) {
-                continue;
+    let mut composites = Vec::new();
+    for entry in entries.iter() {
+        if entry.is_composite() {
+            composites.push(CompositeSpan {
+                id: composites.len(),
+                seq_min: entry.seq_min,
+                seq_max: entry.seq_max,
+            });
+        }
+    }
+
+    composites.sort_by_key(|c| c.seq_min);
+
+    let mut active: Vec<CompositeSpan> = Vec::new();
+    let mut next_composite = 0;
+
+    for entry in entries.iter_mut() {
+        while next_composite < composites.len()
+            && composites[next_composite].seq_min <= entry.seq_min
+        {
+            active.push(composites[next_composite]);
+            next_composite += 1;
+        }
+
+        while let Some(last) = active.last() {
+            if entry.seq_min > last.seq_max {
+                active.pop();
+            } else {
+                break;
             }
-            if entry.seq_min >= comp.seq_min && entry.seq_max <= comp.seq_max {
-                entry.hidden_by.get_or_insert(comp.id);
+        }
+
+        if entry.is_composite() || !hide_targets.contains(entry.event.as_str()) {
+            continue;
+        }
+
+        if let Some(span) = active.last() {
+            if entry.seq_max <= span.seq_max {
+                entry.hidden_by.get_or_insert(span.id);
             }
         }
     }
