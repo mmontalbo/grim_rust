@@ -14,7 +14,6 @@ const LIST_LEGEND: &str = "[= match ! diff ? missing] ";
 pub struct Pane {
     pub title: String,
     pub entries: Vec<LogEntry>,
-    render_cache: Vec<Line<'static>>,
     pub visible_indices: Vec<usize>,
     pub selected: usize,
     pub list_state: ListState,
@@ -22,11 +21,9 @@ pub struct Pane {
 
 impl Pane {
     pub fn new(title: String, entries: Vec<LogEntry>, stream_filter: StreamFilter) -> Self {
-        let render_cache = entries.iter().map(build_base_line).collect();
         let mut pane = Self {
             title,
             entries,
-            render_cache,
             visible_indices: Vec::new(),
             selected: 0,
             list_state: ListState::default(),
@@ -327,7 +324,7 @@ fn render_pane_list(
         .iter()
         .map(|row| {
             let parity = parity.and_then(|p| p.get(*row).and_then(|p| p.as_ref()));
-            render_list_item(&pane.render_cache[*row], parity)
+            render_list_item(&pane.entries[*row], parity)
         })
         .collect();
 
@@ -351,20 +348,14 @@ fn render_pane_list(
     frame.render_stateful_widget(list, area, &mut pane.list_state);
 }
 
-fn render_list_item(base: &Line<'static>, parity: Option<&ParityStatus>) -> ListItem<'static> {
-    ListItem::new(render_display_line(base, parity))
+fn render_list_item(entry: &LogEntry, parity: Option<&ParityStatus>) -> ListItem<'static> {
+    ListItem::new(render_display_line(entry, parity))
 }
 
-fn render_display_line(base: &Line<'static>, parity: Option<&ParityStatus>) -> Line<'static> {
-    let mut spans = Vec::with_capacity(base.spans.len() + 2);
+fn render_display_line(entry: &LogEntry, parity: Option<&ParityStatus>) -> Line<'static> {
+    let mut spans = Vec::new();
     spans.push(parity_marker(parity));
     spans.push(Span::raw(" "));
-    spans.extend(base.spans.iter().cloned());
-    Line::from(spans)
-}
-
-fn build_base_line(entry: &LogEntry) -> Line<'static> {
-    let mut spans = Vec::new();
     spans.push(stream_marker(entry.stream));
     spans.push(Span::raw(" "));
     spans.push(seq_span(&entry.seq_display));
