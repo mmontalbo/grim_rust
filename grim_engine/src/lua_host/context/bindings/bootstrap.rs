@@ -3,12 +3,14 @@ use std::path::Path;
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
-use mlua::{Function, Lua, MultiValue, Result as LuaResult, Table, Value, Variadic};
+use mlua::{
+    Error as LuaError, Function, Lua, MultiValue, Result as LuaResult, Table, Value, Variadic,
+};
 
 use crate::lua_host::telemetry::{
     log_create_table, log_event, log_push_cclosure, log_push_number, log_push_object,
-    log_push_usertag, log_set_table_entry, next_fabricated_handle, origin_fields_for_ptr,
-    ptr_to_handle, register_tag,
+    log_push_usertag, log_set_fallback, log_set_table_entry, next_fabricated_handle, ptr_to_handle,
+    register_tag,
 };
 use grim_telemetry_common::{LuaEvent, OriginFields, ValueFields};
 
@@ -154,6 +156,20 @@ fn install_basic_functions(
     set_global(lua, globals, "CAMERA", 8192)?;
     set_global(lua, globals, "SPECIAL", 12288)?;
     set_global(lua, globals, "HOT", 16384)?;
+
+    let concat_fallback = lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
+        Err(LuaError::RuntimeError(
+            "string expected in concatenation".to_string(),
+        ))
+    })?;
+    let concat_handle = ptr_to_handle(concat_fallback.to_pointer());
+    let concat_fields = value_fields_from_lua(&Value::Function(concat_fallback.clone()));
+    log_set_fallback(
+        "concat",
+        concat_handle,
+        concat_fields,
+        Some(concat_fallback.to_pointer()),
+    );
 
     let debug_state = context.clone();
     let print_debug = lua.create_function(move |_, args: Variadic<Value>| {
@@ -363,88 +379,30 @@ fn install_system_table(
     system.set("controls", controls.clone())?;
     populate_controls_table(lua, &controls, &controls_handle, &controls_fields)?;
 
-    // Retail fetches the stored system ref and installs native control handlers on system before other globals.
-    let fetched_system: Table = system_ref.fetch(lua, OriginFields::default(), None)?;
-    system = fetched_system;
-    pinned_refs.push(system_ref.key);
-
+    // Retail fetches the stored system ref before installing default handlers; mirror the fetches without storing the closures.
     let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+    system = system_ref.fetch(lua, OriginFields::default(), None)?;
     log_push_cclosure(
         "lua_pushCclosure",
         default_cam_change.to_pointer(),
         0,
         Some("DefaultCamChangeHandlerL"),
     );
-    let cam_change_handle = ptr_to_handle(default_cam_change.to_pointer());
-    let cam_label = Some("camChangeHandler".to_string());
-    let cam_change_ref = store_registry_value(
-        lua,
-        Value::Function(default_cam_change.clone()),
-        1,
-        None,
-        cam_label.clone(),
-        Some(cam_change_handle.clone()),
-        cam_label.clone(),
-    )?;
-    let cam_change_handler: Function = cam_change_ref.fetch(
-        lua,
-        origin_fields_for_ptr(default_cam_change.to_pointer()),
-        None,
-    )?;
-    let cam_key = Value::String(lua.create_string("camChangeHandler")?);
-    let cam_key_preview = value_to_upvalue_preview(&cam_key);
-    let cam_value_preview = value_to_upvalue_preview(&Value::Function(cam_change_handler.clone()));
-    log_set_table_entry(
-        system_handle.clone(),
-        system_handle_label.clone(),
-        cam_key_preview,
-        cam_value_preview,
-        None,
-        Some(system_fields.clone()),
-        None,
-    );
-    system.set("camChangeHandler", cam_change_handler)?;
-    pinned_refs.push(cam_change_ref.key);
+    system.set("camChangeHandler", default_cam_change)?;
 
     let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     for key in ["axisHandler", "inputModeHandler", "buttonHandler"] {
+        let system_for_handler: Table = system_ref.fetch(lua, OriginFields::default(), None)?;
         log_push_cclosure(
             "lua_pushCclosure",
             default_control.to_pointer(),
             0,
             Some("DefaultControlHandlerL"),
         );
-        let handler_handle = ptr_to_handle(default_control.to_pointer());
-        let handler_label = Some(key.to_string());
-        let handler_ref = store_registry_value(
-            lua,
-            Value::Function(default_control.clone()),
-            1,
-            None,
-            handler_label.clone(),
-            Some(handler_handle.clone()),
-            handler_label.clone(),
-        )?;
-        let handler_fn: Function = handler_ref.fetch(
-            lua,
-            origin_fields_for_ptr(default_control.to_pointer()),
-            None,
-        )?;
-        let handler_key = Value::String(lua.create_string(key)?);
-        let handler_key_preview = value_to_upvalue_preview(&handler_key);
-        let handler_value_preview = value_to_upvalue_preview(&Value::Function(handler_fn.clone()));
-        log_set_table_entry(
-            system_handle.clone(),
-            system_handle_label.clone(),
-            handler_key_preview,
-            handler_value_preview,
-            None,
-            Some(system_fields.clone()),
-            None,
-        );
-        system.set(key, handler_fn)?;
-        pinned_refs.push(handler_ref.key);
+        system_for_handler.set(key, default_control.clone())?;
     }
+
+    pinned_refs.push(system_ref.key);
     system.set("setTable", lua.create_table()?)?;
     system.set("currentActor", manny)?;
     Ok(())
