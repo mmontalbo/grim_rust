@@ -347,9 +347,11 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "crossterm",
  "grim_telemetry_common",
  "humantime",
  "nix",
+ "ratatui",
  "serde",
  "serde_json",
  "tempfile",
@@ -953,18 +955,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "trace_tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "grim_telemetry_common",
- "ratatui",
- "serde_json",
 ]
 
 [[package]]

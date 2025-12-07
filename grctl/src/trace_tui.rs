@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use std::ffi::OsString;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -55,6 +56,56 @@ impl From<CliStreamFilter> for StreamFilter {
             CliStreamFilter::All => StreamFilter::All,
         }
     }
+}
+
+pub fn run_with_args(argv: &[OsString]) -> Result<()> {
+    let mut args = Vec::with_capacity(argv.len() + 1);
+    args.push(OsString::from("trace_tui"));
+    args.extend_from_slice(argv);
+    let args = Args::parse_from(args);
+    run(args)
+}
+
+fn run(args: Args) -> Result<()> {
+    let mut terminal = setup_terminal()?;
+    let stream_filter: StreamFilter = args.stream.into();
+
+    let result = match args.paths.as_slice() {
+        [single] => {
+            let title = args
+                .left_label
+                .clone()
+                .unwrap_or_else(|| label_from_path(single, "trace"));
+            let entries = load_entries(single)?;
+            run_single(&mut terminal, SingleApp::new(title, entries, stream_filter))
+        }
+        [left, right] => {
+            let left_title = args
+                .left_label
+                .clone()
+                .unwrap_or_else(|| label_from_path(left, "left"));
+            let right_title = args
+                .right_label
+                .clone()
+                .unwrap_or_else(|| label_from_path(right, "right"));
+            let left_entries = load_entries(left)?;
+            let right_entries = load_entries(right)?;
+            run_dual(
+                &mut terminal,
+                DualApp::new(
+                    left_title,
+                    left_entries,
+                    right_title,
+                    right_entries,
+                    stream_filter,
+                ),
+            )
+        }
+        _ => unreachable!("clap enforces one or two paths"),
+    };
+
+    cleanup_terminal(&mut terminal)?;
+    result
 }
 
 struct Field {
@@ -286,49 +337,6 @@ impl DualApp {
             pane.rebuild_visible(self.stream_filter, target_seq);
         }
     }
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let mut terminal = setup_terminal()?;
-    let stream_filter: StreamFilter = args.stream.into();
-
-    let result = match args.paths.as_slice() {
-        [single] => {
-            let title = args
-                .left_label
-                .clone()
-                .unwrap_or_else(|| label_from_path(single, "trace"));
-            let entries = load_entries(single)?;
-            run_single(&mut terminal, SingleApp::new(title, entries, stream_filter))
-        }
-        [left, right] => {
-            let left_title = args
-                .left_label
-                .clone()
-                .unwrap_or_else(|| label_from_path(left, "left"));
-            let right_title = args
-                .right_label
-                .clone()
-                .unwrap_or_else(|| label_from_path(right, "right"));
-            let left_entries = load_entries(left)?;
-            let right_entries = load_entries(right)?;
-            run_dual(
-                &mut terminal,
-                DualApp::new(
-                    left_title,
-                    left_entries,
-                    right_title,
-                    right_entries,
-                    stream_filter,
-                ),
-            )
-        }
-        _ => unreachable!("clap enforces one or two paths"),
-    };
-
-    cleanup_terminal(&mut terminal)?;
-    result
 }
 
 fn run_single(

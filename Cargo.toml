@@ -6,6 +6,5 @@ members = [
   "grctl/grim_scenarios",
   "grim_analysis",
   "grim_telemetry_common",
-  "tools/trace_tui",
 ]
 resolver = "2"

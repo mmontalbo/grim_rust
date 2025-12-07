@@ -34,6 +34,7 @@ use retail::{
 };
 mod gdb;
 mod stack_dump;
+mod trace_tui;
 
 const RETAIL_STEAM_APP_ID: &str = "345350";
 const RETAIL_LUA_PATH: &str = "./?.lua;./?.LUA;./mods/?.lua";
@@ -1918,23 +1919,8 @@ fn launch_parity_tui(paths: &Paths, engine_log: &Path, retail_log: &Path) -> Res
     launch_trace_tui_with_args(paths, &args)
 }
 
-fn launch_trace_tui_with_args(paths: &Paths, args: &[OsString]) -> Result<()> {
-    let status = Command::new("cargo")
-        .arg("run")
-        .arg("-p")
-        .arg("trace_tui")
-        .arg("--")
-        .args(args)
-        .current_dir(&paths.repo_root)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("spawning trace_tui")?;
-    if !status.success() {
-        bail!("trace_tui exited with status {}", status);
-    }
-    Ok(())
+fn launch_trace_tui_with_args(_paths: &Paths, args: &[OsString]) -> Result<()> {
+    trace_tui::run_with_args(args)
 }
 
 fn resolve_run_path(
