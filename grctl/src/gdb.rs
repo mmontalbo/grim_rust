@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+use crate::components::Paths;
+use crate::lifecycle::build_ld_library_path;
 use crate::retail::RetailLayout;
-use crate::{build_ld_library_path, Paths};
 
 pub(crate) const LUA_NEWSTATE_OFF: u32 = 0x125f0;
 pub(crate) const LUA_OPEN_OFF: u32 = 0x128a0;
