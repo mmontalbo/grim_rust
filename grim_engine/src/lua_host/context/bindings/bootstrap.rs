@@ -171,6 +171,40 @@ fn install_basic_functions(
         Some(concat_fallback.to_pointer()),
     );
 
+    // Retail stashes the concat fallback (typeFB) and a set of text property strings as refs
+    // before binding additional globals; mirror that burst so ref ids and lua_getref calls line up.
+    let lua_ref: Function = globals.get("lua_ref")?;
+    let _ = lua_ref.call::<_, i32>(Value::Function(concat_fallback.clone()))?;
+    for key in [
+        "x",
+        "y",
+        "cache",
+        "font",
+        "width",
+        "leftclip",
+        "height",
+        "fgcolor",
+        "bgcolor",
+        "fxcolor",
+        "hicolor",
+        "duration",
+        "center",
+        "ljustify",
+        "rjustify",
+        "layer",
+        "highlight",
+        "coords",
+        "volume",
+        "pan",
+        "background",
+        "alpha",
+        "fade",
+        "mirrormode",
+    ] {
+        let value = Value::String(lua.create_string(key)?);
+        let _ = lua_ref.call::<_, i32>(value)?;
+    }
+
     let debug_state = context.clone();
     let print_debug = lua.create_function(move |_, args: Variadic<Value>| {
         if let Some(Value::String(text)) = args.first() {

@@ -8,11 +8,11 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref, origin_fields_for_ptr,
-    ptr_to_handle,
+    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref, normalize_handle,
+    origin_fields_for_ptr, ptr_to_handle,
 };
 
-use super::util::{set_global_silent, value_fields_from_lua, TaggedHandle};
+use super::util::{handle_from_value, set_global_silent, value_fields_from_lua, TaggedHandle};
 use super::{store_registry_value, RegistryRef};
 use crate::lua_host::context::EngineContext;
 
@@ -110,15 +110,25 @@ fn install_fallback_globals<'lua>(
     let refs_state = refs.clone();
     let lua_ref = lua.create_function(move |lua_ctx, value: Value| -> LuaResult<i32> {
         let reference = refs_state.next_handle();
-        let label = format!("ref:{reference}");
+        let preferred_handle = handle_from_value(&value).filter(|h| h != "0x00000000");
+        let fabricated = normalize_handle(
+            "handle",
+            Some(
+                preferred_handle
+                    .clone()
+                    .unwrap_or_else(|| format!("0x{:08x}", next_fabricated_handle().raw as u32)),
+            ),
+        );
+        let handle = preferred_handle.unwrap_or(fabricated);
+        let label = format!("handle={handle}");
         let entry = store_registry_value(
             lua_ctx,
             value,
             1,
             Some(reference),
             Some(label.clone()),
-            None,
-            Some(label.clone()),
+            Some(handle.clone()),
+            Some(handle),
         )?;
         refs_state.store(entry);
         Ok(reference)
