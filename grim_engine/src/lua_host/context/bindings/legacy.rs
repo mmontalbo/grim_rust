@@ -8,8 +8,8 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref, normalize_handle,
-    origin_fields_for_ptr, ptr_to_handle,
+    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
+    normalize_handle, origin_fields_for_ptr, ptr_to_handle,
 };
 
 use super::util::{handle_from_value, set_global_silent, value_fields_from_lua, TaggedHandle};
@@ -172,9 +172,22 @@ fn install_index_hook(
     globals: &Table,
     fallbacks: Rc<RefCell<LegacyFallbacks>>,
 ) -> LuaResult<()> {
+    let globals_ptr = globals.to_pointer();
     let index_state = fallbacks.clone();
     let index_fb = lua.create_function(move |lua_ctx, (table, key): (Value, Value)| {
-        let handler = index_state.borrow().handler_for_event(lua_ctx, "index")?;
+        // Avoid routing globals through the index fallback to prevent recursion
+        // when scripts probe table.parent, but fall back to the index handler
+        // when no getglobal override is present.
+        let use_getglobal = matches!(&table, Value::Table(t) if t.to_pointer() == globals_ptr);
+        let handler = {
+            let state = index_state.borrow();
+            let event = if use_getglobal && state.fallbacks.contains_key("getglobal") {
+                "getglobal"
+            } else {
+                "index"
+            };
+            state.handler_for_event(lua_ctx, event)?
+        };
         if let Some(func) = handler {
             return func.call::<_, Value>((table, key));
         }
@@ -432,17 +445,9 @@ impl LegacyFallbacks {
     }
 
     fn default_tags() -> Vec<i64> {
-        let mut tags = vec![
-            0,
-            Self::TAG_NIL,
-            Self::TAG_NUMBER,
-            Self::TAG_STRING,
-            Self::TAG_TABLE,
-            Self::TAG_FUNCTION,
-        ];
-        tags.sort_unstable();
-        tags.dedup();
-        tags
+        // Mirror retail's setfallback.lua ordering: 0, tag(0), tag(""), tag({}),
+        // tag(function() end), tag(settagmethod), tag(nil).
+        vec![0, -1, -2, -3, -4, -5, -7]
     }
 }
 

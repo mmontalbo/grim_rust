@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::cli::RunLuaArgs;
-use crate::lua_host::run_boot_sequence;
+use crate::lua_host::{log_engine_exit, run_boot_sequence};
 
 pub fn execute(args: RunLuaArgs) -> Result<()> {
     let RunLuaArgs {
@@ -10,8 +10,20 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         verbose,
     } = args;
 
-    let runtime = run_boot_sequence(&data_root, verbose, headless)?;
-    runtime.run()?;
+    let result = (|| -> Result<()> {
+        let runtime = run_boot_sequence(&data_root, verbose, headless)?;
+        runtime.run()?;
+        Ok(())
+    })();
 
-    Ok(())
+    match result {
+        Ok(()) => {
+            log_engine_exit("ok", None);
+            Ok(())
+        }
+        Err(err) => {
+            log_engine_exit("error", Some(&err.to_string()));
+            Err(err)
+        }
+    }
 }

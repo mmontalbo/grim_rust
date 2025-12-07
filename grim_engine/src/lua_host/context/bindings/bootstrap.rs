@@ -8,7 +8,7 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_create_table, log_event, log_push_cclosure, log_push_number, log_push_object,
+    log_create_table, log_dofile, log_event, log_push_cclosure, log_push_number, log_push_object,
     log_push_usertag, log_set_fallback, log_set_table_entry, next_fabricated_handle, ptr_to_handle,
     register_tag,
 };
@@ -17,8 +17,8 @@ use grim_telemetry_common::{LuaEvent, OriginFields, ValueFields};
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::install_legacy_compat;
 use super::util::{
-    set_global, value_fields_from_lua, value_to_string, value_to_upvalue_preview,
-    with_registered_global_hint, RegisteredGlobalMeta, TaggedHandle,
+    set_global, set_global_silent, value_fields_from_lua, value_to_string,
+    value_to_upvalue_preview, with_registered_global_hint, RegisteredGlobalMeta, TaggedHandle,
 };
 use super::{store_registry_value, PinnedRegistryKeys};
 use crate::lua_host::context::EngineContext;
@@ -37,7 +37,7 @@ pub(crate) fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn install_globals(
+pub(crate) fn install_globals_pre_system(
     lua: &Lua,
     data_root: &Path,
     context: Rc<RefCell<EngineContext>>,
@@ -73,55 +73,37 @@ pub(crate) fn install_globals(
     log_event(LuaEvent::CollectGarbage {});
     install_system_table(lua, &globals, context.clone())?;
 
-    install_basic_functions(lua, &globals, context.clone())?;
-
-    install_stubbed_tables(lua, &globals, context.clone())?;
-
-    let root = data_root.to_path_buf();
-    let verbose = context.borrow().verbose();
-    let dofile_context = context.clone();
-    let wrapped_dofile = lua.create_function(move |lua_ctx, path: String| -> LuaResult<Value> {
-        if let Some(value) = handle_special_dofile(lua_ctx, &path, dofile_context.clone())? {
-            if verbose {
-                println!("[lua][dofile] handled {} via host", path);
-            }
-            return Ok(value);
-        }
-
-        let mut tried = Vec::new();
-        for candidate in candidate_paths(&path) {
-            let absolute = if candidate.is_absolute() {
-                candidate
-            } else {
-                root.join(&candidate)
-            };
-            tried.push(absolute.clone());
-            if let Some(value) = execute_script(lua_ctx, &absolute)? {
-                if verbose {
-                    println!("[lua][dofile] loaded {}", absolute.display());
-                }
-                return Ok(value);
-            }
-        }
-
-        if verbose {
-            println!("[lua][dofile] skipped {}", path);
-            for attempt in tried {
-                println!("  tried {}", attempt.display());
-            }
-        }
-
-        Ok(Value::Nil)
-    })?;
-    set_global(lua, &globals, "dofile", wrapped_dofile)?;
+    install_dofile(lua, &globals, data_root, context.clone())?;
+    install_basic_functions_pre_system(lua, &globals, context.clone())?;
 
     Ok(())
 }
 
-fn install_basic_functions(
+pub(crate) fn install_globals_post_system(
+    lua: &Lua,
+    context: Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    let globals = lua.globals();
+    install_basic_functions_post_system(lua, &globals, context.clone())?;
+    install_stubbed_tables(lua, &globals, context)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) fn install_globals(
+    lua: &Lua,
+    data_root: &Path,
+    context: Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    install_globals_pre_system(lua, data_root, context.clone())?;
+    install_globals_post_system(lua, context)?;
+    Ok(())
+}
+
+fn install_basic_functions_pre_system(
     lua: &Lua,
     globals: &Table,
-    context: Rc<RefCell<EngineContext>>,
+    _context: Rc<RefCell<EngineContext>>,
 ) -> LuaResult<()> {
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
         let type_ptr = type_fn.to_pointer();
@@ -205,6 +187,14 @@ fn install_basic_functions(
         let _ = lua_ref.call::<_, i32>(value)?;
     }
 
+    Ok(())
+}
+
+fn install_basic_functions_post_system(
+    lua: &Lua,
+    globals: &Table,
+    context: Rc<RefCell<EngineContext>>,
+) -> LuaResult<()> {
     let debug_state = context.clone();
     let print_debug = lua.create_function(move |_, args: Variadic<Value>| {
         if let Some(Value::String(text)) = args.first() {
@@ -327,6 +317,54 @@ fn install_basic_functions(
     let break_here = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     set_global(lua, globals, "break_here", break_here)?;
 
+    Ok(())
+}
+
+fn install_dofile(
+    lua: &Lua,
+    globals: &Table,
+    data_root: &Path,
+    context: Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    let root = data_root.to_path_buf();
+    let verbose = context.borrow().verbose();
+    let dofile_context = context.clone();
+    let wrapped_dofile = lua.create_function(move |lua_ctx, path: String| -> LuaResult<Value> {
+        log_dofile(&path);
+        if let Some(value) = handle_special_dofile(lua_ctx, &path, dofile_context.clone())? {
+            if verbose {
+                println!("[lua][dofile] handled {} via host", path);
+            }
+            return Ok(value);
+        }
+
+        let mut tried = Vec::new();
+        for candidate in candidate_paths(&path) {
+            let absolute = if candidate.is_absolute() {
+                candidate
+            } else {
+                root.join(&candidate)
+            };
+            tried.push(absolute.clone());
+            if let Some(value) = execute_script(lua_ctx, &absolute)? {
+                if verbose {
+                    println!("[lua][dofile] loaded {}", absolute.display());
+                }
+                return Ok(value);
+            }
+        }
+
+        if verbose {
+            println!("[lua][dofile] skipped {}", path);
+            for attempt in tried {
+                println!("  tried {}", attempt.display());
+            }
+        }
+
+        Ok(Value::Nil)
+    })?;
+    // Avoid logging an extra semantic bind here so ordering matches retail tagmethod burst.
+    set_global_silent(lua, globals, "dofile", wrapped_dofile)?;
     Ok(())
 }
 

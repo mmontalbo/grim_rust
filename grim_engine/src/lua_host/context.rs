@@ -2,8 +2,9 @@ mod bindings;
 mod scripts;
 
 pub(super) use bindings::{
-    call_boot, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene, install_globals,
-    install_package_path, load_system_script, override_boot_stubs,
+    call_boot, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene,
+    install_globals_post_system, install_globals_pre_system, install_package_path,
+    load_system_script, override_boot_stubs,
 };
 
 use scripts::{ScriptRuntime, ScriptRuntimeAdapter};

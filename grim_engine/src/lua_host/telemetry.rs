@@ -47,6 +47,20 @@ pub(crate) fn next_fabricated_handle() -> FabricatedHandle {
     FabricatedHandle { raw: raw as i32 }
 }
 
+pub(crate) fn log_dofile(path: &str) {
+    log_event(LuaEvent::Dofile {
+        path: path.to_string(),
+    });
+}
+
+pub(crate) fn log_engine_exit(status: &str, note: Option<&str>) {
+    let mut builder = EventBuilder::new("engine_exit").kv("status", status);
+    if let Some(text) = note {
+        builder = builder.kv("note", text);
+    }
+    log_event(builder);
+}
+
 pub(crate) fn log_push_cclosure(
     label: &str,
     func: *const c_void,

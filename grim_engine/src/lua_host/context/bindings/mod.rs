@@ -9,7 +9,11 @@ pub(crate) use boot::{
     call_boot, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene,
     load_system_script, override_boot_stubs,
 };
-pub(crate) use bootstrap::{install_globals, install_package_path};
+#[cfg(test)]
+pub(crate) use bootstrap::install_globals;
+pub(crate) use bootstrap::{
+    install_globals_post_system, install_globals_pre_system, install_package_path,
+};
 pub(crate) use registry::{store_registry_value, PinnedRegistryKeys, RegistryRef};
 
 #[cfg(test)]

@@ -8,72 +8,11 @@ use mlua::{Error as LuaError, Lua, MultiValue, Result as LuaResult, Value};
 
 use crate::lua_host::context::EngineContext;
 
-const SPECIAL_FILES: &[&str] = &[
-    "setfallback.lua",
-    "_colors.lua",
-    "_colors.decompiled.lua",
-    "_sfx.lua",
-    "_sfx.decompiled.lua",
-    "_controls.lua",
-    "_controls.decompiled.lua",
-    "_dialog.lua",
-    "_dialog.decompiled.lua",
-    "_music.lua",
-    "_music.decompiled.lua",
-    "_mouse.lua",
-    "_mouse.decompiled.lua",
-    "_ui.lua",
-    "_ui.decompiled.lua",
-    "_achievement.lua",
-    "_achievement.decompiled.lua",
-    "_actors.lua",
-    "_actors.decompiled.lua",
-    "_objects.lua",
-    "_objects.decompiled.lua",
-    "_sets.lua",
-    "_sets.decompiled.lua",
-    "_inventory.lua",
-    "_inventory.decompiled.lua",
-    "_cut_scenes.lua",
-    "_cut_scenes.decompiled.lua",
-    "menu_loading.lua",
-    "menu_loading.decompiled.lua",
-    "menu_boot_warning.lua",
-    "menu_boot_warning.decompiled.lua",
-    "menu_dialog.lua",
-    "menu_dialog.decompiled.lua",
-    "menu_common.lua",
-    "menu_common.decompiled.lua",
-    "menu_remap_keys.lua",
-    "menu_remap_keys.decompiled.lua",
-    "menu_prefs.lua",
-    "menu_prefs.decompiled.lua",
-    "mn_scythe.lua",
-    "mn_scythe.decompiled.lua",
-];
-
-const SPECIAL_PREFIXES: &[&str] = &["achievementdefinitions_"];
-const SPECIAL_SUFFIXES: &[&str] = &["_inv.lua", "_inv.decompiled.lua"];
-
 pub(super) fn handle_special_dofile<'lua>(
     _lua: &'lua Lua,
-    path: &str,
+    _path: &str,
     _context: Rc<RefCell<EngineContext>>,
 ) -> LuaResult<Option<Value<'lua>>> {
-    if let Some(filename) = Path::new(path).file_name().and_then(|name| name.to_str()) {
-        let lower = filename.to_ascii_lowercase();
-        if SPECIAL_FILES.contains(&lower.as_str())
-            || SPECIAL_PREFIXES
-                .iter()
-                .any(|prefix| lower.starts_with(prefix))
-            || SPECIAL_SUFFIXES
-                .iter()
-                .any(|suffix| lower.ends_with(suffix))
-        {
-            return Ok(Some(Value::Boolean(true)));
-        }
-    }
-
     Ok(None)
 }
 
