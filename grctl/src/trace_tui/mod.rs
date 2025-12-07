@@ -172,6 +172,12 @@ fn render_dual_loop(
                         KeyCode::Right | KeyCode::Char('l') => app.focus_right(),
                         KeyCode::Tab => app.toggle_focus(),
                         KeyCode::Char('s') => app.cycle_stream_filter(),
+                        KeyCode::Char('f') => {
+                            if app.jump_first_diff() {
+                                needs_redraw = true;
+                                continue;
+                            }
+                        }
                         _ => {}
                     }
                     needs_redraw = true;

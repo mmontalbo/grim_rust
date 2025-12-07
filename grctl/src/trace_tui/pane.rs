@@ -213,6 +213,43 @@ impl DualApp {
             pane.rebuild_visible(self.stream_filter, target_seq);
         }
     }
+
+    pub fn jump_first_diff(&mut self) -> bool {
+        if let Some(seq) = self.first_diff_seq() {
+            for pane in self.panes.iter_mut() {
+                pane.rebuild_visible(self.stream_filter, Some(seq));
+            }
+            return true;
+        }
+        false
+    }
+
+    fn first_diff_seq(&self) -> Option<u64> {
+        let mut best: Option<u64> = None;
+        for idx in 0..self.panes[0].entries.len() {
+            if let Some(Some(status)) = self.parity[0].get(idx) {
+                if !matches!(status, ParityStatus::Match) {
+                    let seq = self.panes[0].entries[idx].seq_min;
+                    if best.map_or(true, |b| seq < b) {
+                        best = Some(seq);
+                    }
+                    break;
+                }
+            }
+        }
+        for idx in 0..self.panes[1].entries.len() {
+            if let Some(Some(status)) = self.parity[1].get(idx) {
+                if !matches!(status, ParityStatus::Match) {
+                    let seq = self.panes[1].entries[idx].seq_min;
+                    if best.map_or(true, |b| seq < b) {
+                        best = Some(seq);
+                    }
+                    break;
+                }
+            }
+        }
+        best
+    }
 }
 
 pub fn render_single(frame: &mut Frame, app: &mut SingleApp) {

@@ -210,6 +210,12 @@ struct ParityLogsArgs {
     /// Run selection to stream (defaults to latest).
     #[arg(long, value_parser = parse_run_selection, default_value = "latest")]
     run: RunSelection,
+    /// Report the first divergence between engine/retail and exit.
+    #[arg(long)]
+    first_diff: bool,
+    /// Number of events of context to show around the first divergence.
+    #[arg(long, default_value_t = 3)]
+    window: usize,
     /// Continuously stream log updates after the initial read.
     #[arg(long, short = 'f')]
     follow: bool,
@@ -303,6 +309,35 @@ fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
         "  stream: {}",
         if semantic_only { "semantic" } else { "raw" }
     );
+
+    if args.first_diff {
+        if args.follow {
+            bail!("--first-diff is incompatible with --follow");
+        }
+        let report = first_diff_report(&engine_log, &retail_log, stream_filter, args.window)?;
+        match report {
+            None => {
+                println!("[grctl] no divergences found");
+            }
+            Some(report) => {
+                println!("[grctl] first divergence at position {}", report.position);
+                println!(
+                    "  engine: seq={:06} event={}",
+                    report.engine.seq, report.engine.event
+                );
+                println!(
+                    "  retail: seq={:06} event={}",
+                    report.retail.seq, report.retail.event
+                );
+                println!();
+                println!("[grctl] context:");
+                for entry in report.context {
+                    println!("{entry}");
+                }
+            }
+        }
+        return Ok(());
+    }
     if args.tui {
         if args.from_start {
             println!("[grctl] --from-start is ignored with --tui (viewer reads full logs)");
@@ -505,6 +540,140 @@ fn backfill_pairs(
         rows.push((seq, engine_map.remove(&seq), retail_map.remove(&seq)));
     }
     Ok(rows)
+}
+
+fn first_diff_report(
+    engine_log: &Path,
+    retail_log: &Path,
+    filter: StreamFilter,
+    window: usize,
+) -> Result<Option<FirstDiff>> {
+    let engine_entries = collect_lines(engine_log, filter)?;
+    let retail_entries = collect_lines(retail_log, filter)?;
+    if engine_entries.is_empty() && retail_entries.is_empty() {
+        return Ok(None);
+    }
+
+    let mut idx = 0;
+    while idx < engine_entries.len() && idx < retail_entries.len() {
+        let engine_event = extract_event(&engine_entries[idx].1);
+        let retail_event = extract_event(&retail_entries[idx].1);
+        if engine_event != retail_event {
+            return Ok(Some(build_first_diff(
+                idx,
+                &engine_entries,
+                &retail_entries,
+                window,
+                engine_event.unwrap_or_else(|| "<unknown>".to_string()),
+                retail_event.unwrap_or_else(|| "<unknown>".to_string()),
+            )));
+        }
+        idx += 1;
+    }
+
+    if engine_entries.len() != retail_entries.len() {
+        let position = idx + 1;
+        let engine_entry = engine_entries.get(idx).cloned();
+        let retail_entry = retail_entries.get(idx).cloned();
+        let engine = engine_entry
+            .as_ref()
+            .map(|(seq, line)| EventLine {
+                seq: *seq,
+                event: extract_event(line).unwrap_or_else(|| "<unknown>".to_string()),
+            })
+            .unwrap_or(EventLine {
+                seq: 0,
+                event: "(missing)".to_string(),
+            });
+        let retail = retail_entry
+            .as_ref()
+            .map(|(seq, line)| EventLine {
+                seq: *seq,
+                event: extract_event(line).unwrap_or_else(|| "<unknown>".to_string()),
+            })
+            .unwrap_or(EventLine {
+                seq: 0,
+                event: "(missing)".to_string(),
+            });
+        let context = gather_context(idx, &engine_entries, &retail_entries, window);
+        return Ok(Some(FirstDiff {
+            position,
+            engine,
+            retail,
+            context,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn build_first_diff(
+    idx: usize,
+    engine_entries: &[(u64, String)],
+    retail_entries: &[(u64, String)],
+    window: usize,
+    engine_event: String,
+    retail_event: String,
+) -> FirstDiff {
+    let engine_line = &engine_entries[idx];
+    let retail_line = &retail_entries[idx];
+    FirstDiff {
+        position: idx + 1,
+        engine: EventLine {
+            seq: engine_line.0,
+            event: engine_event,
+        },
+        retail: EventLine {
+            seq: retail_line.0,
+            event: retail_event,
+        },
+        context: gather_context(idx, engine_entries, retail_entries, window),
+    }
+}
+
+fn gather_context(
+    center_idx: usize,
+    engine_entries: &[(u64, String)],
+    retail_entries: &[(u64, String)],
+    window: usize,
+) -> Vec<String> {
+    let start = center_idx.saturating_sub(window);
+    let end = (center_idx + window + 1).min(engine_entries.len().max(retail_entries.len()));
+    let mut rows = Vec::new();
+    for i in start..end {
+        let engine = engine_entries
+            .get(i)
+            .map(|(seq, line)| format!("E {:06}: {}", seq, line))
+            .unwrap_or_else(|| "E ------: (missing)".to_string());
+        let retail = retail_entries
+            .get(i)
+            .map(|(seq, line)| format!("R {:06}: {}", seq, line))
+            .unwrap_or_else(|| "R ------: (missing)".to_string());
+        rows.push(engine);
+        rows.push(retail);
+        rows.push(String::from("---"));
+    }
+    rows
+}
+
+fn extract_event(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix("event="))
+        .map(|s| s.to_string())
+}
+
+#[derive(Debug)]
+struct EventLine {
+    seq: u64,
+    event: String,
+}
+
+#[derive(Debug)]
+struct FirstDiff {
+    position: usize,
+    engine: EventLine,
+    retail: EventLine,
+    context: Vec<String>,
 }
 
 fn print_aligned_row(seq: u64, engine: Option<&str>, retail: Option<&str>) {
