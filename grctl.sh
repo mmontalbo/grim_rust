@@ -5,10 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 if [[ -n "${IN_NIX_SHELL:-}" && -n "${DEV_INSTALL_PATH:-}" ]]; then
-    exec cargo run -p grctl -- "$@"
+    exec cargo run -p grctl --release -- "$@"
 fi
 
-cmd="cargo run -p grctl --"
+cmd="cargo run -p grctl --release --"
 if [[ $# -gt 0 ]]; then
     cmd+=" $(printf '%q ' "$@")"
 fi
