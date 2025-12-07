@@ -14,3 +14,4 @@ shim/*.so
 **/shim/*.so
 steam-library/
 luac.out
+perf/

@@ -44,17 +44,24 @@ impl LogEntry {
                 return text;
             }
         }
-        let mut parts = Vec::new();
+        let mut summary = String::new();
+        let mut count = 0;
         for field in self.fields.iter() {
             if field.key == "event" || field.key == "seq" || field.key == "stream" {
                 continue;
             }
-            parts.push(format!("{}={}", field.key, field.value));
-            if parts.len() >= 4 {
+            if !summary.is_empty() {
+                summary.push(' ');
+            }
+            summary.push_str(&field.key);
+            summary.push('=');
+            summary.push_str(&field.value);
+            count += 1;
+            if count >= 4 {
                 break;
             }
         }
-        parts.join(" ")
+        summary
     }
 }
 
@@ -146,29 +153,20 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
         without_metadata
     };
 
-    let tokens = split_fields(&content);
-    if tokens.is_empty() {
-        return None;
-    }
-
-    let mut fields = Vec::new();
+    let mut fields = Vec::with_capacity(16);
     let mut seq_display = None;
     let mut event = None;
     let mut stream = StreamKind::Other;
+    tokenize_fields(
+        &content,
+        &mut fields,
+        &mut seq_display,
+        &mut event,
+        &mut stream,
+    );
 
-    for token in tokens {
-        if let Some((key, value)) = token.split_once('=') {
-            let key = key.to_string();
-            let value = value.to_string();
-            if key == "seq" {
-                seq_display = Some(value.clone());
-            } else if key == "event" {
-                event = Some(value.clone());
-            } else if key == "stream" {
-                stream = StreamKind::from_field(&value);
-            }
-            fields.push(Field { key, value });
-        }
+    if fields.is_empty() {
+        return None;
     }
 
     if matches!(stream, StreamKind::Other) {
@@ -227,17 +225,20 @@ fn semantic_event_map(entries: &[LogEntry]) -> std::collections::HashMap<u64, (u
     map
 }
 
-fn split_fields(line: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
+fn tokenize_fields(
+    line: &str,
+    fields: &mut Vec<Field>,
+    seq_display: &mut Option<String>,
+    event: &mut Option<String>,
+    stream: &mut StreamKind,
+) {
+    let mut current = String::with_capacity(line.len());
     let mut in_quotes = false;
     let mut chars = line.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
-            '"' => {
-                in_quotes = !in_quotes;
-            }
+            '"' => in_quotes = !in_quotes,
             '\\' => {
                 if let Some('"') = chars.peek() {
                     current.push('"');
@@ -247,20 +248,44 @@ fn split_fields(line: &str) -> Vec<String> {
                 }
             }
             ' ' if !in_quotes => {
-                if !current.is_empty() {
-                    tokens.push(current.clone());
-                    current.clear();
-                }
+                push_field(&mut current, fields, seq_display, event, stream);
             }
             _ => current.push(ch),
         }
     }
 
-    if !current.is_empty() {
-        tokens.push(current);
+    push_field(&mut current, fields, seq_display, event, stream);
+}
+
+fn push_field(
+    current: &mut String,
+    fields: &mut Vec<Field>,
+    seq_display: &mut Option<String>,
+    event: &mut Option<String>,
+    stream: &mut StreamKind,
+) {
+    if current.is_empty() {
+        return;
     }
 
-    tokens
+    if let Some(eq_idx) = current.find('=') {
+        let value = current.split_off(eq_idx + 1);
+        current.truncate(eq_idx);
+        // Preserve the existing allocation for the next token while moving out the key.
+        let key = std::mem::replace(current, String::with_capacity(current.capacity()));
+
+        if key == "seq" {
+            *seq_display = Some(value.clone());
+        } else if key == "event" {
+            *event = Some(value.clone());
+        } else if key == "stream" {
+            *stream = StreamKind::from_field(&value);
+        }
+
+        fields.push(Field { key, value });
+    }
+
+    current.clear();
 }
 
 fn set_table_entry_summary(entry: &LogEntry) -> Option<String> {

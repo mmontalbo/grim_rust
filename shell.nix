@@ -104,6 +104,12 @@ in pkgs.mkShell {
     xdotool           # locate X11 windows for targeted capture
     linuxPackages.perf # profile CPU hotspots / scheduler contention
     cargo-flamegraph   # generate annotated perf flamegraphs
+    flamegraph         # Brendan Gregg's flamegraph scripts for raw perf.data
+    strace             # syscall tracing
+    sysstat            # pidstat/iostat for lightweight sampling
+    hyperfine          # quick CLI benchmarking
+    bpftrace           # ad-hoc eBPF probes when perf isn't enough
+    valgrind           # callgrind/helgrind as a fallback profiler
     rust-analyzer
     pkg-config
     llvmPackages.libclang
