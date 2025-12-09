@@ -15,7 +15,7 @@ use crate::lua_host::telemetry::{
 use grim_telemetry_common::{LuaEvent, OriginFields, ValueFields};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
-use super::legacy::install_legacy_compat;
+use super::legacy::{install_legacy_compat, install_legacy_math};
 use super::util::{
     set_global, set_global_silent, value_fields_from_lua, value_to_string,
     value_to_upvalue_preview, with_registered_global_hint, RegisteredGlobalMeta, TaggedHandle,
@@ -68,21 +68,14 @@ pub(crate) fn install_globals_pre_system(
         log_push_number("0");
         let _ = settagmethod.call::<_, Value>((-1, "pow", pow_fn));
     }
-    if let Ok(math) = globals.get::<_, Table>("math") {
-        if let Ok(random) = math.get::<_, Function>("random") {
-            set_global(lua, &globals, "random", random)?;
-        }
-        if let Ok(randomseed) = math.get::<_, Function>("randomseed") {
-            set_global(lua, &globals, "randomseed", randomseed)?;
-        }
-    }
+    install_legacy_math(lua, &globals)?;
     install_pi_constant(lua, &globals)?;
     lua.gc_collect()?;
     log_event(LuaEvent::CollectGarbage {});
-    install_system_table(lua, &globals, context.clone())?;
+    install_system_table(lua, &globals)?;
 
     install_dofile(lua, &globals, data_root, context.clone())?;
-    install_basic_functions_pre_system(lua, &globals, context.clone())?;
+    install_basic_functions_pre_system(lua, &globals)?;
 
     Ok(())
 }
@@ -108,11 +101,7 @@ pub(crate) fn install_globals(
     Ok(())
 }
 
-fn install_basic_functions_pre_system(
-    lua: &Lua,
-    globals: &Table,
-    _context: Rc<RefCell<EngineContext>>,
-) -> LuaResult<()> {
+fn install_basic_functions_pre_system(lua: &Lua, globals: &Table) -> LuaResult<()> {
     let nil_return = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?;
 
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
@@ -380,50 +369,7 @@ fn install_dofile(
     Ok(())
 }
 
-fn install_system_table(
-    lua: &Lua,
-    globals: &Table,
-    context: Rc<RefCell<EngineContext>>,
-) -> LuaResult<()> {
-    let manny_select_ctx = context.clone();
-    let manny = lua.create_table()?;
-    manny.set(
-        "set_selected",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            manny_select_ctx
-                .borrow_mut()
-                .log_event("actor.select manny");
-            Ok(())
-        })?,
-    )?;
-    let manny_default_ctx = context.clone();
-    manny.set(
-        "default",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            manny_default_ctx
-                .borrow_mut()
-                .log_event("actor.default manny");
-            Ok(())
-        })?,
-    )?;
-    let manny_put_ctx = context.clone();
-    manny.set(
-        "put_in_set",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let set = args
-                .first()
-                .and_then(value_to_string)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            manny_put_ctx
-                .borrow_mut()
-                .log_event(format!("actor.put_in_set manny {set}"));
-            Ok(())
-        })?,
-    )?;
-    manny.set("is_holding", Value::Nil)?;
-    // Retail exposes the player actor globally; mirror that so BOOT can call manny:* helpers.
-    set_global(lua, globals, "manny", manny.clone())?;
-
+fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
     let system = lua.create_table()?;
     let system_handle = ptr_to_handle(system.to_pointer());
     let system_handle_label = Some("global:system".to_string());
@@ -490,7 +436,6 @@ fn install_system_table(
 
     pinned_refs.push(system_ref.key);
     system.set("setTable", lua.create_table()?)?;
-    system.set("currentActor", manny)?;
     Ok(())
 }
 
@@ -788,13 +733,7 @@ fn bind_io_function<'lua>(
 }
 
 fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {
-    let fallback = Value::Number(std::f64::consts::PI);
-    let pi_value = globals
-        .get::<_, Table>("math")
-        .ok()
-        .and_then(|math| math.get::<_, Value>("pi").ok())
-        .unwrap_or(fallback);
-    set_global(lua, globals, "PI", pi_value)?;
+    set_global(lua, globals, "PI", std::f32::consts::PI as f64)?;
     Ok(())
 }
 
@@ -843,7 +782,7 @@ fn install_stubbed_tables(
     set_global(lua, globals, "system_prefs", system_prefs)?;
 
     if !matches!(globals.get::<_, Value>("system"), Ok(Value::Table(_))) {
-        install_system_table(lua, globals, context.clone())?;
+        install_system_table(lua, globals)?;
     }
 
     let logos_ctx = context.clone();

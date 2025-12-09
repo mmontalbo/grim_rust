@@ -34,6 +34,68 @@ pub(super) fn install_legacy_compat<'lua>(
     Ok(())
 }
 
+// Lua 3.1/MSVCRT LCG to mirror retail math.random/randomseed output and telemetry.
+const LUA31_RAND_MAX: u32 = 0x7fff;
+
+fn lua31_rand(state: &mut u32) -> u32 {
+    *state = state.wrapping_mul(214013).wrapping_add(2531011);
+    (*state >> 16) & LUA31_RAND_MAX
+}
+
+fn coerce_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Integer(i) => Some(*i as f64),
+        Value::Number(n) => Some(*n),
+        Value::String(text) => text.to_str().ok()?.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+pub(super) fn install_legacy_math<'lua>(lua: &'lua Lua, globals: &Table<'lua>) -> LuaResult<()> {
+    let state = Rc::new(RefCell::new(1u32));
+
+    let random_state = state.clone();
+    let random = lua.create_function(move |_, args: Variadic<Value>| -> LuaResult<Value> {
+        let mut seed = random_state.borrow_mut();
+        let raw = lua31_rand(&mut seed);
+        let bounded = raw % LUA31_RAND_MAX;
+        let unit = (bounded as f32) / (LUA31_RAND_MAX as f32);
+        match args.first() {
+            None | Some(Value::Nil) => Ok(Value::Number(unit as f64)),
+            Some(arg) => {
+                let upper = coerce_number(arg).ok_or_else(|| {
+                    LuaError::RuntimeError(
+                        "bad argument #1 to 'random' (number expected)".to_string(),
+                    )
+                })?;
+                let value = (unit as f64 * upper).trunc() + 1.0;
+                Ok(Value::Number(value))
+            }
+        }
+    })?;
+
+    let seed_state = state.clone();
+    let randomseed = lua.create_function(move |_, args: Variadic<Value>| {
+        let seed_arg = args.first().ok_or_else(|| {
+            LuaError::RuntimeError("bad argument #1 to 'randomseed' (number expected)".to_string())
+        })?;
+        let seed = coerce_number(seed_arg).ok_or_else(|| {
+            LuaError::RuntimeError("bad argument #1 to 'randomseed' (number expected)".to_string())
+        })?;
+        *seed_state.borrow_mut() = seed as u32;
+        Ok(())
+    })?;
+
+    set_global_silent(lua, globals, "random", random.clone())?;
+    set_global_silent(lua, globals, "randomseed", randomseed.clone())?;
+    if let Ok(math) = globals.get::<_, Table>("math") {
+        math.set("random", random)?;
+        math.set("randomseed", randomseed)?;
+    }
+
+    Ok(())
+}
+
 fn install_fallback_globals<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
