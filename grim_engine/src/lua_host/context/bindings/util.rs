@@ -6,7 +6,7 @@ use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 use crate::lua_host::telemetry::{
     log_lua_setglobal, log_push_cclosure, log_push_nil, log_push_number, log_push_object,
     log_push_string, log_registered_constant, log_registered_global, normalize_handle,
-    origin_fields_for_ptr, ptr_to_handle,
+    origin_fields_for_ptr, ptr_to_handle, register_table_label,
 };
 
 #[derive(Clone)]
@@ -71,6 +71,10 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
 
     let handle_label = format!("global:{name}");
     let handle = normalize_handle(&handle_label, handle_from_value(&value));
+
+    if let Value::Table(table) = &value {
+        register_table_label(table.to_pointer(), handle_label.clone());
+    }
 
     let mut origin = OriginFields::default();
     match &value {

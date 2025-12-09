@@ -3,13 +3,15 @@ mod legacy_lua;
 mod telemetry;
 
 use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use mlua::{Lua, LuaOptions, StdLib};
+use grim_telemetry_common::EventBuilder;
+use mlua::{Lua, LuaOptions, StdLib, Table, Value};
 
 pub fn log_engine_exit(status: &str, note: Option<&str>) {
     telemetry::log_engine_exit(status, note);
@@ -20,16 +22,25 @@ pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Res
         .context("initialising Lua runtime with standard libraries")?;
     let context = Rc::new(RefCell::new(context::EngineContext::new(verbose, headless)));
 
-    context::install_package_path(&lua, data_root)?;
-    context::install_globals_pre_system(&lua, data_root, context.clone())?;
-    context::load_system_script(&lua, data_root)?;
-    context::install_globals_post_system(&lua, context.clone())?;
-    context::override_boot_stubs(&lua, context.clone())?;
-    context::call_boot(&lua, context.clone())?;
-    context::drive_active_scripts(&lua, context.clone(), 8, 128)?;
-    if context::ensure_intro_cutscene(&lua, context.clone(), false)? {
-        context::drive_active_scripts(&lua, context.clone(), 16, 128)?;
+    let setup_result: Result<()> = (|| {
+        context::install_package_path(&lua, data_root)?;
+        context::install_globals_pre_system(&lua, data_root, context.clone())?;
+        context::load_system_script(&lua, data_root)?;
+        context::install_globals_post_system(&lua, context.clone())?;
+        context::override_boot_stubs(&lua, context.clone())?;
+        context::call_boot(&lua, context.clone())?;
+        context::drive_active_scripts(&lua, context.clone(), 8, 128)?;
+        if context::ensure_intro_cutscene(&lua, context.clone(), false)? {
+            context::drive_active_scripts(&lua, context.clone(), 16, 128)?;
+        }
+        Ok(())
+    })();
+    if verbose {
+        if let Err(err) = scan_parent_cycles(&lua) {
+            eprintln!("[grim_engine][scan_parent_cycles] {err}");
+        }
     }
+    setup_result?;
 
     let snapshot = context.borrow();
     context::dump_runtime_summary(&snapshot);
@@ -154,4 +165,119 @@ impl EngineRuntime {
             }
         }
     }
+}
+
+const PARENT_SCAN_TABLE_LIMIT: usize = 4096;
+const PARENT_SCAN_CHAIN_LIMIT: usize = 128;
+
+fn scan_parent_cycles(lua: &Lua) -> mlua::Result<()> {
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut reported = HashSet::new();
+    let globals = lua.globals();
+    telemetry::register_table_label(globals.to_pointer(), "global:_G");
+    queue.push_back((globals, Some("global:_G".to_string())));
+
+    while let Some((table, label)) = queue.pop_front() {
+        if visited.len() >= PARENT_SCAN_TABLE_LIMIT {
+            break;
+        }
+        let ptr = table.to_pointer() as usize;
+        if !visited.insert(ptr) {
+            continue;
+        }
+        if let Some(ref name) = label {
+            telemetry::register_table_label(table.to_pointer(), name.clone());
+        }
+        if let Some(chain) = find_parent_cycle(&table, label.as_deref(), &mut reported)? {
+            log_parent_cycle(chain);
+        }
+
+        for pair in table.clone().pairs::<Value, Value>() {
+            let Ok((key, value)) = pair else { continue };
+            if let Value::Table(child) = value {
+                let child_label = derive_child_label(label.as_deref(), &key);
+                if let Some(ref name) = child_label {
+                    telemetry::register_table_label(child.to_pointer(), name.clone());
+                }
+                queue.push_back((child, child_label.or_else(|| label.clone())));
+            }
+            if visited.len() >= PARENT_SCAN_TABLE_LIMIT {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_parent_cycle(
+    table: &Table,
+    label: Option<&str>,
+    reported: &mut HashSet<usize>,
+) -> mlua::Result<Option<Vec<(usize, String, Option<String>)>>> {
+    let mut chain: Vec<(usize, String, Option<String>)> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = table.clone();
+    let mut current_label = label.map(str::to_string);
+
+    for _ in 0..PARENT_SCAN_CHAIN_LIMIT {
+        let info = describe_table(&current, current_label.as_deref());
+        if !seen.insert(info.0) {
+            if reported.contains(&info.0) {
+                return Ok(None);
+            }
+            for entry in &chain {
+                reported.insert(entry.0);
+            }
+            reported.insert(info.0);
+            chain.push(info);
+            return Ok(Some(chain));
+        }
+        current_label = info.2.clone();
+        chain.push(info);
+        match current.raw_get::<_, Value>("parent") {
+            Ok(Value::Table(parent)) => {
+                current = parent;
+            }
+            _ => break,
+        }
+    }
+
+    Ok(None)
+}
+
+fn describe_table(table: &Table, fallback_label: Option<&str>) -> (usize, String, Option<String>) {
+    let ptr = table.to_pointer();
+    let handle = telemetry::ptr_to_handle(ptr);
+    let label = telemetry::table_label(ptr).or_else(|| fallback_label.map(str::to_string));
+    (ptr as usize, handle, label)
+}
+
+fn derive_child_label(parent: Option<&str>, key: &Value) -> Option<String> {
+    let parent = parent?;
+    let suffix = match key {
+        Value::String(text) => text.to_str().ok().map(|s| s.to_string()),
+        Value::Integer(num) => Some(num.to_string()),
+        Value::Number(num) => Some(num.to_string()),
+        _ => None,
+    }?;
+    Some(format!("{parent}.{suffix}"))
+}
+
+fn log_parent_cycle(chain: Vec<(usize, String, Option<String>)>) {
+    if chain.is_empty() {
+        return;
+    }
+    let mut path = Vec::new();
+    for (_, handle, label) in &chain {
+        path.push(label.clone().unwrap_or_else(|| handle.clone()));
+    }
+    let mut event = EventBuilder::new("lua_parent_cycle_scan")
+        .kv("table", chain[0].1.clone())
+        .kv("depth", chain.len() as i64)
+        .kv("path", path.join(" -> "));
+    if let Some(label) = chain[0].2.as_ref() {
+        event = event.kv("label", label.clone());
+    }
+    telemetry::log_event(event);
 }

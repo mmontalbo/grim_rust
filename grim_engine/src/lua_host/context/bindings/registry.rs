@@ -1,7 +1,9 @@
 use grim_telemetry_common::OriginFields;
 use mlua::{FromLua, Lua, RegistryKey, Result as LuaResult, Value};
 
-use crate::lua_host::telemetry::{log_fetch_ref, log_store_ref, normalize_handle};
+use crate::lua_host::telemetry::{
+    log_fetch_ref, log_store_ref, normalize_handle, register_table_label,
+};
 
 use super::util::handle_from_value;
 
@@ -53,6 +55,11 @@ pub(crate) fn store_registry_value<'lua>(
         label_for_handle,
         preferred_handle.or_else(|| handle_from_value(&value)),
     );
+    if let Value::Table(table) = &value {
+        if let Some(label) = handle_label.clone().or(label.clone()) {
+            register_table_label(table.to_pointer(), label);
+        }
+    }
     let key = lua.create_registry_value(value)?;
     let reference = reference.unwrap_or_else(|| key.id());
     log_store_ref(lock, reference, Some(handle.clone()), label.clone());

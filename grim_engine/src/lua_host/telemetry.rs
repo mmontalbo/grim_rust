@@ -20,6 +20,7 @@ const VM_ID: &str = "lua";
 static FABRICATED_HANDLE: AtomicU32 = AtomicU32::new(1);
 static KNOWN_TAGS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
 static FABRICATED_BY_LABEL: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static TABLE_LABELS: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
 
 static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     engine_id: ENGINE_ID,
@@ -31,6 +32,27 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
 
 pub(crate) fn log_event(event: impl Into<EventBuilder>) {
     LOGGER.log_event(event);
+}
+
+pub(crate) fn register_table_label(ptr: *const c_void, label: impl Into<String>) {
+    if ptr.is_null() {
+        return;
+    }
+    let labels = TABLE_LABELS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = labels.lock() {
+        map.entry(ptr as usize).or_insert_with(|| label.into());
+    }
+}
+
+pub(crate) fn table_label(ptr: *const c_void) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let labels = TABLE_LABELS.get_or_init(|| Mutex::new(HashMap::new()));
+    labels
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&(ptr as usize)).cloned())
 }
 
 pub(crate) fn ptr_to_handle(func: *const c_void) -> String {

@@ -68,6 +68,14 @@ pub(crate) fn install_globals_pre_system(
         log_push_number("0");
         let _ = settagmethod.call::<_, Value>((-1, "pow", pow_fn));
     }
+    if let Ok(math) = globals.get::<_, Table>("math") {
+        if let Ok(random) = math.get::<_, Function>("random") {
+            set_global(lua, &globals, "random", random)?;
+        }
+        if let Ok(randomseed) = math.get::<_, Function>("randomseed") {
+            set_global(lua, &globals, "randomseed", randomseed)?;
+        }
+    }
     install_pi_constant(lua, &globals)?;
     lua.gc_collect()?;
     log_event(LuaEvent::CollectGarbage {});
@@ -105,6 +113,8 @@ fn install_basic_functions_pre_system(
     globals: &Table,
     _context: Rc<RefCell<EngineContext>>,
 ) -> LuaResult<()> {
+    let nil_return = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?;
+
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
         let type_ptr = type_fn.to_pointer();
         let type_handle = ptr_to_handle(type_ptr);
@@ -138,6 +148,8 @@ fn install_basic_functions_pre_system(
     set_global(lua, globals, "CAMERA", 8192)?;
     set_global(lua, globals, "SPECIAL", 12288)?;
     set_global(lua, globals, "HOT", 16384)?;
+    set_global(lua, globals, "ReadRegistryValue", nil_return.clone())?;
+    set_global(lua, globals, "ReadRegistryIntValue", nil_return.clone())?;
 
     let concat_fallback = lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
         Err(LuaError::RuntimeError(
@@ -409,6 +421,8 @@ fn install_system_table(
         })?,
     )?;
     manny.set("is_holding", Value::Nil)?;
+    // Retail exposes the player actor globally; mirror that so BOOT can call manny:* helpers.
+    set_global(lua, globals, "manny", manny.clone())?;
 
     let system = lua.create_table()?;
     let system_handle = ptr_to_handle(system.to_pointer());

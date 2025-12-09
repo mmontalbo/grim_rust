@@ -1,18 +1,22 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use grim_telemetry_common::EventBuilder;
 use grim_telemetry_common::OriginFields;
 use mlua::{
     Error as LuaError, Function, Lua, RegistryKey, Result as LuaResult, Table, Value, Variadic,
 };
 
 use crate::lua_host::telemetry::{
-    log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
-    normalize_handle, origin_fields_for_ptr, ptr_to_handle,
+    log_event, log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref,
+    next_fabricated_handle, normalize_handle, origin_fields_for_ptr, ptr_to_handle,
+    register_table_label, table_label,
 };
 
-use super::util::{handle_from_value, set_global_silent, value_fields_from_lua, TaggedHandle};
+use super::util::{
+    describe_value, handle_from_value, set_global_silent, value_fields_from_lua, TaggedHandle,
+};
 use super::{store_registry_value, RegistryRef};
 use crate::lua_host::context::EngineContext;
 
@@ -23,7 +27,8 @@ pub(super) fn install_legacy_compat<'lua>(
 ) -> LuaResult<()> {
     let fallbacks = Rc::new(RefCell::new(LegacyFallbacks::new(lua)?));
     install_fallback_globals(lua, globals, fallbacks.clone(), context.clone())?;
-    install_index_hook(lua, globals, fallbacks.clone())?;
+    let verbose = context.borrow().verbose();
+    install_index_hook(lua, globals, fallbacks.clone(), verbose)?;
     install_error_wrapper(lua, globals, fallbacks)?;
 
     Ok(())
@@ -171,10 +176,70 @@ fn install_index_hook(
     lua: &Lua,
     globals: &Table,
     fallbacks: Rc<RefCell<LegacyFallbacks>>,
+    verbose: bool,
 ) -> LuaResult<()> {
     let globals_ptr = globals.to_pointer();
+    register_table_label(globals_ptr, "global:_G");
+    // Prevent the global reentrancy flag from triggering the index fallback when unset.
+    globals.set("indexFB_disabled", false)?;
     let index_state = fallbacks.clone();
+    let guard_state = if verbose {
+        Some(Rc::new(RefCell::new(IndexGuard::default())))
+    } else {
+        None
+    };
     let index_fb = lua.create_function(move |lua_ctx, (table, key): (Value, Value)| {
+        let key_label = describe_value(&key);
+        let mut inserted_entry: Option<(usize, String)> = None;
+        if let Some(state) = guard_state.as_ref() {
+            let mut guard = state.borrow_mut();
+            guard.depth += 1;
+            let depth = guard.depth;
+            if let Value::Table(t) = &table {
+                let ptr = t.to_pointer() as usize;
+                let entry = (ptr, key_label.clone());
+                if guard.seen.contains(&entry) {
+                    let mut event = EventBuilder::new("lua_index_recursion")
+                        .kv("table", ptr_to_handle(t.to_pointer()))
+                        .kv("key", key_label.clone())
+                        .kv("depth", depth as i64)
+                        .kv("reason", "cycle");
+                    if let Some(label) = table_label(t.to_pointer()) {
+                        event = event.kv("label", label);
+                    }
+                    log_event(event);
+                    guard.depth -= 1;
+                    return Err(LuaError::RuntimeError(
+                        "index fallback parent cycle detected".to_string(),
+                    ));
+                }
+                guard.seen.insert(entry.clone());
+                inserted_entry = Some(entry);
+            }
+            if depth > INDEX_RECURSION_LIMIT {
+                let (table_handle, label) = match &table {
+                    Value::Table(t) => (ptr_to_handle(t.to_pointer()), table_label(t.to_pointer())),
+                    other => (describe_value(other), None),
+                };
+                let mut event = EventBuilder::new("lua_index_recursion")
+                    .kv("table", table_handle)
+                    .kv("key", key_label.clone())
+                    .kv("depth", depth as i64)
+                    .kv("reason", "depth_limit");
+                if let Some(label) = label {
+                    event = event.kv("label", label);
+                }
+                log_event(event);
+                guard.depth -= 1;
+                if let Some(entry) = inserted_entry {
+                    guard.seen.remove(&entry);
+                }
+                return Err(LuaError::RuntimeError(format!(
+                    "index fallback recursion depth exceeded ({INDEX_RECURSION_LIMIT})"
+                )));
+            }
+        }
+
         // Avoid routing globals through the index fallback to prevent recursion
         // when scripts probe table.parent, but fall back to the index handler
         // when no getglobal override is present.
@@ -188,10 +253,22 @@ fn install_index_hook(
             };
             state.handler_for_event(lua_ctx, event)?
         };
-        if let Some(func) = handler {
-            return func.call::<_, Value>((table, key));
+        let result = if let Some(func) = handler {
+            func.call::<_, Value>((table, key))
+        } else {
+            Ok(Value::Nil)
+        };
+
+        if let Some(state) = guard_state.as_ref() {
+            let mut guard = state.borrow_mut();
+            if let Some(entry) = inserted_entry {
+                guard.seen.remove(&entry);
+            }
+            if guard.depth > 0 {
+                guard.depth -= 1;
+            }
         }
-        Ok(Value::Nil)
+        result
     })?;
 
     let metatable = match globals.get_metatable() {
@@ -227,6 +304,14 @@ struct LegacyFallbacks {
     fallbacks: HashMap<String, RegistryKey>,
     tag_methods: HashMap<i64, HashMap<String, RegistryKey>>,
 }
+
+#[derive(Default)]
+struct IndexGuard {
+    depth: usize,
+    seen: HashSet<(usize, String)>,
+}
+
+const INDEX_RECURSION_LIMIT: usize = 64;
 
 impl LegacyFallbacks {
     const TAG_NIL: i64 = -1;
