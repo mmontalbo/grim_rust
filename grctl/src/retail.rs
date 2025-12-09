@@ -300,11 +300,11 @@ impl RetailLayout {
     }
 }
 
-fn make_tree_writable(path: &Path) -> Result<()> {
+pub(crate) fn make_tree_writable(path: &Path) -> Result<()> {
     adjust_writability(path, true)
 }
 
-fn make_tree_readonly(path: &Path) -> Result<()> {
+pub(crate) fn make_tree_readonly(path: &Path) -> Result<()> {
     adjust_writability(path, false)
 }
 

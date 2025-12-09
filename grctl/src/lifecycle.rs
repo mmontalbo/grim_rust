@@ -26,8 +26,8 @@ use crate::components::{
 use crate::gdb;
 use crate::log_follow::show_logs;
 use crate::retail::{
-    extend_env_var, symbol_map_status_for, warn_if_shaders_missing, HookMode, RetailLayout,
-    SymbolMapStatus,
+    extend_env_var, make_tree_readonly, make_tree_writable, symbol_map_status_for,
+    warn_if_shaders_missing, HookMode, RetailLayout, SymbolMapStatus,
 };
 
 const RETAIL_STEAM_APP_ID: &str = "345350";
@@ -198,6 +198,7 @@ pub(crate) fn start_retail(args: RetailStart, paths: &Paths) -> Result<LaunchInf
         &env_pairs,
         ld_preload.as_deref(),
         None,
+        true,
     )?;
     let (command, command_line) = build_retail_command(&layout, &args, &script_path)?;
 
@@ -264,21 +265,33 @@ fn ensure_rust_shim_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
 }
 
 fn ensure_symbol_maps_ready(paths: &Paths, layout: &RetailLayout) -> Result<()> {
-    ensure_symbol_map_for_binary(
-        paths,
-        layout,
-        "retail",
-        layout.retail_bin(),
-        layout.symbol_map_path(),
-    )?;
-    ensure_symbol_map_for_binary(
-        paths,
-        layout,
-        "libLua",
-        layout.liblua_bin(),
-        layout.liblua_symbol_map_path(),
-    )?;
-    Ok(())
+    // symbol map generation needs to write into dev-install; temporarily unlock it.
+    make_tree_writable(layout.dev_install())?;
+    let result = (|| {
+        ensure_symbol_map_for_binary(
+            paths,
+            layout,
+            "retail",
+            layout.retail_bin(),
+            layout.symbol_map_path(),
+        )?;
+        ensure_symbol_map_for_binary(
+            paths,
+            layout,
+            "libLua",
+            layout.liblua_bin(),
+            layout.liblua_symbol_map_path(),
+        )?;
+        Ok(())
+    })();
+    // Best effort relock; log but don't override primary error.
+    if let Err(err) = make_tree_readonly(layout.dev_install()) {
+        eprintln!(
+            "[grctl] warning: failed to restore read-only permissions on {}: {err:?}",
+            layout.dev_install().display()
+        );
+    }
+    result
 }
 
 fn ensure_symbol_map_for_binary(
@@ -540,6 +553,7 @@ fn write_retail_launcher_script(
     env_pairs: &[(String, String)],
     ld_preload: Option<&str>,
     extra_env: Option<&[(String, String)]>,
+    unlock_assets: bool,
 ) -> Result<PathBuf> {
     let script_path = paths.launcher_script(session_id);
     let mut file = File::create(&script_path).with_context(|| {
@@ -567,8 +581,38 @@ fn write_retail_launcher_script(
         writeln!(file, "export LD_PRELOAD={}", quoted)?;
     }
     let dev_install = layout.dev_install().to_string_lossy().into_owned();
+    if unlock_assets {
+        let mut unlock_paths: Vec<String> = Vec::new();
+        unlock_paths.push(dev_install.clone());
+        let extracted = paths.repo_root.join("extracted");
+        if extracted.exists() {
+            unlock_paths.push(extracted.to_string_lossy().into_owned());
+        }
+        let quoted_paths = unlock_paths
+            .iter()
+            .map(|path| shell_quote(path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        writeln!(file, "unlock_paths=({quoted_paths})")?;
+        writeln!(
+            file,
+            "unlock_tree() {{ for path in \"$@\"; do chmod -R u+w \"$path\" 2>/dev/null || true; done; }}"
+        )?;
+        writeln!(
+            file,
+            "lock_tree() {{ for path in \"$@\"; do chmod -R a-w \"$path\" 2>/dev/null || true; done; }}"
+        )?;
+        writeln!(file, "unlock_tree \"${{unlock_paths[@]}}\"")?;
+        writeln!(file, "trap 'lock_tree \"${{unlock_paths[@]}}\"' EXIT")?;
+    }
     writeln!(file, "cd {}", shell_quote(&dev_install))?;
-    writeln!(file, "exec ./GrimFandango \"$@\"")?;
+    if unlock_assets {
+        writeln!(file, "./GrimFandango \"$@\"")?;
+        writeln!(file, "status=$?")?;
+        writeln!(file, "exit $status")?;
+    } else {
+        writeln!(file, "exec ./GrimFandango \"$@\"")?;
+    }
     drop(file);
     #[cfg(unix)]
     {
