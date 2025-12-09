@@ -346,13 +346,8 @@ pub(crate) fn log_set_fallback(
 ) {
     let origin = target_ptr.map_or_else(OriginFields::default, origin_fields_for_ptr);
     let caller = caller_origin_fields();
-    log_event(LuaSemanticEvent::SemanticSetFallback {
-        fallback: fallback.to_string(),
-        handle: handle.clone(),
-        values: values.clone(),
-        origin: origin.clone(),
-        caller: caller.clone(),
-    });
+    // Retail shim only logs the raw setfallback call; avoid emitting a semantic
+    // counterpart so event ordering stays aligned with retail traces.
     log_event(LuaEvent::SetFallback {
         fallback: fallback.to_string(),
         handle,

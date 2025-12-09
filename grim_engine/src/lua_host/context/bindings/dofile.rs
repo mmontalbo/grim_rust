@@ -17,13 +17,39 @@ pub(super) fn handle_special_dofile<'lua>(
 }
 
 pub(super) fn add_variants(file: &str, variants: &mut Vec<PathBuf>) {
-    if file.contains('.') {
-        variants.push(PathBuf::from(file));
+    let mut push_unique = |path: PathBuf| {
+        if !variants.contains(&path) {
+            variants.push(path);
+        }
+    };
+
+    // Always try the provided path first.
+    push_unique(PathBuf::from(file));
+
+    // If the caller already specified a .decompiled.lua file, also allow the
+    // compiled variant to match retail's preference for the compiled chunk.
+    if let Some(stripped) = file.strip_suffix(".decompiled.lua") {
+        push_unique(PathBuf::from(format!("{stripped}.lua")));
         return;
     }
-    variants.push(PathBuf::from(file));
-    variants.push(PathBuf::from(format!("{file}.lua")));
-    variants.push(PathBuf::from(format!("{file}.decompiled.lua")));
+
+    // If the caller asked for a .lua file, fall back to the .decompiled.lua
+    // source when the compiled chunk is missing.
+    if let Some(stripped) = file.strip_suffix(".lua") {
+        push_unique(PathBuf::from(format!("{stripped}.decompiled.lua")));
+        return;
+    }
+
+    // For extension-less paths, mirror retail lookup order: plain name,
+    // compiled .lua, then decompiled source.
+    if !file.contains('.') {
+        push_unique(PathBuf::from(format!("{file}.lua")));
+        push_unique(PathBuf::from(format!("{file}.decompiled.lua")));
+        return;
+    }
+
+    // For other dotted filenames, still try a decompiled suffix fallback.
+    push_unique(PathBuf::from(format!("{file}.decompiled.lua")));
 }
 
 pub(super) fn candidate_paths(path: &str) -> Vec<PathBuf> {

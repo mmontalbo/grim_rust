@@ -104,6 +104,20 @@ pub(crate) fn install_globals(
 fn install_basic_functions_pre_system(lua: &Lua, globals: &Table) -> LuaResult<()> {
     let nil_return = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?;
 
+    // Legacy helpers for manipulating globals from Lua 3.1.
+    let getglobal = lua.create_function(|lua_ctx, name: String| {
+        let globals = lua_ctx.globals();
+        globals.get::<_, Value>(name)
+    })?;
+    set_global_silent(lua, globals, "getglobal", getglobal)?;
+
+    let setglobal = lua.create_function(|lua_ctx, (name, value): (String, Value)| {
+        let globals = lua_ctx.globals();
+        globals.set(name, value)?;
+        Ok(Value::Nil)
+    })?;
+    set_global_silent(lua, globals, "setglobal", setglobal)?;
+
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
         let type_ptr = type_fn.to_pointer();
         let type_handle = ptr_to_handle(type_ptr);

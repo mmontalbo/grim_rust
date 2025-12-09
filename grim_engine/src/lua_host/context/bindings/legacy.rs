@@ -5,7 +5,8 @@ use std::rc::Rc;
 use grim_telemetry_common::EventBuilder;
 use grim_telemetry_common::OriginFields;
 use mlua::{
-    Error as LuaError, Function, Lua, RegistryKey, Result as LuaResult, Table, Value, Variadic,
+    Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Value,
+    Variadic,
 };
 
 use crate::lua_host::telemetry::{
@@ -30,6 +31,33 @@ pub(super) fn install_legacy_compat<'lua>(
     let verbose = context.borrow().verbose();
     install_index_hook(lua, globals, fallbacks.clone(), verbose)?;
     install_error_wrapper(lua, globals, fallbacks)?;
+
+    // Legacy Lua exposes `call` for invoking a function with a parameter table.
+    // Only a handful of boot scripts use it (e.g., setfallback.lua), so mirror
+    // the basic behavior: call the function with the table's sequence values
+    // and return the first result.
+    let call_fn = lua.create_function(|_, args: Variadic<Value>| {
+        let mut args_iter = args.into_iter();
+        let func = match args_iter.next() {
+            Some(Value::Function(func)) => func,
+            _ => {
+                return Err(LuaError::RuntimeError(
+                    "bad argument #1 to 'call' (function expected)".to_string(),
+                ))
+            }
+        };
+        let params = args_iter.next().unwrap_or(Value::Nil);
+        let mut call_args = match params {
+            Value::Table(table) => table.sequence_values().collect::<LuaResult<Vec<_>>>()?,
+            Value::Nil => Vec::new(),
+            other => vec![other],
+        };
+        // Ignore mode/error-handler args; they're unused in retail boot scripts.
+        let results: MultiValue =
+            func.call(MultiValue::from_vec(std::mem::take(&mut call_args)))?;
+        Ok(results.into_iter().next().unwrap_or(Value::Nil))
+    })?;
+    set_global_silent(lua, globals, "call", call_fn)?;
 
     Ok(())
 }
