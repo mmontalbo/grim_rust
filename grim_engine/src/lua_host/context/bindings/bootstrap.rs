@@ -23,6 +23,37 @@ use super::util::{
 use super::{store_registry_value, PinnedRegistryKeys};
 use crate::lua_host::context::EngineContext;
 
+#[derive(Copy, Clone)]
+enum GlobalConst {
+    Str(&'static str),
+    Int(i32),
+}
+
+fn bind_const_globals<'lua>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    bindings: &[(&str, GlobalConst)],
+) -> LuaResult<()> {
+    for (name, value) in bindings {
+        match value {
+            GlobalConst::Str(text) => set_global(lua, globals, name, *text)?,
+            GlobalConst::Int(num) => set_global(lua, globals, name, *num)?,
+        }
+    }
+    Ok(())
+}
+
+fn bind_fn_globals<'lua>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    bindings: &[(&str, &Function<'lua>)],
+) -> LuaResult<()> {
+    for (name, func) in bindings {
+        set_global(lua, globals, name, (*func).clone())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
     let globals = lua.globals();
     let package: Table = globals
@@ -44,14 +75,18 @@ pub(crate) fn install_globals_pre_system(
 ) -> Result<()> {
     let globals = lua.globals();
 
-    set_global(lua, &globals, "_VERSION", "Lua 3.1 (alpha)")?;
+    bind_const_globals(
+        lua,
+        &globals,
+        &[("_VERSION", GlobalConst::Str("Lua 3.1 (alpha)"))],
+    )?;
 
     install_legacy_io(lua, &globals)?;
     let errorfb: Function = globals
         .get("error")
         .context("error handler missing from Lua state")?;
     log_push_cclosure("lua_pushCclosure", errorfb.to_pointer(), 0, Some("errorfb"));
-    set_global(lua, &globals, "_TRIGMODE", "deg")?;
+    bind_const_globals(lua, &globals, &[("_TRIGMODE", GlobalConst::Str("deg"))])?;
     install_legacy_compat(lua, &globals, context.clone())?;
     if let (Ok(settagmethod), Some(pow_fn)) = (
         globals.get::<_, Function>("settagmethod"),
@@ -146,13 +181,17 @@ fn install_basic_functions_pre_system(lua: &Lua, globals: &Table) -> LuaResult<(
     }
 
     // Sector type / mode constants used during boot before any scripts run.
-    set_global(lua, globals, "NONE", 0)?;
-    set_global(lua, globals, "WALK", 4096)?;
-    set_global(lua, globals, "CAMERA", 8192)?;
-    set_global(lua, globals, "SPECIAL", 12288)?;
-    set_global(lua, globals, "HOT", 16384)?;
-    set_global(lua, globals, "ReadRegistryValue", nil_return.clone())?;
-    set_global(lua, globals, "ReadRegistryIntValue", nil_return.clone())?;
+    bind_const_globals(
+        lua,
+        globals,
+        &[
+            ("NONE", GlobalConst::Int(0)),
+            ("WALK", GlobalConst::Int(4096)),
+            ("CAMERA", GlobalConst::Int(8192)),
+            ("SPECIAL", GlobalConst::Int(16384)),
+            ("HOT", GlobalConst::Int(32768)),
+        ],
+    )?;
 
     let concat_fallback = lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
         Err(LuaError::RuntimeError(
@@ -201,6 +240,15 @@ fn install_basic_functions_pre_system(lua: &Lua, globals: &Table) -> LuaResult<(
         let value = Value::String(lua.create_string(key)?);
         let _ = lua_ref.call::<_, i32>(value)?;
     }
+
+    bind_fn_globals(
+        lua,
+        globals,
+        &[
+            ("ReadRegistryValue", &nil_return),
+            ("ReadRegistryIntValue", &nil_return),
+        ],
+    )?;
 
     Ok(())
 }
@@ -275,27 +323,43 @@ fn install_basic_functions_post_system(
         "LockCursor",
         lua.create_function(|_, name: String| Ok(format!("cursor::{name}")))?,
     )?;
-    set_global(lua, globals, "SetSayLineDefaults", noop.clone())?;
+    bind_fn_globals(
+        lua,
+        globals,
+        &[("SetSayLineDefaults", &noop), ("WriteRegistryValue", &noop)],
+    )?;
     set_global(
         lua,
         globals,
         "GetPlatform",
         lua.create_function(|_, ()| Ok(1))?,
     )?; // PLATFORM_PC_WIN
-    set_global(lua, globals, "ReadRegistryValue", nil_return.clone())?;
-    set_global(lua, globals, "ReadRegistryIntValue", nil_return)?;
-    set_global(lua, globals, "WriteRegistryValue", noop.clone())?;
-    set_global(
+    bind_fn_globals(
         lua,
         globals,
-        "enable_basic_remappable_key_set",
-        noop.clone(),
+        &[
+            ("ReadRegistryValue", &nil_return),
+            ("ReadRegistryIntValue", &nil_return),
+        ],
     )?;
-    set_global(lua, globals, "enable_joystick_controls", noop.clone())?;
-    set_global(lua, globals, "enable_mouse_controls", noop.clone())?;
-    set_global(lua, globals, "GetControlState", bool_false.clone())?;
-    set_global(lua, globals, "get_generic_control_state", bool_false)?;
-    set_global(lua, globals, "ResetMarioControls", noop.clone())?;
+    bind_fn_globals(
+        lua,
+        globals,
+        &[
+            ("enable_basic_remappable_key_set", &noop),
+            ("enable_joystick_controls", &noop),
+            ("enable_mouse_controls", &noop),
+        ],
+    )?;
+    bind_fn_globals(
+        lua,
+        globals,
+        &[
+            ("GetControlState", &bool_false),
+            ("get_generic_control_state", &bool_false),
+        ],
+    )?;
+    bind_fn_globals(lua, globals, &[("ResetMarioControls", &noop)])?;
     set_global(
         lua,
         globals,
@@ -320,14 +384,20 @@ fn install_basic_functions_post_system(
         "CheckForCD",
         lua.create_function(|_, _: Variadic<Value>| Ok((false, false)))?,
     )?;
-    set_global(lua, globals, "NukeResources", noop.clone())?;
-    set_global(lua, globals, "GetSystemFonts", noop.clone())?;
-    set_global(lua, globals, "PreloadCursors", noop.clone())?;
-    set_global(lua, globals, "HideVerbSkull", noop.clone())?;
-    set_global(lua, globals, "HideMouseCursor", noop.clone())?;
-    set_global(lua, globals, "ShowCursor", noop.clone())?;
-    set_global(lua, globals, "SetActiveCommentary", noop.clone())?;
-    set_global(lua, globals, "SetAmbientLight", noop.clone())?;
+    bind_fn_globals(
+        lua,
+        globals,
+        &[
+            ("NukeResources", &noop),
+            ("GetSystemFonts", &noop),
+            ("PreloadCursors", &noop),
+            ("HideVerbSkull", &noop),
+            ("HideMouseCursor", &noop),
+            ("ShowCursor", &noop),
+            ("SetActiveCommentary", &noop),
+            ("SetAmbientLight", &noop),
+        ],
+    )?;
 
     let break_here = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     set_global(lua, globals, "break_here", break_here)?;
@@ -459,177 +529,194 @@ fn populate_controls_table(
     controls_handle: &String,
     controls_fields: &ValueFields,
 ) -> LuaResult<()> {
-    // Retail populates system.controls before scripts run; mirror that list (and telemetry) here.
-    const CONTROL_ENTRIES: [(&str, i32); 163] = [
-        ("KEY_ESCAPE", 0),
-        ("KEY_1", 1),
-        ("KEY_2", 2),
-        ("KEY_3", 3),
-        ("KEY_4", 4),
-        ("KEY_5", 5),
-        ("KEY_6", 6),
-        ("KEY_7", 7),
-        ("KEY_8", 8),
-        ("KEY_9", 9),
-        ("KEY_0", 10),
-        ("KEY_MINUS", 11),
-        ("KEY_EQUALS", 12),
-        ("KEY_BACK", 13),
-        ("KEY_TAB", 14),
-        ("KEY_Q", 15),
-        ("KEY_W", 16),
-        ("KEY_E", 17),
-        ("KEY_R", 18),
-        ("KEY_T", 19),
-        ("KEY_Y", 20),
-        ("KEY_U", 21),
-        ("KEY_I", 22),
-        ("KEY_O", 23),
-        ("KEY_P", 24),
-        ("KEY_LBRACKET", 25),
-        ("KEY_RBRACKET", 26),
-        ("KEY_RETURN", 27),
-        ("KEY_LCONTROL", 28),
-        ("KEY_A", 29),
-        ("KEY_S", 30),
-        ("KEY_D", 31),
-        ("KEY_F", 32),
-        ("KEY_G", 33),
-        ("KEY_H", 34),
-        ("KEY_J", 35),
-        ("KEY_K", 36),
-        ("KEY_L", 37),
-        ("KEY_SEMICOLON", 38),
-        ("KEY_APOSTROPHE", 39),
-        ("KEY_GRAVE", 40),
-        ("KEY_LSHIFT", 41),
-        ("KEY_BACKSLASH", 42),
-        ("KEY_Z", 43),
-        ("KEY_X", 44),
-        ("KEY_C", 45),
-        ("KEY_V", 46),
-        ("KEY_B", 47),
-        ("KEY_N", 48),
-        ("KEY_M", 49),
-        ("KEY_COMMA", 50),
-        ("KEY_PERIOD", 51),
-        ("KEY_SLASH", 52),
-        ("KEY_RSHIFT", 53),
-        ("KEY_MULTIPLY", 54),
-        ("KEY_LMENU", 55),
-        ("KEY_SPACE", 56),
-        ("KEY_CAPITAL", 57),
-        ("KEY_F1", 58),
-        ("KEY_F2", 59),
-        ("KEY_F3", 60),
-        ("KEY_F4", 61),
-        ("KEY_F5", 62),
-        ("KEY_F6", 63),
-        ("KEY_F7", 64),
-        ("KEY_F8", 65),
-        ("KEY_F9", 66),
-        ("KEY_F11", 67),
-        ("KEY_NUMLOCK", 68),
-        ("KEY_SCROLL", 69),
-        ("KEY_NUMPAD7", 70),
-        ("KEY_NUMPAD8", 71),
-        ("KEY_NUMPAD9", 72),
-        ("KEY_SUBTRACT", 73),
-        ("KEY_NUMPAD4", 74),
-        ("KEY_NUMPAD5", 75),
-        ("KEY_NUMPAD6", 76),
-        ("KEY_ADD", 77),
-        ("KEY_NUMPAD1", 78),
-        ("KEY_NUMPAD2", 79),
-        ("KEY_NUMPAD3", 80),
-        ("KEY_NUMPAD0", 81),
-        ("KEY_DECIMAL", 82),
-        ("KEY_F11", 83),
-        ("KEY_F12", 84),
-        ("KEY_F13", 85),
-        ("KEY_F14", 86),
-        ("KEY_F15", 87),
-        ("KEY_NUMPADEQUALS", 88),
-        ("KEY_AT", 89),
-        ("KEY_COLON", 90),
-        ("KEY_UNDERLINE", 91),
-        ("KEY_STOP", 92),
-        ("KEY_NUMPADENTER", 93),
-        ("KEY_RCONTROL", 94),
-        ("KEY_NUMPADCOMMA", 95),
-        ("KEY_DIVIDE", 96),
-        ("KEY_SYSRQ", 97),
-        ("KEY_RMENU", 98),
-        ("KEY_HOME", 99),
-        ("KEY_UP", 100),
-        ("KEY_PRIOR", 101),
-        ("KEY_LEFT", 102),
-        ("KEY_RIGHT", 103),
-        ("KEY_END", 104),
-        ("KEY_DOWN", 105),
-        ("KEY_NEXT", 106),
-        ("KEY_INSERT", 107),
-        ("KEY_DELETE", 108),
-        ("KEY_LWIN", 109),
-        ("KEY_RWIN", 110),
-        ("KEY_APS", 111),
-        ("KEY_JOY1_B1", 112),
-        ("KEY_JOY1_B2", 113),
-        ("KEY_JOY1_B3", 114),
-        ("KEY_JOY1_B4", 115),
-        ("KEY_JOY1_B5", 116),
-        ("KEY_JOY1_B6", 117),
-        ("KEY_JOY1_B7", 118),
-        ("KEY_JOY1_B8", 119),
-        ("KEY_JOY1_B9", 120),
-        ("KEY_JOY1_B10", 121),
-        ("KEY_JOY1_B11", 122),
-        ("KEY_JOY1_B12", 123),
-        ("KEY_JOY1_HLEFT", 124),
-        ("KEY_JOY1_HUP", 125),
-        ("KEY_JOY1_HRIGHT", 126),
-        ("KEY_JOY1_HDOWN", 127),
-        ("KEY_JOY2_B1", 128),
-        ("KEY_JOY2_B2", 129),
-        ("KEY_JOY2_B3", 130),
-        ("KEY_JOY2_B4", 131),
-        ("KEY_JOY2_B5", 132),
-        ("KEY_JOY2_B6", 133),
-        ("KEY_JOY2_B7", 134),
-        ("KEY_JOY2_B8", 135),
-        ("KEY_JOY2_B9", 136),
-        ("KEY_JOY2_B10", 137),
-        ("KEY_JOY2_HLEFT", 138),
-        ("KEY_JOY2_HUP", 139),
-        ("KEY_JOY2_HRIGHT", 140),
-        ("KEY_JOY2_HDOWN", 141),
-        ("KEY_MOUSE_B1", 142),
-        ("KEY_MOUSE_B2", 143),
-        ("KEY_MOUSE_B3", 144),
-        ("KEY_MOUSE_B4", 145),
-        ("KEY_MOUSE_LONG", 146),
-        ("KEY_MOUSE_PING", 147),
-        ("AXIS_JOY1_X", 148),
-        ("AXIS_JOY1_Y", 149),
-        ("AXIS_JOY1_Z", 150),
-        ("AXIS_JOY1_R", 151),
-        ("AXIS_JOY1_U", 152),
-        ("AXIS_JOY1_V", 153),
-        ("AXIS_JOY2_X", 154),
-        ("AXIS_JOY2_Y", 155),
-        ("AXIS_JOY2_Z", 156),
-        ("AXIS_JOY2_R", 157),
-        ("AXIS_JOY2_U", 158),
-        ("AXIS_JOY2_V", 159),
-        ("AXIS_MOUSE_X", 160),
-        ("AXIS_MOUSE_Y", 161),
-        ("AXIS_MOUSE_Z", 162),
-    ];
+    apply_control_manifest(
+        lua,
+        controls,
+        controls_handle,
+        controls_fields,
+        &CONTROL_ENTRIES,
+    )?;
+    Ok(())
+}
 
-    for (name, code) in CONTROL_ENTRIES {
-        let key_value = Value::String(lua.create_string(name)?);
+// Retail populates system.controls before scripts run; mirror that list (and telemetry) here.
+const CONTROL_ENTRIES: [(&str, i32); 163] = [
+    ("KEY_ESCAPE", 0),
+    ("KEY_1", 1),
+    ("KEY_2", 2),
+    ("KEY_3", 3),
+    ("KEY_4", 4),
+    ("KEY_5", 5),
+    ("KEY_6", 6),
+    ("KEY_7", 7),
+    ("KEY_8", 8),
+    ("KEY_9", 9),
+    ("KEY_0", 10),
+    ("KEY_MINUS", 11),
+    ("KEY_EQUALS", 12),
+    ("KEY_BACK", 13),
+    ("KEY_TAB", 14),
+    ("KEY_Q", 15),
+    ("KEY_W", 16),
+    ("KEY_E", 17),
+    ("KEY_R", 18),
+    ("KEY_T", 19),
+    ("KEY_Y", 20),
+    ("KEY_U", 21),
+    ("KEY_I", 22),
+    ("KEY_O", 23),
+    ("KEY_P", 24),
+    ("KEY_LBRACKET", 25),
+    ("KEY_RBRACKET", 26),
+    ("KEY_RETURN", 27),
+    ("KEY_LCONTROL", 28),
+    ("KEY_A", 29),
+    ("KEY_S", 30),
+    ("KEY_D", 31),
+    ("KEY_F", 32),
+    ("KEY_G", 33),
+    ("KEY_H", 34),
+    ("KEY_J", 35),
+    ("KEY_K", 36),
+    ("KEY_L", 37),
+    ("KEY_SEMICOLON", 38),
+    ("KEY_APOSTROPHE", 39),
+    ("KEY_GRAVE", 40),
+    ("KEY_LSHIFT", 41),
+    ("KEY_BACKSLASH", 42),
+    ("KEY_Z", 43),
+    ("KEY_X", 44),
+    ("KEY_C", 45),
+    ("KEY_V", 46),
+    ("KEY_B", 47),
+    ("KEY_N", 48),
+    ("KEY_M", 49),
+    ("KEY_COMMA", 50),
+    ("KEY_PERIOD", 51),
+    ("KEY_SLASH", 52),
+    ("KEY_RSHIFT", 53),
+    ("KEY_MULTIPLY", 54),
+    ("KEY_LMENU", 55),
+    ("KEY_SPACE", 56),
+    ("KEY_CAPITAL", 57),
+    ("KEY_F1", 58),
+    ("KEY_F2", 59),
+    ("KEY_F3", 60),
+    ("KEY_F4", 61),
+    ("KEY_F5", 62),
+    ("KEY_F6", 63),
+    ("KEY_F7", 64),
+    ("KEY_F8", 65),
+    ("KEY_F9", 66),
+    ("KEY_F11", 67),
+    ("KEY_NUMLOCK", 68),
+    ("KEY_SCROLL", 69),
+    ("KEY_NUMPAD7", 70),
+    ("KEY_NUMPAD8", 71),
+    ("KEY_NUMPAD9", 72),
+    ("KEY_SUBTRACT", 73),
+    ("KEY_NUMPAD4", 74),
+    ("KEY_NUMPAD5", 75),
+    ("KEY_NUMPAD6", 76),
+    ("KEY_ADD", 77),
+    ("KEY_NUMPAD1", 78),
+    ("KEY_NUMPAD2", 79),
+    ("KEY_NUMPAD3", 80),
+    ("KEY_NUMPAD0", 81),
+    ("KEY_DECIMAL", 82),
+    ("KEY_F11", 83),
+    ("KEY_F12", 84),
+    ("KEY_F13", 85),
+    ("KEY_F14", 86),
+    ("KEY_F15", 87),
+    ("KEY_NUMPADEQUALS", 88),
+    ("KEY_AT", 89),
+    ("KEY_COLON", 90),
+    ("KEY_UNDERLINE", 91),
+    ("KEY_STOP", 92),
+    ("KEY_NUMPADENTER", 93),
+    ("KEY_RCONTROL", 94),
+    ("KEY_NUMPADCOMMA", 95),
+    ("KEY_DIVIDE", 96),
+    ("KEY_SYSRQ", 97),
+    ("KEY_RMENU", 98),
+    ("KEY_HOME", 99),
+    ("KEY_UP", 100),
+    ("KEY_PRIOR", 101),
+    ("KEY_LEFT", 102),
+    ("KEY_RIGHT", 103),
+    ("KEY_END", 104),
+    ("KEY_DOWN", 105),
+    ("KEY_NEXT", 106),
+    ("KEY_INSERT", 107),
+    ("KEY_DELETE", 108),
+    ("KEY_LWIN", 109),
+    ("KEY_RWIN", 110),
+    ("KEY_APS", 111),
+    ("KEY_JOY1_B1", 112),
+    ("KEY_JOY1_B2", 113),
+    ("KEY_JOY1_B3", 114),
+    ("KEY_JOY1_B4", 115),
+    ("KEY_JOY1_B5", 116),
+    ("KEY_JOY1_B6", 117),
+    ("KEY_JOY1_B7", 118),
+    ("KEY_JOY1_B8", 119),
+    ("KEY_JOY1_B9", 120),
+    ("KEY_JOY1_B10", 121),
+    ("KEY_JOY1_B11", 122),
+    ("KEY_JOY1_B12", 123),
+    ("KEY_JOY1_HLEFT", 124),
+    ("KEY_JOY1_HUP", 125),
+    ("KEY_JOY1_HRIGHT", 126),
+    ("KEY_JOY1_HDOWN", 127),
+    ("KEY_JOY2_B1", 128),
+    ("KEY_JOY2_B2", 129),
+    ("KEY_JOY2_B3", 130),
+    ("KEY_JOY2_B4", 131),
+    ("KEY_JOY2_B5", 132),
+    ("KEY_JOY2_B6", 133),
+    ("KEY_JOY2_B7", 134),
+    ("KEY_JOY2_B8", 135),
+    ("KEY_JOY2_B9", 136),
+    ("KEY_JOY2_B10", 137),
+    ("KEY_JOY2_HLEFT", 138),
+    ("KEY_JOY2_HUP", 139),
+    ("KEY_JOY2_HRIGHT", 140),
+    ("KEY_JOY2_HDOWN", 141),
+    ("KEY_MOUSE_B1", 142),
+    ("KEY_MOUSE_B2", 143),
+    ("KEY_MOUSE_B3", 144),
+    ("KEY_MOUSE_B4", 145),
+    ("KEY_MOUSE_LONG", 146),
+    ("KEY_MOUSE_PING", 147),
+    ("AXIS_JOY1_X", 148),
+    ("AXIS_JOY1_Y", 149),
+    ("AXIS_JOY1_Z", 150),
+    ("AXIS_JOY1_R", 151),
+    ("AXIS_JOY1_U", 152),
+    ("AXIS_JOY1_V", 153),
+    ("AXIS_JOY2_X", 154),
+    ("AXIS_JOY2_Y", 155),
+    ("AXIS_JOY2_Z", 156),
+    ("AXIS_JOY2_R", 157),
+    ("AXIS_JOY2_U", 158),
+    ("AXIS_JOY2_V", 159),
+    ("AXIS_MOUSE_X", 160),
+    ("AXIS_MOUSE_Y", 161),
+    ("AXIS_MOUSE_Z", 162),
+];
+
+fn apply_control_manifest(
+    lua: &Lua,
+    controls: &Table,
+    controls_handle: &String,
+    controls_fields: &ValueFields,
+    manifest: &[(&str, i32)],
+) -> LuaResult<()> {
+    for (name, code) in manifest {
+        let key_value = Value::String(lua.create_string(*name)?);
         let key_preview = value_to_upvalue_preview(&key_value);
-        let value_preview = value_to_upvalue_preview(&Value::Integer(code as i64));
+        let value_preview = value_to_upvalue_preview(&Value::Integer(*code as i64));
         log_set_table_entry(
             controls_handle.clone(),
             None,
@@ -639,9 +726,8 @@ fn populate_controls_table(
             Some(controls_fields.clone()),
             None,
         );
-        controls.set(name, code)?;
+        controls.set(*name, *code)?;
     }
-
     Ok(())
 }
 
