@@ -154,6 +154,8 @@ impl RetailLayout {
         }
 
         if self.dev_install.exists() {
+            // Ensure we can overwrite or delete even if the directory was made read-only.
+            make_tree_writable(&self.dev_install)?;
             if !force {
                 bail!(
                     "{} already exists; re-run with --force to overwrite",
@@ -164,6 +166,8 @@ impl RetailLayout {
                 .with_context(|| format!("removing {}", self.dev_install.display()))?;
         }
         copy_tree(&source, &self.dev_install)?;
+        // Lock down the copied assets to avoid accidental edits.
+        make_tree_readonly(&self.dev_install)?;
         Ok(self.dev_install.clone())
     }
 
@@ -294,6 +298,41 @@ impl RetailLayout {
     pub fn liblua_symbol_map_status(&self) -> Result<SymbolMapStatus> {
         symbol_map_status_for(&self.liblua_symbol_map, &self.liblua_bin)
     }
+}
+
+fn make_tree_writable(path: &Path) -> Result<()> {
+    adjust_writability(path, true)
+}
+
+fn make_tree_readonly(path: &Path) -> Result<()> {
+    adjust_writability(path, false)
+}
+
+fn adjust_writability(path: &Path, writable: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in WalkDir::new(path) {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            let mut perms = metadata.permissions();
+            let mode = perms.mode();
+            let new_mode = if writable {
+                mode | 0o222
+            } else {
+                mode & !0o222
+            };
+            if new_mode != mode {
+                perms.set_mode(new_mode);
+                fs::set_permissions(entry.path(), perms)?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, writable);
+    }
+    Ok(())
 }
 
 fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
