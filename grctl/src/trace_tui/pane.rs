@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
@@ -271,8 +271,8 @@ pub fn render_single(frame: &mut Frame, app: &mut SingleApp) {
     let detail = app
         .pane
         .selected_entry()
-        .map(|entry| detail_lines(entry, None))
-        .unwrap_or_else(|| Line::raw("no selection"));
+        .map(|entry| detail_text(entry, None))
+        .unwrap_or_else(|| Text::raw("no selection"));
 
     let detail_widget = Paragraph::new(detail)
         .block(Block::default().title("Details").borders(Borders::ALL))
@@ -315,17 +315,17 @@ pub fn render_dual(frame: &mut Frame, app: &mut DualApp) {
         .and_then(|idx| {
             let entry = app.panes[0].entries.get(idx)?;
             let parity = app.parity[0].get(idx).and_then(|p| p.as_ref());
-            Some(detail_lines(entry, parity))
+            Some(detail_text(entry, parity))
         })
-        .unwrap_or_else(|| Line::raw("no selection"));
+        .unwrap_or_else(|| Text::raw("no selection"));
     let right_detail = app.panes[1]
         .selected_index()
         .and_then(|idx| {
             let entry = app.panes[1].entries.get(idx)?;
             let parity = app.parity[1].get(idx).and_then(|p| p.as_ref());
-            Some(detail_lines(entry, parity))
+            Some(detail_text(entry, parity))
         })
-        .unwrap_or_else(|| Line::raw("no selection"));
+        .unwrap_or_else(|| Text::raw("no selection"));
 
     let left_widget = Paragraph::new(left_detail)
         .block(
@@ -434,17 +434,19 @@ fn seq_span(seq: &str) -> Span<'static> {
 }
 
 fn event_span(entry: &LogEntry) -> Span<'static> {
-    Span::styled(
-        format!("{:<28}", entry.display_event()),
-        event_style(entry.display_event()),
-    )
+    Span::styled(format!("{:<28}", entry.display_event()), event_style(entry))
 }
 
 fn summary_span(summary: &str) -> Span<'static> {
     Span::styled(summary.to_string(), Style::default().fg(Color::White))
 }
 
-fn event_style(event: &str) -> Style {
+fn event_style(entry: &LogEntry) -> Style {
+    if let Some(style) = exit_style(entry) {
+        return style;
+    }
+
+    let event = entry.display_event();
     let color = if event.contains("error") {
         Color::Red
     } else if event.contains("fallback") || event.contains("tag") {
@@ -471,33 +473,73 @@ fn event_style(event: &str) -> Style {
     Style::default().fg(color)
 }
 
-fn detail_lines(entry: &LogEntry, parity: Option<&ParityStatus>) -> Line<'static> {
-    let mut parts = Vec::new();
-    parts.push(format!("seq={} ", entry.seq_display));
-    if entry.seq_display != entry.orig_seq_display {
-        parts.push(format!("log_seq={} ", entry.orig_seq_display));
+fn exit_style(entry: &LogEntry) -> Option<Style> {
+    let event = entry.display_event();
+    if !(event.contains("exit") || event.contains("stop")) {
+        return None;
     }
-    parts.push(format!("event={} ", entry.display_event()));
+    let status = entry.field_value("status");
+    let style = match status {
+        Some("ok") => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        Some("exit_code") => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        Some("signal") => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(Color::Yellow),
+    };
+    Some(style)
+}
+
+fn detail_text(entry: &LogEntry, parity: Option<&ParityStatus>) -> Text<'static> {
+    let mut first_line = String::new();
+    first_line.push_str(&format!("seq={} ", entry.seq_display));
+    if entry.seq_display != entry.orig_seq_display {
+        first_line.push_str(&format!("log_seq={} ", entry.orig_seq_display));
+    }
+    first_line.push_str(&format!("event={} ", entry.display_event()));
     if let Some(note) = parity_label(parity) {
-        parts.push(format!("parity={} ", note));
+        first_line.push_str(&format!("parity={} ", note));
     }
     if entry.seq_min != entry.seq_max {
-        parts.push(format!("range={:06}-{:06} ", entry.seq_min, entry.seq_max));
+        first_line.push_str(&format!("range={:06}-{:06} ", entry.seq_min, entry.seq_max));
     } else if entry.seq_display != entry.orig_seq_display
         && entry.orig_seq_min != entry.orig_seq_max
     {
-        parts.push(format!(
+        first_line.push_str(&format!(
             "log_range={:06}-{:06} ",
             entry.orig_seq_min, entry.orig_seq_max
         ));
     }
+
+    let mut lines: Vec<Line> = Vec::new();
     for field in entry.fields.iter() {
         if field.key == "seq" || field.key == "event" {
             continue;
         }
-        parts.push(format!("{}={} ", field.key, field.value));
+        if field.key == "cause" {
+            if !first_line.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut first_line)));
+            }
+            for (idx, segment) in field.value.split(" | ").enumerate() {
+                let prefix = if idx == 0 { "cause=" } else { "      " };
+                lines.push(Line::from(format!("{prefix}{segment}")));
+            }
+            continue;
+        }
+        first_line.push_str(&format!("{}={} ", field.key, field.value));
     }
-    Line::from(parts.join(""))
+
+    if !first_line.is_empty() {
+        lines.insert(0, Line::from(std::mem::take(&mut first_line)));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::raw("no fields"));
+    }
+
+    Text::from(lines)
 }
 
 fn parity_label(parity: Option<&ParityStatus>) -> Option<String> {

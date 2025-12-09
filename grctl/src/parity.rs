@@ -10,6 +10,7 @@ use grim_telemetry_common::{
     normalize_seq_for_filter, parse_seq_field, stream_kind_from_line, SeqRange, StreamFilter,
     StreamKind,
 };
+use serde_json::Value as JsonValue;
 
 use crate::cli::{ParityLogsArgs, RunSelection};
 use crate::components::{ComponentKind, Paths};
@@ -417,8 +418,10 @@ fn gather_context(
 }
 
 fn extract_event(line: &str) -> Option<String> {
-    line.split_whitespace()
-        .find_map(|token| token.strip_prefix("event="))
+    let value: JsonValue = serde_json::from_str(line).ok()?;
+    value
+        .get("event")
+        .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
 

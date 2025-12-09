@@ -7,21 +7,26 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
+use serde_json::Value as JsonValue;
 
 use crate::cli::{LogArgs, RunSelection};
 use crate::components::{ComponentKind, Paths};
 use crate::trace_tui;
 
 #[derive(Debug, Clone)]
-struct EngineExitEvent {
-    status: String,
+struct ExitEvent {
+    kind: ExitKind,
+    status: Option<String>,
     note: Option<String>,
+    code: Option<i32>,
+    signal: Option<i32>,
+    cause: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct ExitSummary {
-    summary: String,
-    code: Option<i32>,
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ExitKind {
+    Engine,
+    Component,
 }
 
 pub fn show_logs(paths: &Paths, component: ComponentKind, args: &LogArgs) -> Result<()> {
@@ -120,8 +125,8 @@ pub fn follow_logs(component: ComponentKind, path: &Path, tail: usize) -> Result
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut exit_event: Option<EngineExitEvent> = None;
-    let mut exit_summary: Option<ExitSummary> = None;
+    let mut engine_exit: Option<ExitEvent> = None;
+    let mut component_exit: Option<ExitEvent> = None;
     let mut exit_seen_at: Option<Instant> = None;
 
     if tail == 0 {
@@ -130,8 +135,8 @@ pub fn follow_logs(component: ComponentKind, path: &Path, tail: usize) -> Result
             process_log_line(
                 component,
                 &line,
-                &mut exit_event,
-                &mut exit_summary,
+                &mut engine_exit,
+                &mut component_exit,
                 &mut exit_seen_at,
             );
         }
@@ -148,8 +153,8 @@ pub fn follow_logs(component: ComponentKind, path: &Path, tail: usize) -> Result
             process_log_line(
                 component,
                 &line,
-                &mut exit_event,
-                &mut exit_summary,
+                &mut engine_exit,
+                &mut component_exit,
                 &mut exit_seen_at,
             );
         }
@@ -157,22 +162,22 @@ pub fn follow_logs(component: ComponentKind, path: &Path, tail: usize) -> Result
 
     if should_finish(
         component,
-        exit_event.as_ref(),
-        exit_summary.as_ref(),
+        component_exit.as_ref(),
+        engine_exit.as_ref(),
         exit_seen_at,
         false,
     ) {
-        print_exit_footer(exit_event.as_ref(), exit_summary.as_ref());
+        print_exit_footer(engine_exit.as_ref(), component_exit.as_ref());
         return Ok(());
     }
     if should_finish(
         component,
-        exit_event.as_ref(),
-        exit_summary.as_ref(),
+        component_exit.as_ref(),
+        engine_exit.as_ref(),
         exit_seen_at,
         true,
     ) {
-        print_exit_footer(exit_event.as_ref(), exit_summary.as_ref());
+        print_exit_footer(engine_exit.as_ref(), component_exit.as_ref());
         return Ok(());
     }
 
@@ -198,18 +203,18 @@ pub fn follow_logs(component: ComponentKind, path: &Path, tail: usize) -> Result
                 );
                 file.seek(SeekFrom::Start(0))?;
                 pending.clear();
-                exit_event = None;
-                exit_summary = None;
+                engine_exit = None;
+                component_exit = None;
                 exit_seen_at = None;
             }
             if should_finish(
                 component,
-                exit_event.as_ref(),
-                exit_summary.as_ref(),
+                component_exit.as_ref(),
+                engine_exit.as_ref(),
                 exit_seen_at,
                 true,
             ) {
-                print_exit_footer(exit_event.as_ref(), exit_summary.as_ref());
+                print_exit_footer(engine_exit.as_ref(), component_exit.as_ref());
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(250));
@@ -227,19 +232,19 @@ pub fn follow_logs(component: ComponentKind, path: &Path, tail: usize) -> Result
             process_log_line(
                 component,
                 line,
-                &mut exit_event,
-                &mut exit_summary,
+                &mut engine_exit,
+                &mut component_exit,
                 &mut exit_seen_at,
             );
         }
         if should_finish(
             component,
-            exit_event.as_ref(),
-            exit_summary.as_ref(),
+            component_exit.as_ref(),
+            engine_exit.as_ref(),
             exit_seen_at,
             false,
         ) {
-            print_exit_footer(exit_event.as_ref(), exit_summary.as_ref());
+            print_exit_footer(engine_exit.as_ref(), component_exit.as_ref());
             return Ok(());
         }
     }
@@ -248,125 +253,79 @@ pub fn follow_logs(component: ComponentKind, path: &Path, tail: usize) -> Result
 fn process_log_line(
     component: ComponentKind,
     line: &str,
-    exit_event: &mut Option<EngineExitEvent>,
-    exit_summary: &mut Option<ExitSummary>,
+    engine_exit: &mut Option<ExitEvent>,
+    component_exit: &mut Option<ExitEvent>,
     exit_seen_at: &mut Option<Instant>,
 ) {
     if component == ComponentKind::Engine {
-        if exit_event.is_none() {
-            if let Some(event) = parse_engine_exit_event(line) {
-                *exit_seen_at = Some(Instant::now());
-                *exit_event = Some(event);
-            }
-        }
-        if exit_summary.is_none() {
-            if let Some(summary) = parse_exit_summary(line, component) {
-                *exit_summary = Some(summary);
+        if let Some(event) = parse_exit_event(line) {
+            match event.kind {
+                ExitKind::Engine => {
+                    *exit_seen_at = Some(Instant::now());
+                    *engine_exit = Some(event);
+                }
+                ExitKind::Component => {
+                    *component_exit = Some(event);
+                    *exit_seen_at = Some(Instant::now());
+                }
             }
         }
     }
     println!("{line}");
 }
 
-fn parse_engine_exit_event(line: &str) -> Option<EngineExitEvent> {
-    let content = strip_log_metadata(line);
-    let fields = tokenize_kv_fields(content);
-    if fields.get("event").map(|v| v.as_str()) != Some("engine_exit") {
-        return None;
+fn parse_exit_event(line: &str) -> Option<ExitEvent> {
+    let value: JsonValue = serde_json::from_str(line).ok()?;
+    let obj = value.as_object()?;
+    let event = obj.get("event")?.as_str()?;
+    let status = obj
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let note = obj.get("note").and_then(|v| v.as_str()).map(str::to_string);
+    let code = obj.get("code").and_then(|v| v.as_i64()).map(|v| v as i32);
+    let signal = obj.get("signal").and_then(|v| v.as_i64()).map(|v| v as i32);
+    let cause = obj
+        .get("cause")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    match event {
+        "engine_exit" => Some(ExitEvent {
+            kind: ExitKind::Engine,
+            status,
+            note,
+            code,
+            signal,
+            cause,
+        }),
+        "component_exit" => Some(ExitEvent {
+            kind: ExitKind::Component,
+            status,
+            note,
+            code,
+            signal,
+            cause,
+        }),
+        _ => None,
     }
-    let status = fields.get("status")?.clone();
-    let note = fields.get("note").cloned();
-    Some(EngineExitEvent { status, note })
-}
-
-fn tokenize_kv_fields(line: &str) -> std::collections::HashMap<String, String> {
-    let mut fields = std::collections::HashMap::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' if in_quotes => {
-                if let Some('"') = chars.peek().copied() {
-                    chars.next();
-                    current.push('"');
-                } else {
-                    current.push('\\');
-                }
-            }
-            '"' => in_quotes = !in_quotes,
-            ch if ch.is_whitespace() && !in_quotes => {
-                if !current.is_empty() {
-                    if let Some((key, value)) = current.split_once('=') {
-                        fields.insert(key.to_string(), value.to_string());
-                    }
-                    current.clear();
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.is_empty() {
-        if let Some((key, value)) = current.split_once('=') {
-            fields.insert(key.to_string(), value.to_string());
-        }
-    }
-    fields
-}
-
-pub fn strip_log_metadata(line: &str) -> &str {
-    let without_metadata = line.split(" | ").next().unwrap_or(line);
-    if let Some(rest) = without_metadata.strip_prefix('[') {
-        if let Some(idx) = rest.find("] ") {
-            return &rest[idx + 2..];
-        }
-    }
-    without_metadata
-}
-
-fn parse_exit_summary(line: &str, component: ComponentKind) -> Option<ExitSummary> {
-    let needle = format!("{} exited with ", component.display());
-    let start = line.find(&needle)?;
-    let summary = line[start + needle.len()..].trim();
-    Some(ExitSummary {
-        code: parse_exit_code(summary),
-        summary: summary.to_string(),
-    })
-}
-
-fn parse_exit_code(summary: &str) -> Option<i32> {
-    if let Some(rest) = summary.strip_prefix("exit status: ") {
-        return rest
-            .split_whitespace()
-            .next()
-            .and_then(|num| num.parse().ok());
-    }
-    if let Some(rest) = summary.strip_prefix("signal: ") {
-        return rest
-            .split_whitespace()
-            .next()
-            .and_then(|num| num.parse().ok());
-    }
-    None
 }
 
 fn should_finish(
     component: ComponentKind,
-    exit_event: Option<&EngineExitEvent>,
-    exit_summary: Option<&ExitSummary>,
+    component_exit: Option<&ExitEvent>,
+    engine_exit: Option<&ExitEvent>,
     exit_seen_at: Option<Instant>,
     idle: bool,
 ) -> bool {
     if component != ComponentKind::Engine {
         return false;
     }
-    if exit_summary.is_some() {
+    if component_exit.is_some() {
         return true;
     }
     if idle {
         if let Some(seen) = exit_seen_at {
-            if seen.elapsed() >= Duration::from_secs(1) && exit_event.is_some() {
+            if seen.elapsed() >= Duration::from_secs(1) && engine_exit.is_some() {
                 return true;
             }
         }
@@ -374,28 +333,44 @@ fn should_finish(
     false
 }
 
-fn print_exit_footer(exit_event: Option<&EngineExitEvent>, exit_summary: Option<&ExitSummary>) {
+fn print_exit_footer(engine_exit: Option<&ExitEvent>, component_exit: Option<&ExitEvent>) {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(event) = exit_event {
-        let mut status = format!("engine_exit: status={}", event.status);
+    if let Some(event) = engine_exit {
+        let mut status = String::from("engine_exit:");
+        if let Some(label) = &event.status {
+            status.push_str(&format!(" status={}", label));
+        }
         if let Some(note) = &event.note {
             status.push(' ');
             status.push_str(&format!("note=\"{}\"", note.replace('"', "\\\"")));
         }
         parts.push(status);
-    } else {
-        parts.push("engine_exit: missing".to_string());
     }
 
-    match exit_summary {
-        Some(summary) => {
-            if let Some(code) = summary.code {
-                parts.push(format!("exit code {}", code));
-            } else {
-                parts.push(format!("exit {}", summary.summary));
-            }
+    if let Some(exit) = component_exit {
+        let mut status = String::from("component_exit:");
+        if let Some(label) = &exit.status {
+            status.push_str(&format!(" status={}", label));
         }
-        None => parts.push("exit status unknown".to_string()),
+        if let Some(code) = exit.code {
+            status.push_str(&format!(" code={}", code));
+        }
+        if let Some(signal) = exit.signal {
+            status.push_str(&format!(" signal={}", signal));
+        }
+        if let Some(note) = &exit.note {
+            status.push(' ');
+            status.push_str(&format!("note=\"{}\"", note.replace('"', "\\\"")));
+        }
+        if let Some(cause) = &exit.cause {
+            status.push(' ');
+            status.push_str(&format!("cause=\"{}\"", cause.replace('"', "\\\"")));
+        }
+        parts.push(status);
+    }
+
+    if parts.is_empty() {
+        parts.push("exit status unknown".to_string());
     }
 
     println!("[grctl] {}", parts.join(" "));
@@ -429,23 +404,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_log_metadata_and_annotations() {
-        assert_eq!(strip_log_metadata("[INFO] foo"), "foo");
-        assert_eq!(strip_log_metadata("[INFO] foo | metadata"), "foo");
+    fn parses_engine_exit_event_from_json() {
+        let line = r#"{"seq":"000001","event":"engine_exit","status":"ok","note":"done","stream":"semantic"}"#;
+        let event = parse_exit_event(line).expect("event");
+        assert_eq!(event.kind, ExitKind::Engine);
+        assert_eq!(event.status.as_deref(), Some("ok"));
+        assert_eq!(event.note.as_deref(), Some("done"));
     }
 
     #[test]
-    fn parses_engine_exit_with_quoted_note() {
-        let line = r#"[INFO] event=engine_exit status=ok note="engine done""#;
-        let event = parse_engine_exit_event(line).expect("should parse");
-        assert_eq!(event.status, "ok");
-        assert_eq!(event.note.as_deref(), Some("engine done"));
-    }
-
-    #[test]
-    fn parses_exit_codes() {
-        assert_eq!(parse_exit_code("exit status: 42"), Some(42));
-        assert_eq!(parse_exit_code("signal: 9 (SIGKILL)"), Some(9));
-        assert_eq!(parse_exit_code("unknown"), None);
+    fn parses_component_exit_with_codes_and_cause() {
+        let line = r#"{"seq":"000000","event":"component_exit","status":"exit_code","code":1,"note":"boom","cause":"runtime error","stream":"semantic"}"#;
+        let event = parse_exit_event(line).expect("event");
+        assert_eq!(event.kind, ExitKind::Component);
+        assert_eq!(event.status.as_deref(), Some("exit_code"));
+        assert_eq!(event.code, Some(1));
+        assert_eq!(event.note.as_deref(), Some("boom"));
+        assert_eq!(event.cause.as_deref(), Some("runtime error"));
     }
 }

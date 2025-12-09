@@ -1,18 +1,22 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
+use grim_telemetry_common::EventBuilder;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 
 use crate::cli::{EngineStart, LogArgs, RetailDebugger, RetailStart, RunSelection};
 use crate::components::{
@@ -690,7 +694,7 @@ pub(crate) fn launch_component(
         log_path: log_path.clone(),
     };
     write_state(component, paths, &state)?;
-    spawn_reaper(component, paths.clone(), log_path, child);
+    spawn_reaper(component, paths.clone(), log_path, run_id.clone(), child);
 
     println!(
         "[grctl] started {} (pid {}, session {}, run {})",
@@ -706,6 +710,7 @@ pub(crate) fn spawn_reaper(
     component: ComponentKind,
     paths: Paths,
     log_path: PathBuf,
+    run_id: String,
     mut child: Child,
 ) {
     thread::spawn(move || {
@@ -714,11 +719,17 @@ pub(crate) fn spawn_reaper(
             Ok(code) => format!("exited with {}", code),
             Err(err) => format!("wait error: {err}"),
         };
+        if let Ok(exit_status) = &status {
+            if let Err(err) = log_component_exit_event(component, &run_id, exit_status, &log_path) {
+                eprintln!(
+                    "[grctl] warning: failed to log exit telemetry for {}: {err:?}",
+                    component.display()
+                );
+            }
+            handle_component_exit(component, &paths, exit_status);
+        }
         if let Ok(mut log) = OpenOptions::new().append(true).open(&log_path) {
             let _ = writeln!(log, "[grctl] {} {}", component.display(), summary);
-        }
-        if let Ok(exit_status) = &status {
-            handle_component_exit(component, &paths, exit_status);
         }
         if let Err(err) = clear_state(component, &paths) {
             if err
@@ -734,6 +745,126 @@ pub(crate) fn spawn_reaper(
             );
         }
     });
+}
+
+fn log_component_exit_event(
+    component: ComponentKind,
+    run_id: &str,
+    status: &ExitStatus,
+    log_path: &Path,
+) -> Result<()> {
+    let (engine_id, vm_id) = match component {
+        ComponentKind::Engine => ("grim_engine", "host"),
+        ComponentKind::Retail => ("retail", "host"),
+    };
+
+    let (status_label, code, signal, note) = describe_exit_status(status);
+    let mut builder = EventBuilder::new("component_exit")
+        .kv("component", component.as_str())
+        .kv("status", status_label)
+        .kv("stream", "semantic")
+        .kv("engine", engine_id)
+        .kv("vm_id", vm_id)
+        .kv("run_id", run_id)
+        .kv("source", "grctl_reaper");
+    if let Some(code) = code {
+        builder = builder.kv("code", code);
+    }
+    if let Some(signal) = signal {
+        builder = builder.kv("signal", signal);
+    }
+    if let Some(note) = note {
+        builder = builder.kv("note", note);
+    }
+    if let Some(cause) = extract_exit_cause(log_path) {
+        builder = builder.kv("cause", cause);
+    }
+    let mut fields = builder.finish();
+    fields.insert("seq".to_string(), JsonValue::String("000000".to_string()));
+    fields.insert("ts".to_string(), JsonValue::String("00000000".to_string()));
+    fields.insert("wall_ts".to_string(), JsonValue::String(current_wall_ts()));
+    fields.insert(
+        "pid".to_string(),
+        JsonValue::Number(serde_json::Number::from(std::process::id())),
+    );
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("opening {}", log_path.display()))?;
+    serde_json::to_writer(&mut file, &JsonValue::Object(fields))
+        .with_context(|| format!("writing {}", log_path.display()))?;
+    writeln!(file).with_context(|| format!("writing {}", log_path.display()))?;
+    Ok(())
+}
+
+fn describe_exit_status(status: &ExitStatus) -> (String, Option<i32>, Option<i32>, Option<String>) {
+    if let Some(code) = status.code() {
+        let status_label = if code == 0 { "ok" } else { "exit_code" }.to_string();
+        let note = if code == 0 {
+            None
+        } else {
+            Some(status.to_string())
+        };
+        return (status_label, Some(code), None, note);
+    }
+    #[cfg(unix)]
+    if let Some(signal) = status.signal() {
+        return (
+            "signal".to_string(),
+            None,
+            Some(signal),
+            Some(status.to_string()),
+        );
+    }
+
+    ("unknown".to_string(), None, None, Some(status.to_string()))
+}
+
+fn extract_exit_cause(log_path: &Path) -> Option<String> {
+    const MAX_BYTES: u64 = 64 * 1024;
+    let mut file = File::open(log_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(MAX_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+
+    let markers = ["thread '", "stack traceback", "runtime error", "panic"];
+    let best: Option<usize> = if let Some(idx) = buf.rfind("Caused by:") {
+        Some(idx)
+    } else {
+        let mut fallback: Option<usize> = None;
+        for marker in markers {
+            if let Some(idx) = buf.rfind(marker) {
+                fallback = Some(fallback.map_or(idx, |prev| prev.max(idx)));
+            }
+        }
+        fallback
+    };
+    let snippet = best.map(|idx| &buf[idx..])?;
+    let lines: Vec<String> = snippet
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let joined = lines.join(" | ");
+    let max_len = 900;
+    let value = if joined.len() > max_len {
+        format!("{}…", &joined[..max_len])
+    } else {
+        joined
+    };
+    Some(value)
+}
+
+fn current_wall_ts() -> String {
+    let now = Utc::now();
+    format!("{}.{}", now.timestamp(), now.timestamp_subsec_millis())
 }
 
 pub(crate) fn handle_component_exit(
@@ -879,6 +1010,7 @@ pub(crate) fn stop_component(component: ComponentKind, paths: &Paths, force: boo
 mod tests {
     use super::*;
     use anyhow::Result;
+    use std::io::Write;
     use tempfile::TempDir;
 
     struct EnvGuard {
@@ -1037,6 +1169,23 @@ mod tests {
         assert!(contents.contains("unset environment LD_PRELOAD"));
         assert!(!contents.contains("set environment LD_PRELOAD "));
         assert!(contents.contains("set environment LD_PRELOAD_32"));
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_exit_cause_from_tail() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let log_path = tmp.path().join("log.log");
+        let mut file = File::create(&log_path)?;
+        writeln!(file, "noise line")?;
+        writeln!(file, "Caused by:")?;
+        writeln!(file, "    runtime error: boom")?;
+        writeln!(file, "    stack traceback:")?;
+        writeln!(file, "        [C]: in ?")?;
+        let cause = extract_exit_cause(&log_path).expect("cause");
+        assert!(cause.contains("Caused by:"));
+        assert!(cause.contains("runtime error: boom"));
+        assert!(cause.contains("stack traceback"));
         Ok(())
     }
 }

@@ -5,8 +5,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use grim_telemetry_common::{parse_seq_range, stream_kind_from_line, StreamKind};
-use serde_json::Value as JsonValue;
+use grim_telemetry_common::{parse_seq_range, StreamKind};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Field {
@@ -47,7 +47,22 @@ impl LogEntry {
         let mut summary = String::new();
         let mut count = 0;
         for field in self.fields.iter() {
-            if field.key == "event" || field.key == "seq" || field.key == "stream" {
+            if matches!(
+                field.key.as_str(),
+                "event"
+                    | "seq"
+                    | "stream"
+                    | "cause"
+                    | "engine"
+                    | "vm_id"
+                    | "logger"
+                    | "run_id"
+                    | "wall_ts"
+                    | "pid"
+                    | "tid"
+                    | "ts"
+                    | "source"
+            ) {
                 continue;
             }
             if !summary.is_empty() {
@@ -62,6 +77,13 @@ impl LogEntry {
             }
         }
         summary
+    }
+
+    pub fn field_value(&self, key: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.as_str())
     }
 }
 
@@ -137,47 +159,27 @@ pub enum ParityStatus {
 }
 
 fn parse_line(raw: &str) -> Option<LogEntry> {
-    let without_metadata = raw
-        .split(" | ")
-        .next()
-        .map(str::to_string)
-        .unwrap_or_else(|| raw.to_string());
+    let value: JsonValue = serde_json::from_str(raw).ok()?;
+    let object = value.as_object()?;
 
-    let content = if let Some(rest) = without_metadata.strip_prefix('[') {
-        if let Some(idx) = rest.find("] ") {
-            rest[idx + 2..].to_string()
-        } else {
-            without_metadata
-        }
-    } else {
-        without_metadata
-    };
-
-    let mut fields = Vec::with_capacity(16);
-    let mut seq_display = None;
-    let mut event = None;
-    let mut stream = StreamKind::Other;
-    tokenize_fields(
-        &content,
-        &mut fields,
-        &mut seq_display,
-        &mut event,
-        &mut stream,
-    );
-
-    if fields.is_empty() {
-        return None;
-    }
-
-    if matches!(stream, StreamKind::Other) {
-        stream = stream_kind_from_line(&content);
-    }
-
-    let seq_display = seq_display?;
-    let event = event?;
+    let event = object.get("event")?.as_str()?.to_string();
+    let stream = stream_from_object(&event, object);
+    let seq_display = render_seq(object.get("seq")?)?;
     let seq_range = parse_seq_range(&seq_display)?;
     let seq_min = seq_range.min;
     let seq_max = seq_range.max;
+
+    let mut fields = Vec::with_capacity(object.len());
+    let mut keys: Vec<_> = object.keys().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = object.get(key) {
+            fields.push(Field {
+                key: key.clone(),
+                value: render_value(value),
+            });
+        }
+    }
 
     let mut entry = LogEntry {
         seq_display: seq_display.clone(),
@@ -193,6 +195,36 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
     };
     entry.summary = entry.compute_summary();
     Some(entry)
+}
+
+fn stream_from_object(event: &str, object: &JsonMap<String, JsonValue>) -> StreamKind {
+    if let Some(stream) = object.get("stream").and_then(|v| v.as_str()) {
+        return StreamKind::from_field(stream);
+    }
+    if event.starts_with("semantic_") || event == "component_exit" || event == "engine_exit" {
+        return StreamKind::Semantic;
+    }
+    StreamKind::Other
+}
+
+fn render_seq(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(text) => Some(text.clone()),
+        JsonValue::Number(num) => num.as_u64().map(|n| format!("{n:06}")),
+        _ => None,
+    }
+}
+
+fn render_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::String(s) => s.clone(),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+        }
+    }
 }
 
 fn assign_stream_sequences(entries: &mut [LogEntry]) {
@@ -225,85 +257,15 @@ fn semantic_event_map(entries: &[LogEntry]) -> std::collections::HashMap<u64, (u
     map
 }
 
-fn tokenize_fields(
-    line: &str,
-    fields: &mut Vec<Field>,
-    seq_display: &mut Option<String>,
-    event: &mut Option<String>,
-    stream: &mut StreamKind,
-) {
-    let mut current = String::with_capacity(line.len());
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            '\\' => {
-                if let Some('"') = chars.peek() {
-                    current.push('"');
-                    chars.next();
-                } else {
-                    current.push('\\');
-                }
-            }
-            ' ' if !in_quotes => {
-                push_field(&mut current, fields, seq_display, event, stream);
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    push_field(&mut current, fields, seq_display, event, stream);
-}
-
-fn push_field(
-    current: &mut String,
-    fields: &mut Vec<Field>,
-    seq_display: &mut Option<String>,
-    event: &mut Option<String>,
-    stream: &mut StreamKind,
-) {
-    if current.is_empty() {
-        return;
-    }
-
-    if let Some(eq_idx) = current.find('=') {
-        let value = current.split_off(eq_idx + 1);
-        current.truncate(eq_idx);
-        // Preserve the existing allocation for the next token while moving out the key.
-        let key = std::mem::replace(current, String::with_capacity(current.capacity()));
-
-        if key == "seq" {
-            *seq_display = Some(value.clone());
-        } else if key == "event" {
-            *event = Some(value.clone());
-        } else if key == "stream" {
-            *stream = StreamKind::from_field(&value);
-        }
-
-        fields.push(Field { key, value });
-    }
-
-    current.clear();
-}
-
 fn set_table_entry_summary(entry: &LogEntry) -> Option<String> {
-    let table = field_value(entry, "table_handle_label")
-        .or_else(|| field_value(entry, "table_handle"))
+    let table = entry
+        .field_value("table_handle_label")
+        .or_else(|| entry.field_value("table_handle"))
         .map(|s| s.to_string())
         .unwrap_or_else(|| "table".to_string());
     let key = value_preview(entry, "key");
     let value = value_preview(entry, "value");
     Some(format!("{table}[{key}] = {value}"))
-}
-
-fn field_value<'a>(entry: &'a LogEntry, key: &str) -> Option<&'a str> {
-    entry
-        .fields
-        .iter()
-        .find(|f| f.key == key)
-        .map(|f| f.value.as_str())
 }
 
 fn render_preview(raw: &str) -> Option<String> {
@@ -322,8 +284,40 @@ fn render_preview(raw: &str) -> Option<String> {
 }
 
 fn value_preview(entry: &LogEntry, key: &str) -> String {
-    field_value(entry, key)
+    entry
+        .field_value(key)
         .and_then(render_preview)
-        .or_else(|| field_value(entry, key).map(|s| s.to_string()))
+        .or_else(|| entry.field_value(key).map(|s| s.to_string()))
         .unwrap_or_else(|| "?".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_component_exit_as_semantic() {
+        let line = r#"{"seq":"000010","event":"component_exit","status":"exit_code","code":1,"note":"boom","stream":"semantic"}"#;
+        let entry = parse_line(line).expect("should parse");
+        assert_eq!(entry.stream, StreamKind::Semantic);
+        assert_eq!(entry.display_event(), "component_exit");
+        assert_eq!(entry.seq_min, 10);
+        assert!(entry.summary.contains("status=exit_code"));
+    }
+
+    #[test]
+    fn omits_cause_from_summary() {
+        let line = r#"{"seq":"000011","event":"component_exit","status":"unknown","note":"oops","cause":"Caused by: runtime error","stream":"semantic"}"#;
+        let entry = parse_line(line).expect("should parse");
+        assert!(!entry.summary.contains("cause="));
+    }
+
+    #[test]
+    fn keeps_cause_with_pipes_when_metadata_present() {
+        let line = r#"{"seq":"000012","event":"component_exit","status":"exit_code","cause":"Caused by: | runtime error: boom | stack traceback:","stream":"semantic","wall_ts":"123","pid":1,"tid":2}"#;
+        let entry = parse_line(line).expect("should parse");
+        let cause = entry.field_value("cause").expect("cause");
+        assert!(cause.contains("runtime error: boom"));
+        assert!(cause.contains("stack traceback:"));
+    }
 }

@@ -54,7 +54,9 @@ pub(crate) fn log_dofile(path: &str) {
 }
 
 pub(crate) fn log_engine_exit(status: &str, note: Option<&str>) {
-    let mut builder = EventBuilder::new("engine_exit").kv("status", status);
+    let mut builder = EventBuilder::new("engine_exit")
+        .kv("status", status)
+        .kv("stream", "semantic");
     if let Some(text) = note {
         builder = builder.kv("note", text);
     }

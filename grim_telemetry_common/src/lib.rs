@@ -4,10 +4,9 @@ use serde::{
     ser::Serializer,
     Deserialize, Serialize,
 };
-use serde_json::Value as JsonValue;
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::{
-    env,
-    fmt::{self, Display},
+    env, fmt,
     fs::OpenOptions,
     io::{self, BufWriter, Write},
     sync::{
@@ -47,10 +46,8 @@ impl TelemetryLogger {
     }
 
     pub fn log_line(&self, message: &str) {
-        let sink = self
-            .sink
-            .get_or_init(|| LogSink::init(self.config.log_env_vars));
-        sink.write_line(self.config.line_prefix, message);
+        let builder = EventBuilder::new("log_line").kv("message", message);
+        let _ = self.log_event_with_seq(builder);
     }
 
     pub fn log_event(&self, event: impl Into<EventBuilder>) {
@@ -81,30 +78,42 @@ impl TelemetryLogger {
         let run_id = self
             .run_id
             .get_or_init(|| self.config.run_id_env.and_then(|name| env::var(name).ok()))
-            .as_ref()
-            .map(|value| value.as_str());
-        let fields = event.finish();
-        let event_name = fields
-            .iter()
-            .find_map(|field| field.strip_prefix("event="))
-            .map(|value| value.to_string());
-        let mut parts = Vec::with_capacity(fields.len() + 6);
-        parts.push(format!("seq={seq_display}"));
-        parts.push(format!("ts={ts:08}"));
-        if let Some(event_name) = event_name {
-            parts.push(format!("event={event_name}"));
-        }
-        parts.extend(
-            fields
-                .into_iter()
-                .filter(|field| !field.starts_with("event=")),
+            .clone()
+            .unwrap_or_default();
+        let mut object = event.finish();
+        object.insert("seq".to_string(), JsonValue::String(seq_display));
+        object.insert("ts".to_string(), JsonValue::String(format!("{ts:08}")));
+        object.insert(
+            "engine".to_string(),
+            JsonValue::String(self.config.engine_id.to_string()),
         );
-        parts.push(format!("engine={}", self.config.engine_id));
-        parts.push(format!("vm_id={}", self.config.vm_id));
-        if let Some(run_id) = run_id {
-            parts.push(format!("run_id={run_id}"));
+        object.insert(
+            "vm_id".to_string(),
+            JsonValue::String(self.config.vm_id.to_string()),
+        );
+        if !self.config.line_prefix.is_empty() {
+            object.insert(
+                "logger".to_string(),
+                JsonValue::String(self.config.line_prefix.to_string()),
+            );
         }
-        self.log_line(&parts.join(" "));
+        if !run_id.is_empty() {
+            object.insert("run_id".to_string(), JsonValue::String(run_id));
+        }
+        object.insert("wall_ts".to_string(), JsonValue::String(format_timestamp()));
+        object.insert(
+            "pid".to_string(),
+            JsonValue::Number(JsonNumber::from(unsafe { libc::getpid() } as u64)),
+        );
+        object.insert(
+            "tid".to_string(),
+            JsonValue::Number(JsonNumber::from(current_tid() as u64)),
+        );
+
+        let sink = self
+            .sink
+            .get_or_init(|| LogSink::init(self.config.log_env_vars));
+        sink.write_json(object);
     }
 }
 
@@ -227,25 +236,31 @@ impl StreamFilter {
 }
 
 pub fn stream_kind_from_line(line: &str) -> StreamKind {
-    for token in line.split_whitespace() {
-        if let Some(value) = token.strip_prefix("stream=") {
-            return StreamKind::from_field(value);
+    let Ok(JsonValue::Object(obj)) = serde_json::from_str::<JsonValue>(line) else {
+        return StreamKind::Other;
+    };
+    if let Some(stream) = obj.get("stream").and_then(|v| v.as_str()) {
+        return StreamKind::from_field(stream);
+    }
+    if let Some(event) = obj.get("event").and_then(|v| v.as_str()) {
+        if event.starts_with("semantic_") || event == "component_exit" || event == "engine_exit" {
+            return StreamKind::Semantic;
         }
     }
-    if line.contains("event=semantic_") {
-        StreamKind::Semantic
-    } else {
-        StreamKind::Other
-    }
+    StreamKind::Other
 }
 
 pub fn parse_seq_field(line: &str) -> Option<SeqRange> {
-    for token in line.split_whitespace() {
-        if let Some(value) = token.strip_prefix("seq=") {
-            return parse_seq_range(value);
-        }
-    }
-    None
+    let Ok(JsonValue::Object(obj)) = serde_json::from_str::<JsonValue>(line) else {
+        return None;
+    };
+    let seq_value = obj.get("seq")?;
+    let seq_text = match seq_value {
+        JsonValue::String(text) => text.clone(),
+        JsonValue::Number(num) => num.to_string(),
+        _ => return None,
+    };
+    parse_seq_range(&seq_text)
 }
 
 pub fn normalize_seq_for_filter(
@@ -282,33 +297,32 @@ pub fn normalize_seq_for_filter(
 }
 
 pub struct EventBuilder {
-    fields: Vec<String>,
+    fields: JsonMap<String, JsonValue>,
 }
 
 impl EventBuilder {
     pub fn new(event: impl Into<String>) -> Self {
-        Self {
-            fields: vec![format!("event={}", event.into())],
-        }
+        let mut fields = JsonMap::new();
+        fields.insert("event".to_string(), JsonValue::String(event.into()));
+        Self { fields }
     }
 
-    pub fn kv(mut self, key: &str, value: impl Display) -> Self {
+    pub fn kv(mut self, key: &str, value: impl Serialize) -> Self {
         self.kv_mut(key, value);
         self
     }
 
-    pub fn kv_mut(&mut self, key: &str, value: impl Display) {
-        let mut value = value.to_string();
-        let needs_quotes = value.contains(|c: char| c.is_whitespace());
-        if needs_quotes {
-            value = value.replace('"', "\\\"");
-            self.fields.push(format!("{key}=\"{value}\""));
-        } else {
-            self.fields.push(format!("{key}={value}"));
-        }
+    pub fn kv_mut(&mut self, key: &str, value: impl Serialize) {
+        let json_value =
+            serde_json::to_value(value).unwrap_or_else(|_| JsonValue::String("<?>".to_string()));
+        self.fields.insert(key.to_string(), json_value);
     }
 
-    pub fn finish(self) -> Vec<String> {
+    pub fn kv_json_mut(&mut self, key: &str, value: JsonValue) {
+        self.fields.insert(key.to_string(), value);
+    }
+
+    pub fn finish(self) -> JsonMap<String, JsonValue> {
         self.fields
     }
 }
@@ -347,22 +361,21 @@ impl LogSink {
         }
     }
 
-    fn write_line(&self, prefix: &str, message: &str) {
-        let timestamp = format_timestamp();
-        let pid = unsafe { libc::getpid() };
-        let tid = current_tid();
+    fn write_json(&self, object: JsonMap<String, JsonValue>) {
+        let value = JsonValue::Object(object);
         let mut guard = self
             .target
             .lock()
             .expect("log sink mutex should never be poisoned");
-        let line = format!("[{prefix}] {message} | wall_ts={timestamp} pid={pid} tid={tid}\n");
         match &mut *guard {
             LogTarget::Stderr(stderr) => {
-                let _ = stderr.write_all(line.as_bytes());
+                let _ = serde_json::to_writer(&mut *stderr, &value);
+                let _ = stderr.write_all(b"\n");
                 let _ = stderr.flush();
             }
             LogTarget::File(file) => {
-                let _ = file.write_all(line.as_bytes());
+                let _ = serde_json::to_writer(&mut *file, &value);
+                let _ = file.write_all(b"\n");
                 let _ = file.flush();
             }
         }
@@ -1010,7 +1023,7 @@ impl From<LuaSemanticEvent> for EventBuilder {
     }
 }
 
-fn builder_from_object(obj: &serde_json::Map<String, JsonValue>) -> EventBuilder {
+fn builder_from_object(obj: &JsonMap<String, JsonValue>) -> EventBuilder {
     let Some(event_name) = obj.get("event").and_then(|v| v.as_str()) else {
         panic!("telemetry event serialized without event tag");
     };
@@ -1020,23 +1033,10 @@ fn builder_from_object(obj: &serde_json::Map<String, JsonValue>) -> EventBuilder
     keys.sort();
     for key in keys {
         if let Some(value) = obj.get(key) {
-            let rendered = render_json_value(value);
-            builder.kv_mut(key, rendered);
+            builder.kv_json_mut(key, value.clone());
         }
     }
     builder
-}
-
-fn render_json_value(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Null => "null".to_string(),
-        JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::String(s) => s.clone(),
-        JsonValue::Array(_) | JsonValue::Object(_) => {
-            serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1045,9 +1045,9 @@ mod tests {
 
     #[test]
     fn stream_detection_prefers_semantic_tag() {
-        let raw_line = "[grim] seq=000001 stream=raw event=lua_pushnil";
+        let raw_line = r#"{"seq":"000001","stream":"raw","event":"lua_pushnil"}"#;
         assert_eq!(stream_kind_from_line(raw_line), StreamKind::Raw);
-        let semantic_line = "seq=000002 event=semantic_bind_global";
+        let semantic_line = r#"{"seq":"000002","event":"semantic_bind_global"}"#;
         assert_eq!(stream_kind_from_line(semantic_line), StreamKind::Semantic);
     }
 
@@ -1084,13 +1084,25 @@ mod tests {
             result: None,
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=cutscene"));
-        assert!(fields.iter().any(|f| f == "movie=intro.snm"));
-        assert!(fields.iter().any(|f| f == "movie_label=movie.intro"));
-        assert!(fields.iter().any(|f| f == "phase=start"));
-        assert!(fields.iter().any(|f| f == "playing=playing"));
-        assert!(fields.iter().any(|f| f == "elapsed_ms=0"));
-        assert!(fields.iter().any(|f| f == "polls=0"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("cutscene")
+        );
+        assert_eq!(
+            fields.get("movie").and_then(|v| v.as_str()),
+            Some("intro.snm")
+        );
+        assert_eq!(
+            fields.get("movie_label").and_then(|v| v.as_str()),
+            Some("movie.intro")
+        );
+        assert_eq!(fields.get("phase").and_then(|v| v.as_str()), Some("start"));
+        assert_eq!(
+            fields.get("playing").and_then(|v| v.as_str()),
+            Some("playing")
+        );
+        assert_eq!(fields.get("elapsed_ms").and_then(|v| v.as_i64()), Some(0));
+        assert_eq!(fields.get("polls").and_then(|v| v.as_i64()), Some(0));
     }
 
     #[test]
@@ -1103,11 +1115,20 @@ mod tests {
             polls: None,
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=cutscene_skip"));
-        assert!(fields.iter().any(|f| f == "phase=complete"));
-        assert!(fields.iter().any(|f| f == "movie_label=movie.intro"));
-        assert!(fields.iter().any(|f| f == "elapsed_ms=123"));
-        assert!(!fields.iter().any(|f| f == "polls=0"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("cutscene_skip")
+        );
+        assert_eq!(
+            fields.get("phase").and_then(|v| v.as_str()),
+            Some("complete")
+        );
+        assert_eq!(
+            fields.get("movie_label").and_then(|v| v.as_str()),
+            Some("movie.intro")
+        );
+        assert_eq!(fields.get("elapsed_ms").and_then(|v| v.as_i64()), Some(123));
+        assert!(!fields.contains_key("polls"));
     }
 
     #[test]
@@ -1122,10 +1143,19 @@ mod tests {
             caller: OriginFields::default(),
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=lua_pushusertag"));
-        assert!(fields.iter().any(|f| f == "id=0x00000007"));
-        assert!(fields.iter().any(|f| f == "tag=42"));
-        assert!(fields.iter().any(|f| f == "value_type=userdata"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("lua_pushusertag")
+        );
+        assert_eq!(
+            fields.get("id").and_then(|v| v.as_str()),
+            Some("0x00000007")
+        );
+        assert_eq!(fields.get("tag").and_then(|v| v.as_i64()), Some(42));
+        assert_eq!(
+            fields.get("value_type").and_then(|v| v.as_str()),
+            Some("userdata")
+        );
     }
 
     #[test]
@@ -1137,8 +1167,14 @@ mod tests {
             count: 2,
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=lua_getglobal"));
-        assert!(fields.iter().any(|f| f == "label=global:foo"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("lua_getglobal")
+        );
+        assert_eq!(
+            fields.get("label").and_then(|v| v.as_str()),
+            Some("global:foo")
+        );
     }
 
     #[test]
@@ -1159,8 +1195,11 @@ mod tests {
             },
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=registered_global"));
-        assert!(fields.iter().any(|f| f == "upvalues=2"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("registered_global")
+        );
+        assert_eq!(fields.get("upvalues").and_then(|v| v.as_i64()), Some(2));
     }
 
     #[test]
@@ -1178,10 +1217,19 @@ mod tests {
             origin: OriginFields::default(),
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=registered_constant"));
-        assert!(fields.iter().any(|f| f == "value_type=string"));
-        assert!(fields.iter().any(|f| f == "value_len=3"));
-        assert!(fields.iter().any(|f| f == "value_preview=bar"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("registered_constant")
+        );
+        assert_eq!(
+            fields.get("value_type").and_then(|v| v.as_str()),
+            Some("string")
+        );
+        assert_eq!(fields.get("value_len").and_then(|v| v.as_i64()), Some(3));
+        assert_eq!(
+            fields.get("value_preview").and_then(|v| v.as_str()),
+            Some("bar")
+        );
     }
 
     #[test]
@@ -1210,25 +1258,39 @@ mod tests {
             },
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=set_table_entry"));
-        assert!(fields.iter().any(|f| f == "table_handle=0x0000000a"));
-        assert!(fields
-            .iter()
-            .any(|f| f == "table_handle_label=table:example"));
-        assert!(fields
-            .iter()
-            .any(|f| f.starts_with("key={\"kind\":\"string\"")));
-        assert!(fields
-            .iter()
-            .any(|f| f.starts_with("value={\"kind\":\"number\"")));
-        assert!(fields.iter().any(|f| f == "origin=0x0000cafe"));
-        assert!(fields.iter().any(|f| f == "note=via_rawsettable"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("set_table_entry")
+        );
+        assert_eq!(
+            fields.get("table_handle").and_then(|v| v.as_str()),
+            Some("0x0000000a")
+        );
+        assert_eq!(
+            fields.get("table_handle_label").and_then(|v| v.as_str()),
+            Some("table:example")
+        );
+        let key = fields.get("key").and_then(|v| v.as_object()).expect("key");
+        assert_eq!(key.get("kind").and_then(|v| v.as_str()), Some("string"));
+        let value = fields
+            .get("value")
+            .and_then(|v| v.as_object())
+            .expect("value");
+        assert_eq!(value.get("kind").and_then(|v| v.as_str()), Some("number"));
+        assert_eq!(
+            fields.get("origin").and_then(|v| v.as_str()),
+            Some("0x0000cafe")
+        );
+        assert_eq!(
+            fields.get("note").and_then(|v| v.as_str()),
+            Some("via_rawsettable")
+        );
     }
 
     #[test]
     fn raw_events_include_stream_marker() {
         let fields = EventBuilder::from(LuaEvent::CollectGarbage {}).finish();
-        assert!(fields.iter().any(|f| f == "stream=raw"));
+        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("raw"));
     }
 
     #[test]
@@ -1246,8 +1308,17 @@ mod tests {
             origin: OriginFields::default(),
         };
         let fields = EventBuilder::from(event).finish();
-        assert!(fields.iter().any(|f| f == "event=semantic_bind_global"));
-        assert!(fields.iter().any(|f| f == "stream=semantic"));
-        assert!(fields.iter().any(|f| f == "label=global:foo"));
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("semantic_bind_global")
+        );
+        assert_eq!(
+            fields.get("stream").and_then(|v| v.as_str()),
+            Some("semantic")
+        );
+        assert_eq!(
+            fields.get("label").and_then(|v| v.as_str()),
+            Some("global:foo")
+        );
     }
 }

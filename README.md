@@ -14,6 +14,8 @@ flow and prototype modern tooling around it.
 - Populate extracted assets with `tools/sync_assets.sh [dest] [-- lab_extract
   flags...]`. The default destination is `extracted/`, which downstream crates
   read from automatically.
+- Treat `dev-install/` and `extracted/` as read-only reference data; do not edit
+  or commit changes to those directories.
 
 ## Repository Layout
 - `grim_analysis/` – retail telemetry shim (`grim_analysis`); see

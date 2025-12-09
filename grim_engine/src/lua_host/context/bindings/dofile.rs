@@ -17,13 +17,27 @@ pub(super) fn handle_special_dofile<'lua>(
 }
 
 pub(super) fn add_variants(file: &str, variants: &mut Vec<PathBuf>) {
-    if file.contains('.') {
-        variants.push(PathBuf::from(file));
-        return;
+    let path = Path::new(file);
+    let has_extension = path.extension().is_some();
+
+    variants.push(path.to_path_buf());
+
+    if has_extension {
+        if let (Some(stem), Some(ext)) = (path.file_stem(), path.extension()) {
+            let stem = stem.to_string_lossy();
+            if !stem.ends_with(".decompiled") {
+                let mut decompiled = path.to_path_buf();
+                decompiled.set_file_name(format!(
+                    "{stem}.decompiled.{}",
+                    ext.to_string_lossy()
+                ));
+                variants.push(decompiled);
+            }
+        }
+    } else {
+        variants.push(PathBuf::from(format!("{file}.lua")));
+        variants.push(PathBuf::from(format!("{file}.decompiled.lua")));
     }
-    variants.push(PathBuf::from(file));
-    variants.push(PathBuf::from(format!("{file}.lua")));
-    variants.push(PathBuf::from(format!("{file}.decompiled.lua")));
 }
 
 pub(super) fn candidate_paths(path: &str) -> Vec<PathBuf> {
@@ -72,4 +86,37 @@ pub(super) fn execute_script<'lua>(lua: &'lua Lua, path: &Path) -> LuaResult<Opt
 
 fn is_precompiled_chunk(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && bytes[0] == 0x1B && bytes[1] == b'L' && bytes[2] == b'u' && bytes[3] == b'a'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::candidate_paths;
+
+    fn as_strings(paths: &[std::path::PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn includes_decompiled_variant_when_extension_present() {
+        let candidates = candidate_paths("setfallback.lua");
+        let paths = as_strings(&candidates);
+        assert!(paths.iter().any(|p| p.ends_with("setfallback.lua")));
+        assert!(paths
+            .iter()
+            .any(|p| p.ends_with("setfallback.decompiled.lua")));
+    }
+
+    #[test]
+    fn includes_default_variants_when_no_extension() {
+        let candidates = candidate_paths("Scripts/_colors");
+        let paths = as_strings(&candidates);
+        assert!(paths.iter().any(|p| p.ends_with("Scripts/_colors")));
+        assert!(paths.iter().any(|p| p.ends_with("Scripts/_colors.lua")));
+        assert!(paths
+            .iter()
+            .any(|p| p.ends_with("Scripts/_colors.decompiled.lua")));
+    }
 }
