@@ -27,8 +27,29 @@ pub(crate) struct RegisteredGlobalMeta {
     pub upvalues: i32,
 }
 
+pub(crate) const COLOR_TAG: i32 = 0x434f4c52;
+
+#[derive(Clone)]
+pub(crate) struct ColorHandle {
+    encoded: u32,
+}
+
+impl ColorHandle {
+    pub(crate) fn new(r: u8, g: u8, b: u8) -> Self {
+        let encoded = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+        Self { encoded }
+    }
+
+    pub(crate) fn encoded(&self) -> u32 {
+        self.encoded
+    }
+}
+
+impl UserData for ColorHandle {}
+
 thread_local! {
     static REGISTERED_GLOBAL_HINT: RefCell<Option<RegisteredGlobalMeta>> = RefCell::new(None);
+    static REGISTERED_GLOBAL_SUPPRESSION: RefCell<bool> = RefCell::new(false);
 }
 
 pub(crate) fn with_registered_global_hint<R>(
@@ -45,6 +66,32 @@ pub(crate) fn with_registered_global_hint<R>(
 
 fn take_registered_global_hint() -> Option<RegisteredGlobalMeta> {
     REGISTERED_GLOBAL_HINT.with(|cell| cell.replace(None))
+}
+
+pub(crate) struct RegisteredGlobalTelemetryGuard {
+    previous: bool,
+}
+
+impl Drop for RegisteredGlobalTelemetryGuard {
+    fn drop(&mut self) {
+        REGISTERED_GLOBAL_SUPPRESSION.with(|cell| {
+            cell.replace(self.previous);
+        });
+    }
+}
+
+pub(crate) fn suppress_registered_global_logging() -> RegisteredGlobalTelemetryGuard {
+    let previous = REGISTERED_GLOBAL_SUPPRESSION.with(|cell| cell.replace(true));
+    RegisteredGlobalTelemetryGuard { previous }
+}
+
+pub(crate) fn with_suppressed_registered_globals<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = suppress_registered_global_logging();
+    f()
+}
+
+fn registered_global_telemetry_suppressed() -> bool {
+    REGISTERED_GLOBAL_SUPPRESSION.with(|cell| *cell.borrow())
 }
 
 pub(super) fn handle_from_value(value: &Value) -> Option<String> {
@@ -65,8 +112,13 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     value: T,
 ) -> LuaResult<()> {
     let value = value.into_lua(lua)?;
-    let value_fields = value_fields_from_lua(&value);
     let hint = take_registered_global_hint();
+
+    if registered_global_telemetry_suppressed() {
+        return globals.set(name, value);
+    }
+
+    let value_fields = value_fields_from_lua(&value);
     let upvalues = hint.as_ref().map(|meta| meta.upvalues).unwrap_or(0);
 
     let handle_label = format!("global:{name}");
@@ -124,16 +176,6 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
         log_registered_constant(name, handle, Some(handle_label), value_fields, origin);
     }
 
-    globals.set(name, value)
-}
-
-pub(super) fn set_global_silent<'lua, T: IntoLua<'lua>>(
-    lua: &'lua Lua,
-    globals: &Table<'lua>,
-    name: &str,
-    value: T,
-) -> LuaResult<()> {
-    let value = value.into_lua(lua)?;
     globals.set(name, value)
 }
 
@@ -223,6 +265,9 @@ pub(crate) fn value_fields_from_lua(value: &Value) -> ValueFields {
             fields.value_type = Some(ValueType::Userdata);
             if let Ok(handle) = data.borrow::<TaggedHandle>() {
                 fields.tag = Some(handle.tag);
+            } else if let Ok(color) = data.borrow::<ColorHandle>() {
+                fields.tag = Some(COLOR_TAG);
+                fields.value = Some(format!("0x{:06x}", color.encoded()));
             }
         }
         Value::Thread(_) | Value::LightUserData(_) | Value::Error(_) => {

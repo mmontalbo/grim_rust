@@ -17,8 +17,9 @@ use grim_telemetry_common::{LuaEvent, OriginFields, UpvaluePreview, ValueFields,
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::{install_legacy_compat, install_legacy_math};
 use super::util::{
-    set_global, set_global_silent, value_fields_from_lua, value_to_string,
-    value_to_upvalue_preview, with_registered_global_hint, RegisteredGlobalMeta, TaggedHandle,
+    set_global, value_fields_from_lua, value_to_string, value_to_upvalue_preview,
+    with_registered_global_hint, with_suppressed_registered_globals, ColorHandle,
+    RegisteredGlobalMeta, TaggedHandle, COLOR_TAG,
 };
 use super::{store_registry_value, PinnedRegistryKeys};
 use crate::lua_host::context::EngineContext;
@@ -148,14 +149,25 @@ fn install_basic_functions_pre_system(
         let globals = lua_ctx.globals();
         globals.get::<_, Value>(name)
     })?;
-    set_global_silent(lua, globals, "getglobal", getglobal)?;
+    with_suppressed_registered_globals(|| set_global(lua, globals, "getglobal", getglobal))?;
 
     let setglobal = lua.create_function(|lua_ctx, (name, value): (String, Value)| {
         let globals = lua_ctx.globals();
-        globals.set(name, value)?;
+        super::util::set_global(lua_ctx, &globals, &name, value)?;
         Ok(Value::Nil)
     })?;
-    set_global_silent(lua, globals, "setglobal", setglobal)?;
+    with_suppressed_registered_globals(|| set_global(lua, globals, "setglobal", setglobal))?;
+
+    let debug_state = context.clone();
+    let print_debug = lua.create_function(move |_, args: Variadic<Value>| {
+        if let Some(Value::String(text)) = args.first() {
+            if debug_state.borrow().verbose() {
+                println!("[lua][PrintDebug] {}", text.to_str()?);
+            }
+        }
+        Ok(())
+    })?;
+    with_suppressed_registered_globals(|| set_global(lua, globals, "PrintDebug", print_debug))?;
 
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
         let type_ptr = type_fn.to_pointer();
@@ -166,8 +178,7 @@ fn install_basic_functions_pre_system(
             label: "global:type".to_string(),
             count: 1,
         });
-        let original_type_key = lua.create_registry_value(type_fn.clone())?;
-        let _type_ref = context.borrow_mut().alloc_ref(
+        let type_ref = context.borrow_mut().alloc_ref(
             lua,
             Value::Function(type_fn.clone()),
             Some(1),
@@ -175,8 +186,17 @@ fn install_basic_functions_pre_system(
             Some(type_handle.clone()),
             Some("global:type".to_string()),
         )?;
+        let type_fetch_ctx = context.clone();
         let type_override = lua.create_function(move |lua_ctx, value: Value| {
-            let original: Function = lua_ctx.registry_value(&original_type_key)?;
+            let original: Option<Function> = type_fetch_ctx.borrow().fetch_ref(
+                lua_ctx,
+                type_ref,
+                OriginFields::default(),
+                None,
+            )?;
+            let original = original.ok_or_else(|| {
+                LuaError::RuntimeError("type ref missing from registry".to_string())
+            })?;
             let primary: Value = original.call(value)?;
             Ok(MultiValue::from_vec(vec![primary, Value::Nil]))
         })?;
@@ -195,6 +215,25 @@ fn install_basic_functions_pre_system(
             ("HOT", GlobalConst::Int(32768)),
         ],
     )?;
+
+    register_tag(COLOR_TAG, Some("color".to_string()));
+    let make_color = lua.create_function(|lua_ctx, args: Variadic<Value>| {
+        let component = |index: usize| -> u8 {
+            args.get(index)
+                .and_then(|value| match value {
+                    Value::Integer(i) => Some(*i as i64),
+                    Value::Number(n) => Some(*n as i64),
+                    Value::String(text) => text.to_str().ok()?.trim().parse::<i64>().ok(),
+                    _ => None,
+                })
+                .map(|value| value.clamp(0, 255) as u8)
+                .unwrap_or(0)
+        };
+        let color = ColorHandle::new(component(0), component(1), component(2));
+        let userdata = lua_ctx.create_userdata(color)?;
+        Ok(Value::UserData(userdata))
+    })?;
+    with_suppressed_registered_globals(|| set_global(lua, globals, "MakeColor", make_color))?;
 
     let concat_fallback = lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
         Err(LuaError::RuntimeError(
@@ -244,36 +283,10 @@ fn install_basic_functions_pre_system(
         let _ = lua_ref.call::<_, i32>(value)?;
     }
 
-    if let Ok(settagmethod) = globals.get::<_, Function>("settagmethod") {
-        // Retail pulls ref 1 (luaI_type) inside its setfallback bootstrap before any
-        // tagmethod burst; mirror that fetch so semantic ordering lines up.
-        let _ = context
-            .borrow()
-            .fetch_ref::<Value>(lua, 1, OriginFields::default(), None)?;
-        let index_handler =
-            lua.create_function(|_, (_table, _key): (Value, Value)| Ok(Value::Nil))?;
-        for tag in [0, -1, -2, -3, -4, -5, -7] {
-            let _ = settagmethod.call::<_, Value>((tag, "index", index_handler.clone()))?;
-        }
-        // Retail fetches ref 1 again between the index burst and the gettable burst; mirror it.
-        let _ = context
-            .borrow()
-            .fetch_ref::<Value>(lua, 1, OriginFields::default(), None)?;
-        let gettable_handler =
-            lua.create_function(|_, (_table, _key): (Value, Value)| Ok(Value::Nil))?;
-        for tag in [0, -1, -2, -3, -4, -5, -7] {
-            let _ = settagmethod.call::<_, Value>((tag, "gettable", gettable_handler.clone()))?;
-        }
-    }
-
-    bind_fn_globals(
-        lua,
-        globals,
-        &[
-            ("ReadRegistryValue", &nil_return),
-            ("ReadRegistryIntValue", &nil_return),
-        ],
-    )?;
+    with_suppressed_registered_globals(|| -> LuaResult<()> {
+        set_global(lua, globals, "ReadRegistryValue", nil_return.clone())?;
+        set_global(lua, globals, "ReadRegistryIntValue", nil_return)
+    })?;
 
     Ok(())
 }
@@ -283,17 +296,6 @@ fn install_basic_functions_post_system(
     globals: &Table,
     context: Rc<RefCell<EngineContext>>,
 ) -> LuaResult<()> {
-    let debug_state = context.clone();
-    let print_debug = lua.create_function(move |_, args: Variadic<Value>| {
-        if let Some(Value::String(text)) = args.first() {
-            if debug_state.borrow().verbose() {
-                println!("[lua][PrintDebug] {}", text.to_str()?);
-            }
-        }
-        Ok(())
-    })?;
-    set_global(lua, globals, "PrintDebug", print_debug)?;
-
     let logf_state = context.clone();
     let logf = lua.create_function(move |_, args: Variadic<Value>| {
         if let Some(Value::String(text)) = args.first() {
@@ -359,14 +361,10 @@ fn install_basic_functions_post_system(
         "GetPlatform",
         lua.create_function(|_, ()| Ok(1))?,
     )?; // PLATFORM_PC_WIN
-    bind_fn_globals(
-        lua,
-        globals,
-        &[
-            ("ReadRegistryValue", &nil_return),
-            ("ReadRegistryIntValue", &nil_return),
-        ],
-    )?;
+    with_suppressed_registered_globals(|| -> LuaResult<()> {
+        set_global(lua, globals, "ReadRegistryValue", nil_return.clone())?;
+        set_global(lua, globals, "ReadRegistryIntValue", nil_return.clone())
+    })?;
     bind_fn_globals(
         lua,
         globals,
@@ -474,7 +472,7 @@ fn install_dofile(
         Ok(Value::Nil)
     })?;
     // Avoid logging an extra semantic bind here so ordering matches retail tagmethod burst.
-    set_global_silent(lua, globals, "dofile", wrapped_dofile)?;
+    with_suppressed_registered_globals(|| set_global(lua, globals, "dofile", wrapped_dofile))?;
     Ok(())
 }
 
