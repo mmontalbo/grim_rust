@@ -255,9 +255,13 @@ fn install_basic_functions_pre_system(
         for tag in [0, -1, -2, -3, -4, -5, -7] {
             let _ = settagmethod.call::<_, Value>((tag, "index", index_handler.clone()))?;
         }
+        // Retail fetches ref 1 again between the index burst and the gettable burst; mirror it.
+        let _ = context
+            .borrow()
+            .fetch_ref::<Value>(lua, 1, OriginFields::default(), None)?;
         let gettable_handler =
             lua.create_function(|_, (_table, _key): (Value, Value)| Ok(Value::Nil))?;
-        for tag in [0, -1, -2] {
+        for tag in [0, -1, -2, -3, -4, -5, -7] {
             let _ = settagmethod.call::<_, Value>((tag, "gettable", gettable_handler.clone()))?;
         }
     }
