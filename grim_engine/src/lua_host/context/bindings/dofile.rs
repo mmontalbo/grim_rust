@@ -86,7 +86,15 @@ pub(super) fn execute_script<'lua>(lua: &'lua Lua, path: &Path) -> LuaResult<Opt
     };
 
     match eval_result {
-        Ok(results) => Ok(Some(results.into_iter().next().unwrap_or(Value::Nil))),
+        Ok(results) => {
+            let first = results.into_iter().next().unwrap_or(Value::Nil);
+            let value = if matches!(first, Value::Nil) {
+                Value::Boolean(true)
+            } else {
+                first
+            };
+            Ok(Some(value))
+        }
         Err(LuaError::SyntaxError { message, .. })
             if message.contains("bad header in precompiled chunk") =>
         {

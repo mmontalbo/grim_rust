@@ -1,5 +1,6 @@
 use grim_telemetry_common::OriginFields;
 use mlua::{FromLua, Lua, RegistryKey, Result as LuaResult, Value};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::lua_host::telemetry::{
@@ -101,6 +102,7 @@ impl Drop for PinnedRegistryKeys {
 pub(crate) struct RefRegistry {
     entries: HashMap<i32, RegistryRef>,
     next: i32,
+    last_fetch: RefCell<Option<(i32, usize)>>,
 }
 
 impl RefRegistry {
@@ -108,6 +110,7 @@ impl RefRegistry {
         Self {
             entries: HashMap::new(),
             next: 1,
+            last_fetch: RefCell::new(None),
         }
     }
 
@@ -150,6 +153,22 @@ impl RefRegistry {
         Ok(reference)
     }
 
+    fn should_log_fetch(&self, reference: i32) -> bool {
+        let mut last = self.last_fetch.borrow_mut();
+        if let Some((prev_ref, count)) = *last {
+            if prev_ref == reference {
+                if count >= 2 {
+                    *last = Some((reference, 0));
+                    return false;
+                }
+                *last = Some((reference, count + 1));
+                return true;
+            }
+        }
+        *last = Some((reference, 1));
+        true
+    }
+
     pub(crate) fn fetch_ref<'lua, T: FromLua<'lua>>(
         &self,
         lua: &'lua Lua,
@@ -158,7 +177,9 @@ impl RefRegistry {
         note_on_missing: Option<String>,
     ) -> LuaResult<Option<T>> {
         if let Some(entry) = self.entries.get(&reference) {
-            entry.log_fetch(origin.clone(), None);
+            if self.should_log_fetch(reference) {
+                entry.log_fetch(origin.clone(), None);
+            }
             let value: Value = lua.registry_value(&entry.key)?;
             return T::from_lua(value, lua).map(Some);
         }
