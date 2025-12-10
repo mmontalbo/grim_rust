@@ -7,6 +7,9 @@ pub(super) use bindings::{
     load_system_script, override_boot_stubs,
 };
 
+use bindings::RefRegistry;
+use grim_telemetry_common::OriginFields;
+use mlua::{FromLua, Lua, Result as LuaResult, Value};
 use scripts::{ScriptRuntime, ScriptRuntimeAdapter};
 
 pub(super) struct EngineContext {
@@ -15,6 +18,7 @@ pub(super) struct EngineContext {
     scripts: ScriptRuntime,
     events: Vec<String>,
     active_movie: Option<ActiveMovie>,
+    ref_registry: RefRegistry,
 }
 
 struct ActiveMovie {
@@ -36,6 +40,7 @@ impl EngineContext {
             scripts: ScriptRuntime::new(),
             events: Vec::new(),
             active_movie: None,
+            ref_registry: RefRegistry::new(),
         }
     }
 
@@ -65,6 +70,39 @@ impl EngineContext {
 
     pub(super) fn events(&self) -> &[String] {
         &self.events
+    }
+
+    pub(super) fn alloc_ref(
+        &mut self,
+        lua: &Lua,
+        value: Value,
+        preferred_ref: Option<i32>,
+        label: Option<String>,
+        preferred_handle: Option<String>,
+        handle_label: Option<String>,
+    ) -> LuaResult<i32> {
+        self.ref_registry.alloc_ref(
+            lua,
+            value,
+            preferred_ref,
+            label,
+            preferred_handle,
+            handle_label,
+        )
+    }
+
+    pub(super) fn fetch_ref<'lua, T: FromLua<'lua>>(
+        &self,
+        lua: &'lua Lua,
+        reference: i32,
+        origin: OriginFields,
+        note: Option<String>,
+    ) -> LuaResult<Option<T>> {
+        self.ref_registry.fetch_ref(lua, reference, origin, note)
+    }
+
+    pub(super) fn remove_ref(&mut self, reference: i32) -> bool {
+        self.ref_registry.remove(reference)
     }
 
     pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {

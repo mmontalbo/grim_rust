@@ -10,15 +10,13 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_event, log_fetch_ref, log_set_fallback, log_set_tagmethod, log_unref,
-    next_fabricated_handle, normalize_handle, origin_fields_for_ptr, ptr_to_handle,
-    register_table_label, table_label,
+    log_event, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
+    normalize_handle, origin_fields_for_ptr, ptr_to_handle, register_table_label, table_label,
 };
 
 use super::util::{
     describe_value, handle_from_value, set_global_silent, value_fields_from_lua, TaggedHandle,
 };
-use super::{store_registry_value, RegistryRef};
 use crate::lua_host::context::EngineContext;
 
 pub(super) fn install_legacy_compat<'lua>(
@@ -201,10 +199,8 @@ fn install_fallback_globals<'lua>(
         lua.create_function(|_, value: Value| Ok(LegacyFallbacks::tag_id_for_value(&value)))?;
     set_global_silent(lua, globals, "tag", tag)?;
 
-    let refs = RegistryRefs::new();
-    let refs_state = refs.clone();
+    let refs_state = context.clone();
     let lua_ref = lua.create_function(move |lua_ctx, value: Value| -> LuaResult<i32> {
-        let reference = refs_state.next_handle();
         let preferred_handle = handle_from_value(&value).filter(|h| h != "0x00000000");
         let fabricated = normalize_handle(
             "handle",
@@ -216,44 +212,39 @@ fn install_fallback_globals<'lua>(
         );
         let handle = preferred_handle.unwrap_or(fabricated);
         let label = format!("handle={handle}");
-        let entry = store_registry_value(
+        let mut ctx = refs_state.borrow_mut();
+        ctx.alloc_ref(
             lua_ctx,
             value,
-            1,
-            Some(reference),
+            None,
             Some(label.clone()),
             Some(handle.clone()),
             Some(handle),
-        )?;
-        refs_state.store(entry);
-        Ok(reference)
+        )
     })?;
     set_global_silent(lua, globals, "lua_ref", lua_ref)?;
 
-    let refs_state = refs.clone();
+    let refs_state = context.clone();
     let lua_unref = lua.create_function(move |_, handle: i32| {
-        refs_state.remove(handle);
-        log_unref(handle, None);
+        if refs_state.borrow_mut().remove_ref(handle) {
+            log_unref(handle, None);
+        }
         Ok(())
     })?;
     set_global_silent(lua, globals, "lua_unref", lua_unref)?;
 
-    let refs_state = refs.clone();
+    let refs_state = context.clone();
     let lua_getref = lua.create_function(move |lua_ctx, handle: i32| -> LuaResult<Value> {
-        let value = refs_state.resolve_value(lua_ctx, handle, |value| match value {
-            Value::Function(func) => origin_fields_for_ptr(func.to_pointer()),
-            _ => OriginFields::default(),
-        })?;
-        if let Some(value) = value {
+        let origin = OriginFields::default();
+        let value: Option<Value> = refs_state.borrow().fetch_ref(
+            lua_ctx,
+            handle,
+            origin.clone(),
+            Some("missing_ref".to_string()),
+        )?;
+        if let Some(value) = value.clone() {
             Ok(value)
         } else {
-            log_fetch_ref(
-                handle,
-                None,
-                None,
-                Some("missing_ref".to_string()),
-                OriginFields::default(),
-            );
             Ok(Value::Nil)
         }
     })?;
@@ -623,51 +614,5 @@ impl LegacyFallbacks {
         // Mirror retail's setfallback.lua ordering: 0, tag(0), tag(""), tag({}),
         // tag(function() end), tag(settagmethod), tag(nil).
         vec![0, -1, -2, -3, -4, -5, -7]
-    }
-}
-
-#[derive(Clone)]
-struct RegistryRefs {
-    entries: Rc<RefCell<HashMap<i32, RegistryRef>>>,
-    next: Rc<RefCell<i32>>,
-}
-
-impl RegistryRefs {
-    fn new() -> Self {
-        Self {
-            entries: Rc::new(RefCell::new(HashMap::new())),
-            next: Rc::new(RefCell::new(2)),
-        }
-    }
-
-    fn next_handle(&self) -> i32 {
-        let mut counter = self.next.borrow_mut();
-        let handle = *counter;
-        *counter = counter.wrapping_add(1).max(1);
-        handle
-    }
-
-    fn store(&self, entry: RegistryRef) {
-        self.entries.borrow_mut().insert(entry.reference, entry);
-    }
-
-    fn remove(&self, handle: i32) {
-        self.entries.borrow_mut().remove(&handle);
-    }
-
-    fn resolve_value<'lua>(
-        &self,
-        lua: &'lua Lua,
-        handle: i32,
-        origin_fn: impl FnOnce(&Value) -> OriginFields,
-    ) -> LuaResult<Option<Value<'lua>>> {
-        let entries = self.entries.borrow();
-        if let Some(entry) = entries.get(&handle) {
-            let value: Value = lua.registry_value(&entry.key)?;
-            let origin = origin_fn(&value);
-            entry.log_fetch(origin, None);
-            return Ok(Some(value));
-        }
-        Ok(None)
     }
 }

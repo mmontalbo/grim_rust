@@ -12,7 +12,7 @@ use crate::lua_host::telemetry::{
     log_push_usertag, log_set_fallback, log_set_table_entry, next_fabricated_handle, ptr_to_handle,
     register_tag,
 };
-use grim_telemetry_common::{LuaEvent, OriginFields, ValueFields};
+use grim_telemetry_common::{LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::{install_legacy_compat, install_legacy_math};
@@ -110,7 +110,7 @@ pub(crate) fn install_globals_pre_system(
     install_system_table(lua, &globals)?;
 
     install_dofile(lua, &globals, data_root, context.clone())?;
-    install_basic_functions_pre_system(lua, &globals)?;
+    install_basic_functions_pre_system(lua, &globals, context.clone())?;
 
     Ok(())
 }
@@ -136,7 +136,11 @@ pub(crate) fn install_globals(
     Ok(())
 }
 
-fn install_basic_functions_pre_system(lua: &Lua, globals: &Table) -> LuaResult<()> {
+fn install_basic_functions_pre_system(
+    lua: &Lua,
+    globals: &Table,
+    context: Rc<RefCell<EngineContext>>,
+) -> LuaResult<()> {
     let nil_return = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?;
 
     // Legacy helpers for manipulating globals from Lua 3.1.
@@ -162,18 +166,17 @@ fn install_basic_functions_pre_system(lua: &Lua, globals: &Table) -> LuaResult<(
             label: "global:type".to_string(),
             count: 1,
         });
-        let saved_type = store_registry_value(
+        let original_type_key = lua.create_registry_value(type_fn.clone())?;
+        let _type_ref = context.borrow_mut().alloc_ref(
             lua,
-            Value::Function(type_fn),
-            1,
+            Value::Function(type_fn.clone()),
             Some(1),
             Some("global:type".to_string()),
-            Some(type_handle),
+            Some(type_handle.clone()),
             Some("global:type".to_string()),
         )?;
-        let type_key = saved_type.key;
         let type_override = lua.create_function(move |lua_ctx, value: Value| {
-            let original: Function = lua_ctx.registry_value(&type_key)?;
+            let original: Function = lua_ctx.registry_value(&original_type_key)?;
             let primary: Value = original.call(value)?;
             Ok(MultiValue::from_vec(vec![primary, Value::Nil]))
         })?;
@@ -239,6 +242,24 @@ fn install_basic_functions_pre_system(lua: &Lua, globals: &Table) -> LuaResult<(
     ] {
         let value = Value::String(lua.create_string(key)?);
         let _ = lua_ref.call::<_, i32>(value)?;
+    }
+
+    if let Ok(settagmethod) = globals.get::<_, Function>("settagmethod") {
+        // Retail pulls ref 1 (luaI_type) inside its setfallback bootstrap before any
+        // tagmethod burst; mirror that fetch so semantic ordering lines up.
+        let _ = context
+            .borrow()
+            .fetch_ref::<Value>(lua, 1, OriginFields::default(), None)?;
+        let index_handler =
+            lua.create_function(|_, (_table, _key): (Value, Value)| Ok(Value::Nil))?;
+        for tag in [0, -1, -2, -3, -4, -5, -7] {
+            let _ = settagmethod.call::<_, Value>((tag, "index", index_handler.clone()))?;
+        }
+        let gettable_handler =
+            lua.create_function(|_, (_table, _key): (Value, Value)| Ok(Value::Nil))?;
+        for tag in [0, -1, -2] {
+            let _ = settagmethod.call::<_, Value>((tag, "gettable", gettable_handler.clone()))?;
+        }
     }
 
     bind_fn_globals(
@@ -497,6 +518,13 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
 
     // Retail fetches the stored system ref before installing default handlers; mirror the fetches without storing the closures.
     let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+    let cam_change_preview = UpvaluePreview {
+        kind: ValueType::Cfunction,
+        value: Some(ptr_to_handle(default_cam_change.to_pointer())),
+        value_len: None,
+        preview: None,
+        tag: None,
+    };
     system = system_ref.fetch(lua, OriginFields::default(), None)?;
     log_push_cclosure(
         "lua_pushCclosure",
@@ -504,9 +532,25 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
         0,
         Some("DefaultCamChangeHandlerL"),
     );
+    log_set_table_entry(
+        system_handle.clone(),
+        system_handle_label.clone(),
+        value_to_upvalue_preview(&Value::String(lua.create_string("camChangeHandler")?)),
+        cam_change_preview,
+        None,
+        Some(system_fields.clone()),
+        None,
+    );
     system.set("camChangeHandler", default_cam_change)?;
 
     let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
+    let default_control_preview = UpvaluePreview {
+        kind: ValueType::Cfunction,
+        value: Some(ptr_to_handle(default_control.to_pointer())),
+        value_len: None,
+        preview: None,
+        tag: None,
+    };
     for key in ["axisHandler", "inputModeHandler", "buttonHandler"] {
         let system_for_handler: Table = system_ref.fetch(lua, OriginFields::default(), None)?;
         log_push_cclosure(
@@ -514,6 +558,16 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
             default_control.to_pointer(),
             0,
             Some("DefaultControlHandlerL"),
+        );
+        let key_preview = value_to_upvalue_preview(&Value::String(lua.create_string(key)?));
+        log_set_table_entry(
+            system_handle.clone(),
+            system_handle_label.clone(),
+            key_preview,
+            default_control_preview.clone(),
+            None,
+            Some(system_fields.clone()),
+            None,
         );
         system_for_handler.set(key, default_control.clone())?;
     }

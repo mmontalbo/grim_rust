@@ -9,8 +9,9 @@ use libc::c_int;
 use std::ffi::c_void;
 
 use super::{
-    callfunction_tracker, origin_fields, record_non_push_event, remember_handle_label_if_missing,
-    resolve_lua_function_label, ClosureOrigin,
+    callfunction_tracker, describe_lua_value, origin_fields, record_non_push_event,
+    remember_handle_label_if_missing, resolve_lua_function_label, value_fields_from_details,
+    ClosureOrigin,
 };
 
 /// Traces releasing a Lua reference and emits both semantic and raw events.
@@ -39,6 +40,8 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                     let label = resolve_lua_function_label(handle);
                     let origin = call_real_lua_getcfunction(handle)
                         .map(|func| ClosureOrigin::new(func as *const c_void));
+                    let value_fields = describe_lua_value(handle)
+                        .map(|details| value_fields_from_details(&details));
                     if let Ok(mut tracker) = callfunction_tracker().lock() {
                         tracker.remember_label_if_missing(handle, format!("ref:{reference}"));
                         if let Some(origin) = origin.clone() {
@@ -55,6 +58,7 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         reference,
                         handle: Some(handle_hex.clone()),
                         label: Some(label.clone()),
+                        value_fields: value_fields.clone(),
                         note: None,
                         origin: origin_fields.clone(),
                     });
@@ -63,6 +67,7 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         reference,
                         handle: Some(handle_hex),
                         label: Some(label),
+                        value_fields,
                         note: None,
                         origin: origin_fields,
                     });
@@ -73,6 +78,7 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         reference,
                         handle: Some("<unknown>".to_string()),
                         label: Some(format!("ref:{reference}")),
+                        value_fields: None,
                         note: Some("lua_getref_missing".to_string()),
                         origin: OriginFields::default(),
                     });
@@ -81,6 +87,7 @@ pub(crate) unsafe fn trace_lua_ref(lock: c_int) -> c_int {
                         reference,
                         handle: Some("<unknown>".to_string()),
                         label: Some(format!("ref:{reference}")),
+                        value_fields: None,
                         note: Some("lua_getref_missing".to_string()),
                         origin: OriginFields::default(),
                     });

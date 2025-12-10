@@ -635,6 +635,8 @@ pub enum LuaSemanticEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        value_fields: Option<ValueFields>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         #[serde(flatten)]
         origin: OriginFields,
@@ -977,6 +979,8 @@ pub enum LuaEvent {
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_fields: Option<ValueFields>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         #[serde(flatten)]

@@ -295,6 +295,7 @@ pub(crate) fn log_store_ref(
     reference: i32,
     handle: Option<String>,
     label: Option<String>,
+    value_fields: Option<ValueFields>,
 ) {
     let origin = caller_origin_fields();
     log_event(LuaSemanticEvent::SemanticStoreRef {
@@ -302,6 +303,7 @@ pub(crate) fn log_store_ref(
         reference,
         handle: handle.clone(),
         label: label.clone(),
+        value_fields: value_fields.clone(),
         note: None,
         origin: origin.clone(),
     });
@@ -310,6 +312,7 @@ pub(crate) fn log_store_ref(
         reference,
         handle,
         label: label.clone(),
+        value_fields,
         note: None,
         origin,
     });

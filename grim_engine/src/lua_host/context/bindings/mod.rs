@@ -14,7 +14,7 @@ pub(crate) use bootstrap::install_globals;
 pub(crate) use bootstrap::{
     install_globals_post_system, install_globals_pre_system, install_package_path,
 };
-pub(crate) use registry::{store_registry_value, PinnedRegistryKeys, RegistryRef};
+pub(crate) use registry::{store_registry_value, PinnedRegistryKeys, RefRegistry};
 
 #[cfg(test)]
 mod tests {

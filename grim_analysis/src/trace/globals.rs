@@ -76,6 +76,7 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
 
 /// Traces a global set, emitting semantic bind events for functions/constants.
 pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
+    record_non_push_event();
     let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
 
     if call_real_lua_setglobal(name) {

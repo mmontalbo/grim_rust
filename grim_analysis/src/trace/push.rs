@@ -13,9 +13,8 @@ use std::ffi::c_void;
 
 use super::{
     caller_origin_fields, describe_lua_value, format_number_for_log, log_event_with_seq,
-    origin_fields, record_non_push_event, record_push_preview,
-    remember_registered_global_candidate, truncate_for_log, upvalue_preview_from_details,
-    value_fields_from_details, ClosureOrigin,
+    origin_fields, record_push_preview, remember_registered_global_candidate, truncate_for_log,
+    upvalue_preview_from_details, value_fields_from_details, ClosureOrigin,
 };
 
 /// Traces pushing a C closure, capturing origin metadata and upvalue count.
@@ -43,7 +42,6 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
     // Remember that this closure was just pushed so a subsequent lua_setglobal can
     // treat it as a registered global (function) instead of a constant value.
     remember_registered_global_candidate(func_addr, upvalues, origin.clone());
-    record_non_push_event();
 
     if !call_real_lua_push_c_closure(func, upvalues) {
         log_line("unable to forward lua_pushCclosure call; retail VM may misbehave");

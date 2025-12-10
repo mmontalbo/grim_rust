@@ -1,11 +1,12 @@
 use grim_telemetry_common::OriginFields;
 use mlua::{FromLua, Lua, RegistryKey, Result as LuaResult, Value};
+use std::collections::HashMap;
 
 use crate::lua_host::telemetry::{
     log_fetch_ref, log_store_ref, normalize_handle, register_table_label,
 };
 
-use super::util::handle_from_value;
+use super::util::{handle_from_value, value_fields_from_lua};
 
 #[derive(Debug)]
 pub(crate) struct RegistryRef {
@@ -60,9 +61,16 @@ pub(crate) fn store_registry_value<'lua>(
             register_table_label(table.to_pointer(), label);
         }
     }
+    let value_fields = value_fields_from_lua(&value);
     let key = lua.create_registry_value(value)?;
     let reference = reference.unwrap_or_else(|| key.id());
-    log_store_ref(lock, reference, Some(handle.clone()), label.clone());
+    log_store_ref(
+        lock,
+        reference,
+        Some(handle.clone()),
+        label.clone(),
+        Some(value_fields),
+    );
     Ok(RegistryRef {
         reference,
         key,
@@ -87,5 +95,78 @@ impl Drop for PinnedRegistryKeys {
         for key in self.keys.drain(..) {
             std::mem::forget(key);
         }
+    }
+}
+
+pub(crate) struct RefRegistry {
+    entries: HashMap<i32, RegistryRef>,
+    next: i32,
+}
+
+impl RefRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next: 1,
+        }
+    }
+
+    fn next_handle(&mut self) -> i32 {
+        let handle = self.next.max(1);
+        self.next = handle.saturating_add(1);
+        handle
+    }
+
+    fn reserve_reference(&mut self, preferred: Option<i32>) -> i32 {
+        match preferred {
+            Some(ref_id) if ref_id > 0 => {
+                self.next = self.next.max(ref_id.saturating_add(1));
+                ref_id
+            }
+            _ => self.next_handle(),
+        }
+    }
+
+    pub(crate) fn alloc_ref<'lua>(
+        &mut self,
+        lua: &'lua Lua,
+        value: Value<'lua>,
+        preferred_ref: Option<i32>,
+        label: Option<String>,
+        preferred_handle: Option<String>,
+        handle_label: Option<String>,
+    ) -> LuaResult<i32> {
+        let reference = self.reserve_reference(preferred_ref);
+        let entry = store_registry_value(
+            lua,
+            value,
+            1,
+            Some(reference),
+            label,
+            preferred_handle,
+            handle_label,
+        )?;
+        self.entries.insert(reference, entry);
+        Ok(reference)
+    }
+
+    pub(crate) fn fetch_ref<'lua, T: FromLua<'lua>>(
+        &self,
+        lua: &'lua Lua,
+        reference: i32,
+        origin: OriginFields,
+        note_on_missing: Option<String>,
+    ) -> LuaResult<Option<T>> {
+        if let Some(entry) = self.entries.get(&reference) {
+            entry.log_fetch(origin.clone(), None);
+            let value: Value = lua.registry_value(&entry.key)?;
+            return T::from_lua(value, lua).map(Some);
+        }
+        log_fetch_ref(reference, None, None, note_on_missing, origin);
+        Ok(None)
+    }
+
+    pub(crate) fn remove(&mut self, reference: i32) -> bool {
+        self.entries.remove(&reference).is_some()
     }
 }
