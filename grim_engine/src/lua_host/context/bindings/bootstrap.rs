@@ -30,6 +30,8 @@ enum GlobalConst {
     Int(i32),
 }
 
+const ACTOR_TAG: i32 = 0x52544341; // 'ACTR'
+
 fn bind_const_globals<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -83,6 +85,7 @@ pub(crate) fn install_globals_pre_system(
     )?;
 
     install_legacy_io(lua, &globals)?;
+    install_control_stubs(lua, &globals)?;
     let errorfb: Function = globals
         .get("error")
         .context("error handler missing from Lua state")?;
@@ -112,6 +115,7 @@ pub(crate) fn install_globals_pre_system(
 
     install_dofile(lua, &globals, data_root, context.clone())?;
     install_basic_functions_pre_system(lua, &globals, context.clone())?;
+    install_actor_stubs(lua, &globals, context.clone())?;
 
     Ok(())
 }
@@ -134,6 +138,25 @@ pub(crate) fn install_globals(
 ) -> Result<()> {
     install_globals_pre_system(lua, data_root, context.clone())?;
     install_globals_post_system(lua, context)?;
+    Ok(())
+}
+
+fn install_control_stubs(lua: &Lua, globals: &Table) -> LuaResult<()> {
+    let noop = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?;
+    let noop_bool = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Boolean(false)))?;
+    for name in [
+        "EnableControl",
+        "DisableControl",
+        "EnableAllControl",
+        "ResetMarioControl",
+        "MarioControl",
+        "MarioStyleControl",
+        "TombRaiderControl",
+        "PrintControl",
+    ] {
+        set_global(lua, globals, name, noop.clone())?;
+    }
+    set_global(lua, globals, "GetControl", noop_bool)?;
     Ok(())
 }
 
@@ -891,6 +914,30 @@ fn bind_io_function<'lua>(
 fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {
     set_global(lua, globals, "PI", std::f32::consts::PI as f64)?;
     Ok(())
+}
+
+fn install_actor_stubs(
+    lua: &Lua,
+    globals: &Table,
+    context: Rc<RefCell<EngineContext>>,
+) -> LuaResult<()> {
+    register_tag(ACTOR_TAG, Some("actor".to_string()));
+    let load_actor_ctx = context.clone();
+    let load_actor = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        let name = args
+            .first()
+            .and_then(value_to_string)
+            .unwrap_or_else(|| "<unnamed>".to_string());
+        let fabricated = next_fabricated_handle();
+        let userdata = lua_ctx.create_userdata(TaggedHandle::new(ACTOR_TAG))?;
+        let handle = ptr_to_handle(userdata.to_pointer());
+        load_actor_ctx
+            .borrow_mut()
+            .log_event(format!("actor.load {name} -> {handle}"));
+        log_push_usertag(fabricated.raw, ACTOR_TAG, handle.clone());
+        Ok(userdata)
+    })?;
+    set_global(lua, globals, "LoadActor", load_actor)
 }
 
 fn install_stubbed_tables(
