@@ -95,11 +95,13 @@ pub(crate) fn log_push_cclosure(
     if let Some(symbol) = symbol_label {
         origin.symbol = Some(symbol.to_string());
     }
+    let caller = caller_origin_fields();
     log_event(LuaEvent::PushCclosure {
         name: label.to_string(),
         func: ptr_to_handle(func),
         upvalues,
         origin,
+        caller,
     });
 }
 
@@ -158,12 +160,14 @@ pub(crate) fn log_lua_setglobal(
     origin: OriginFields,
 ) {
     let bind_handle = handle.clone();
+    let caller = caller_origin_fields();
     log_event(LuaEvent::BindGlobal {
         name: name.to_string(),
         handle: bind_handle,
         label,
         values: values.clone(),
         origin,
+        caller,
     });
 }
 
@@ -445,7 +449,20 @@ fn caller_origin_fields() -> OriginFields {
         if addr.is_null() {
             continue;
         }
-        return origin_fields_for_ptr(*addr as *const c_void);
+        let ptr = *addr as *const c_void;
+        let details = describe_closure_target(ptr);
+        if should_skip_caller_frame(details.module.as_deref(), details.symbol.as_deref()) {
+            continue;
+        }
+        let mut fields = OriginFields::default();
+        fields.origin = Some(format!("0x{:08x}", ptr as usize));
+        if let Some(module) = details.module {
+            fields.module = Some(module);
+        }
+        if let Some(symbol) = details.symbol {
+            fields.symbol = Some(symbol);
+        }
+        return fields;
     }
     OriginFields::default()
 }
@@ -453,6 +470,28 @@ fn caller_origin_fields() -> OriginFields {
 struct ClosureDetails {
     module: Option<String>,
     symbol: Option<String>,
+}
+
+fn should_skip_caller_frame(module_path: Option<&str>, symbol: Option<&str>) -> bool {
+    if let Some(path) = module_path {
+        let normalized = path.to_ascii_lowercase();
+        if normalized.contains("libc.so")
+            || normalized.contains("libdl.so")
+            || normalized.contains("ld-linux")
+            || normalized.contains("linux-vdso")
+        {
+            return true;
+        }
+    }
+
+    if let Some(symbol) = symbol {
+        let normalized = symbol.to_ascii_lowercase();
+        if normalized.contains("lua_host::telemetry") {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {

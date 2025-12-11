@@ -21,11 +21,13 @@ use super::{
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {
     let func_addr = func as *const c_void as usize;
     let origin = Some(ClosureOrigin::new(func as *const c_void));
+    let caller = caller_origin_fields();
     let event = LuaEvent::PushCclosure {
         name: label.to_string(),
         func: format!("0x{func_addr:08x}"),
         upvalues,
         origin: origin_fields(origin.as_ref()),
+        caller,
     };
     let closure_log_seq = log_event_with_seq(event);
     record_push_preview(

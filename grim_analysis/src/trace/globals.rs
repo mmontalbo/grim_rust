@@ -78,6 +78,7 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
 pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
     record_non_push_event();
     let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let caller = super::caller_origin_fields();
 
     if call_real_lua_setglobal(name) {
         if let Some(handle) = call_real_lua_getglobal(name) {
@@ -111,6 +112,7 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                 label: Some(handle_label.clone()),
                 values: values.clone(),
                 origin: origin_fields(origin.as_ref()),
+                caller: caller.clone(),
             });
 
             if is_closure {

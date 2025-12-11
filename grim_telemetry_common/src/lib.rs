@@ -623,7 +623,7 @@ pub enum LuaSemanticEvent {
         value_fields: Option<ValueFields>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     SemanticStoreRef {
@@ -666,7 +666,7 @@ pub enum LuaSemanticEvent {
         values: ValueFields,
         #[serde(flatten)]
         origin: OriginFields,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     SemanticSetTagmethod {
@@ -694,6 +694,8 @@ pub enum LuaEvent {
         values: ValueFields,
         #[serde(flatten)]
         origin: OriginFields,
+        #[serde(rename = "caller")]
+        caller: OriginFields,
     },
     #[serde(rename = "registered_constant")]
     RegisteredConstant {
@@ -744,7 +746,7 @@ pub enum LuaEvent {
         from_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<i32>,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "lua_createtable")]
@@ -752,7 +754,7 @@ pub enum LuaEvent {
         handle: String,
         #[serde(flatten)]
         values: ValueFields,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "lua_dobuffer")]
@@ -822,6 +824,8 @@ pub enum LuaEvent {
         upvalues: i32,
         #[serde(flatten)]
         origin: OriginFields,
+        #[serde(rename = "caller")]
+        caller: OriginFields,
     },
     #[serde(rename = "lua_pushlstring")]
     PushLstring { len: usize, preview: String },
@@ -854,7 +858,7 @@ pub enum LuaEvent {
         id: i32,
         #[serde(flatten)]
         values: ValueFields,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "lua_rawgetglobal")]
@@ -877,7 +881,7 @@ pub enum LuaEvent {
         values: ValueFields,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "lua_rawgettable")]
@@ -890,7 +894,7 @@ pub enum LuaEvent {
     RawsetTable {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "set_table_entry")]
@@ -902,7 +906,7 @@ pub enum LuaEvent {
         value: UpvaluePreview,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "register_native")]
@@ -911,9 +915,11 @@ pub enum LuaEvent {
         handle: String,
         func: String,
         upvalues: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
         #[serde(flatten)]
         origin: OriginFields,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "set_constant")]
@@ -922,7 +928,7 @@ pub enum LuaEvent {
         handle: String,
         #[serde(flatten)]
         values: ValueFields,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "lua_setfallback")]
@@ -933,14 +939,14 @@ pub enum LuaEvent {
         values: ValueFields,
         #[serde(flatten)]
         origin: OriginFields,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "lua_settable")]
     SetTable {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-        #[serde(flatten)]
+        #[serde(rename = "caller")]
         caller: OriginFields,
     },
     #[serde(rename = "lua_settag")]

@@ -436,32 +436,85 @@ fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
         if let Some(module) = &origin.module {
             fields.module = Some(module.clone());
         }
-        let mut has_symbol = false;
+        let mut map_symbol_used = false;
         if let Some(symbol) = &origin.symbol {
-            has_symbol = true;
             fields.symbol = Some(symbol.clone());
         }
         if let Some(map_symbol) = &origin.map_symbol {
-            if !has_symbol {
-                let mut value = map_symbol.name.clone();
-                if map_symbol.distance > 0 {
-                    value.push_str(&format!("+0x{delta:x}", delta = map_symbol.distance));
-                }
-                fields.symbol = Some(value);
+            if fields.symbol.is_none() {
+                fields.symbol = Some(render_map_symbol(map_symbol));
+                map_symbol_used = true;
             }
+        }
+        if map_symbol_used {
+            fields.symbol_source = Some("map".to_string());
         }
     }
     fields
 }
 
-/// Captures the current call stack as a backtrace; currently unused beyond placeholder.
+/// Captures the immediate non-shim caller using a backtrace and resolves it to module/symbol info.
 fn caller_origin_fields() -> OriginFields {
     let mut frames: [*mut c_void; 32] = [ptr::null_mut(); 32];
     let depth = unsafe { backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
     if depth <= 0 {
         return OriginFields::default();
     }
+
+    for addr in frames.iter().take(depth as usize).skip(1) {
+        if addr.is_null() {
+            continue;
+        }
+        let ptr = *addr as *const c_void;
+        let details = describe_closure_target(ptr);
+        if should_skip_caller_frame(details.module.as_deref()) {
+            continue;
+        }
+        return origin_fields_from_frame(ptr as usize, details);
+    }
+
     OriginFields::default()
+}
+
+/// Builds origin fields from a frame address and its resolved module/symbol details.
+fn origin_fields_from_frame(addr: usize, details: ClosureDetails) -> OriginFields {
+    let ClosureDetails {
+        module,
+        module_base,
+        symbol,
+    } = details;
+    let mut fields = OriginFields::default();
+    fields.origin = Some(format!("0x{addr:08x}"));
+
+    if let Some(module) = module.as_ref() {
+        fields.module = Some(module.clone());
+    }
+    if let Some(symbol) = symbol {
+        fields.symbol = Some(symbol);
+    } else if let Some(map_symbol) = lookup_symbol_from_map(addr, module.as_deref(), module_base) {
+        fields.symbol = Some(render_symbol_with_offset(
+            &map_symbol.name,
+            map_symbol.distance,
+        ));
+        fields.symbol_source = Some("map".to_string());
+    }
+
+    fields
+}
+
+/// Filters out frames from the shim or libc so we attribute the caller to retail code.
+fn should_skip_caller_frame(module_path: Option<&str>) -> bool {
+    match module_path {
+        Some(path) => {
+            let normalized = path.to_ascii_lowercase();
+            normalized.contains("libgrim_analysis")
+                || normalized.contains("libc.so")
+                || normalized.contains("libdl.so")
+                || normalized.contains("ld-linux")
+                || normalized.contains("linux-vdso")
+        }
+        None => false,
+    }
 }
 
 struct ClosureDetails {
@@ -836,6 +889,20 @@ impl ClosureOrigin {
 struct MapSymbol {
     name: String,
     distance: usize,
+}
+
+/// Renders a symbol name with an offset suffix when present.
+fn render_symbol_with_offset(name: &str, distance: usize) -> String {
+    if distance == 0 {
+        name.to_string()
+    } else {
+        format!("{name}+0x{distance:x}")
+    }
+}
+
+/// Formats a `MapSymbol` for logging consistency.
+fn render_map_symbol(map_symbol: &MapSymbol) -> String {
+    render_symbol_with_offset(&map_symbol.name, map_symbol.distance)
 }
 
 /// Emits a structured semantic event through the logging layer.
