@@ -37,11 +37,11 @@ use trace::{
     trace_lua_call, trace_lua_callfunction, trace_lua_collectgarbage, trace_lua_copytagmethods,
     trace_lua_createtable, trace_lua_dobuffer, trace_lua_dofile, trace_lua_dostring,
     trace_lua_error, trace_lua_getglobal, trace_lua_getref, trace_lua_gettable, trace_lua_newtag,
-    trace_lua_push_closure, trace_lua_pushlstring, trace_lua_pushnil, trace_lua_pushnumber,
-    trace_lua_pushobject, trace_lua_pushstring, trace_lua_pushusertag, trace_lua_pushvalue,
-    trace_lua_rawgetglobal, trace_lua_rawgettable, trace_lua_rawsetglobal, trace_lua_rawsettable,
-    trace_lua_ref, trace_lua_setfallback, trace_lua_setglobal, trace_lua_settable,
-    trace_lua_settag, trace_lua_settagmethod, trace_lua_unref,
+    trace_lua_openlib, trace_lua_push_closure, trace_lua_pushlstring, trace_lua_pushnil,
+    trace_lua_pushnumber, trace_lua_pushobject, trace_lua_pushstring, trace_lua_pushusertag,
+    trace_lua_pushvalue, trace_lua_rawgetglobal, trace_lua_rawgettable, trace_lua_rawsetglobal,
+    trace_lua_rawsettable, trace_lua_ref, trace_lua_setfallback, trace_lua_setglobal,
+    trace_lua_settable, trace_lua_settag, trace_lua_settagmethod, trace_lua_unref,
 };
 
 #[no_mangle]
@@ -149,6 +149,21 @@ pub unsafe extern "C" fn lua_callfunction(func: *mut libc::c_void) -> c_int {
 /// `state` must be a valid Lua state pointer from the retail runtime.
 pub unsafe extern "C" fn lua_newthread(state: *mut c_void) -> *mut c_void {
     trace::trace_lua_newthread(state)
+}
+
+#[no_mangle]
+/// Registers a library of native C functions while recording the entries.
+///
+/// # Safety
+/// `l` must point to a null-terminated array of `luaL_reg` entries; `state` and
+/// `libname` must target a live Lua state.
+pub unsafe extern "C" fn lua_openlib(
+    state: *mut c_void,
+    libname: *const libc::c_char,
+    l: *const lua_api::LuaLReg,
+    nup: c_int,
+) {
+    trace_lua_openlib(state, libname, l, nup)
 }
 
 #[no_mangle]

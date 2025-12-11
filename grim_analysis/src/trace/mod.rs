@@ -27,6 +27,7 @@ use std::{
 
 mod calls;
 mod globals;
+mod openlib;
 mod push;
 mod refs;
 mod state;
@@ -40,6 +41,7 @@ pub(crate) use calls::{
 pub(crate) use globals::{
     trace_lua_getglobal, trace_lua_rawgetglobal, trace_lua_rawsetglobal, trace_lua_setglobal,
 };
+pub(crate) use openlib::trace_lua_openlib;
 pub(crate) use push::{
     trace_lua_push_closure, trace_lua_pushlstring, trace_lua_pushnil, trace_lua_pushnumber,
     trace_lua_pushobject, trace_lua_pushstring, trace_lua_pushusertag, trace_lua_pushvalue,

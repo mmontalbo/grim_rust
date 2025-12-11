@@ -11,6 +11,15 @@ use std::{ffi::CStr, sync::OnceLock};
 pub(crate) type LuaCFunction = unsafe extern "C" fn();
 pub(crate) type LuaObject = u32;
 pub(crate) type LuaState = *mut c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LuaLReg {
+    pub name: *const c_char,
+    pub func: Option<LuaCFunction>,
+}
+
+type LuaOpenLibFn = unsafe extern "C" fn(LuaState, *const c_char, *const LuaLReg, c_int);
 type LuaPushCClosureFn = unsafe extern "C" fn(LuaCFunction, c_int);
 type LuaDoFileFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type LuaDoStringFn = unsafe extern "C" fn(*const c_char) -> c_int;
@@ -68,6 +77,7 @@ static LUA_CALLFUNCTION: OnceLock<Option<LuaCallFunctionFn>> = OnceLock::new();
 static LUA_OPEN: OnceLock<Option<LuaOpenFn>> = OnceLock::new();
 static LUA_NEWSTATE: OnceLock<Option<LuaNewStateFn>> = OnceLock::new();
 static LUA_NEWTHREAD: OnceLock<Option<LuaNewThreadFn>> = OnceLock::new();
+static LUA_OPENLIB: OnceLock<Option<LuaOpenLibFn>> = OnceLock::new();
 static LUA_GETOBJNAME: OnceLock<Option<LuaGetObjNameFn>> = OnceLock::new();
 static LUA_SETGLOBAL: OnceLock<Option<LuaSetGlobalFn>> = OnceLock::new();
 static LUA_GETGLOBAL: OnceLock<Option<LuaGetGlobalFn>> = OnceLock::new();
@@ -136,6 +146,27 @@ pub(crate) fn call_real_lua_newstate() -> Option<LuaState> {
 /// Spawns a new Lua thread within the retail VM when the symbol is present.
 pub(crate) fn call_real_lua_newthread(state: LuaState) -> Option<LuaState> {
     unsafe { lua_newthread_symbol().map(|symbol| symbol(state)) }
+}
+
+/// Registers a library of native functions with the retail VM, returning whether the symbol existed.
+pub(crate) fn call_real_lua_openlib(
+    state: LuaState,
+    libname: *const c_char,
+    l: *const LuaLReg,
+    nup: c_int,
+) -> bool {
+    unsafe {
+        match lua_openlib_symbol() {
+            Some(symbol) => {
+                symbol(state, libname, l, nup);
+                true
+            }
+            None => {
+                log_line("lua_openlib symbol missing; skipping trace");
+                false
+            }
+        }
+    }
 }
 
 /// Forwards `lua_dofile` into the retail VM, returning None if the symbol is missing.
@@ -668,6 +699,26 @@ fn lua_newthread_symbol() -> Option<LuaNewThreadFn> {
             label: "lua_newthread",
         }])
         .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewThreadFn>(ptr))
+    })
+}
+
+fn lua_openlib_symbol() -> Option<LuaOpenLibFn> {
+    *LUA_OPENLIB.get_or_init(|| unsafe {
+        resolve_symbol_with_variants(&[
+            SymbolVariant {
+                symbol: b"lua_openlib\0",
+                label: "lua_openlib",
+            },
+            SymbolVariant {
+                symbol: b"luaL_openlib\0",
+                label: "luaL_openlib",
+            },
+            SymbolVariant {
+                symbol: b"luaI_openlib\0",
+                label: "luaI_openlib",
+            },
+        ])
+        .map(|ptr| std::mem::transmute::<*mut c_void, LuaOpenLibFn>(ptr))
     })
 }
 
