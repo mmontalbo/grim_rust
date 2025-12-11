@@ -471,7 +471,7 @@ fn convert_zbuffer16_to_rgba8888(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, path::PathBuf};
 
     #[test]
     fn decodes_minimal_raw_bitmap() {
@@ -507,10 +507,8 @@ mod tests {
 
     #[test]
     fn decodes_zbm_with_external_seed() {
-        let base_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_6_mnycu.bm");
-        let delta_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_6_mnycu.zbm");
+        let base_path = fixture_path("mo_6_mnycu.bm").expect("fixture mo_6_mnycu.bm missing");
+        let delta_path = fixture_path("mo_6_mnycu.zbm").expect("fixture mo_6_mnycu.zbm missing");
 
         let base_bytes = fs::read(&base_path).expect("read base bm");
         let delta_bytes = fs::read(&delta_path).expect("read delta zbm");
@@ -552,10 +550,8 @@ mod tests {
 
     #[test]
     fn decodes_desk_delta_without_corruption() {
-        let base_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_0_ddtws.bm");
-        let delta_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../artifacts/manny_assets/mo_0_ddtws.zbm");
+        let base_path = fixture_path("mo_0_ddtws.bm").expect("fixture mo_0_ddtws.bm missing");
+        let delta_path = fixture_path("mo_0_ddtws.zbm").expect("fixture mo_0_ddtws.zbm missing");
 
         let base_bytes = fs::read(&base_path).expect("read base bm");
         let delta_bytes = fs::read(&delta_path).expect("read delta zbm");
@@ -610,5 +606,13 @@ mod tests {
             acc = acc.wrapping_mul(0x100000001b3);
         }
         acc
+    }
+
+    /// Resolves test fixtures from the extracted retail data.
+    fn fixture_path(name: &str) -> Option<PathBuf> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../extracted/DATA001")
+            .join(name);
+        path.exists().then_some(path)
     }
 }

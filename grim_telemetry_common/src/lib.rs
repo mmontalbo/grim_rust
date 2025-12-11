@@ -1288,7 +1288,11 @@ mod tests {
             .expect("value");
         assert_eq!(value.get("kind").and_then(|v| v.as_str()), Some("number"));
         assert_eq!(
-            fields.get("origin").and_then(|v| v.as_str()),
+            fields
+                .get("caller")
+                .and_then(|v| v.as_object())
+                .and_then(|caller| caller.get("origin"))
+                .and_then(|v| v.as_str()),
             Some("0x0000cafe")
         );
         assert_eq!(
