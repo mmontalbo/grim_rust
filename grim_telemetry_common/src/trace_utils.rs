@@ -86,6 +86,39 @@ pub fn caller_origin_details(
     None
 }
 
+/// Returns `true` when a frame belongs to common runtime helpers that should not be
+/// considered the caller (libc/dl/loader/vdso).
+pub fn is_runtime_frame(module_path: Option<&str>) -> bool {
+    match module_path {
+        Some(path) => {
+            let normalized = path.to_ascii_lowercase();
+            normalized.contains("libc.so")
+                || normalized.contains("libdl.so")
+                || normalized.contains("ld-linux")
+                || normalized.contains("linux-vdso")
+        }
+        None => false,
+    }
+}
+
+/// Resolves module/symbol info for a pointer into `OriginFields`.
+pub fn origin_fields_for_ptr(ptr: *const c_void) -> OriginFields {
+    if ptr.is_null() {
+        return OriginFields::default();
+    }
+    let details = describe_closure_target(ptr);
+    origin_fields_from_details(&details)
+}
+
+/// Captures the immediate non-filtered caller as `OriginFields`.
+pub fn caller_origin_fields(
+    skip_frame: impl Fn(Option<&str>, Option<&str>) -> bool,
+) -> OriginFields {
+    caller_origin_details(skip_frame)
+        .map(|details| origin_fields_from_details(&details))
+        .unwrap_or_default()
+}
+
 /// Builds `OriginFields` from resolved closure details.
 pub fn origin_fields_from_details(details: &ClosureDetails) -> OriginFields {
     let mut fields = OriginFields::default();

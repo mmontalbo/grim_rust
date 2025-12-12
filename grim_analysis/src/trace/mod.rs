@@ -17,7 +17,7 @@ use crate::{
     symbol_map::lookup_symbol_from_map,
 };
 use grim_telemetry_common::trace_utils::{
-    caller_origin_details, describe_closure_target, format_number_for_log,
+    caller_origin_details, describe_closure_target, format_number_for_log, is_runtime_frame,
     origin_fields_from_details, semantic_set_table_entry, truncate_for_log,
     upvalue_preview_from_meta, value_fields_from_meta, ValueMeta,
 };
@@ -411,15 +411,11 @@ fn origin_fields_with_map(
 
 /// Filters out frames from the shim or libc so we attribute the caller to retail code.
 fn should_skip_caller_frame(module_path: Option<&str>, _symbol: Option<&str>) -> bool {
+    if is_runtime_frame(module_path) {
+        return true;
+    }
     match module_path {
-        Some(path) => {
-            let normalized = path.to_ascii_lowercase();
-            normalized.contains("libgrim_analysis")
-                || normalized.contains("libc.so")
-                || normalized.contains("libdl.so")
-                || normalized.contains("ld-linux")
-                || normalized.contains("linux-vdso")
-        }
+        Some(path) => path.to_ascii_lowercase().contains("libgrim_analysis"),
         None => false,
     }
 }

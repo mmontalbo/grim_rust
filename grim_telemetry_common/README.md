@@ -13,3 +13,8 @@ Tools such as `grctl parity logs` and `trace_tui` default to the semantic
 stream; use their `--raw` / `--stream raw` switches to opt in to the raw view.
 For the wider Lua API goals and telemetry background, see
 `docs/lua_native_api.md`.
+
+Origin and handle helpers in `src/trace_utils.rs` are shared by the engine host
+and retail shim; use `is_runtime_frame` as the baseline skip list and
+`caller_origin_fields`/`origin_fields_for_ptr` to avoid diverging caller
+attribution across the two telemetry streams.

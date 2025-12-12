@@ -25,6 +25,11 @@ Guidance for contributors working on retail/engine parity. The goal is to **recr
 - Fix: remove the early control stub bindings, bind `_TRIGMODE` directly after legacy IO/errorfb, and store `system` with `ref=0` before populating `controls` via `lua_getref`. After this, the semantic streams matched through controls setup.
 - Result: the next earliest divergence surfaced deeper (_actors.lua expecting Actor methods), showing the workflow: clear the earliest diff, rerun the short window, let the next real gap emerge.
 
+## Telemetry surfaces
+- Engine instrumentation lives in `grim_engine/src/lua_host/telemetry.rs`; prefer its shared helpers (`caller_origin_fields`, `origin_fields_for_ptr`) over ad-hoc origin handling so semantic/raw streams stay comparable to retail.
+- Retail shim instrumentation lives in `grim_analysis/src/trace`; it uses the same helpers and symbol map fallback for unresolved symbols.
+- Shared telemetry utilities live in `grim_telemetry_common/src/trace_utils.rs`; use `is_runtime_frame` as the baseline skip list before adding crate-specific skips to keep caller attribution consistent.
+
 ## When adding fixes
 - Keep changes tightly scoped to the observed divergence; avoid opportunistic refactors in the same PR so parity work stays reviewable.
 - Keep each PR scoped to a single resolved divergence. If the rerun reveals a new earliest mismatch, pause and document it for the next fix instead of folding it into the current work.

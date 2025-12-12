@@ -7,9 +7,9 @@ use std::{
     },
 };
 
+pub(crate) use grim_telemetry_common::trace_utils::origin_fields_for_ptr;
 use grim_telemetry_common::trace_utils::{
-    caller_origin_details, describe_closure_target, origin_fields_from_details,
-    semantic_set_table_entry,
+    caller_origin_fields as trace_caller_origin_fields, is_runtime_frame, semantic_set_table_entry,
 };
 use grim_telemetry_common::{
     EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
@@ -398,30 +398,13 @@ fn stable_fabricated_handle(label: &str) -> String {
     format!("0x{next:08x}")
 }
 
-pub(crate) fn origin_fields_for_ptr(ptr: *const c_void) -> OriginFields {
-    if ptr.is_null() {
-        return OriginFields::default();
-    }
-    let details = describe_closure_target(ptr);
-    origin_fields_from_details(&details)
-}
-
 fn caller_origin_fields() -> OriginFields {
-    caller_origin_details(should_skip_caller_frame)
-        .map(|details| origin_fields_from_details(&details))
-        .unwrap_or_default()
+    trace_caller_origin_fields(should_skip_caller_frame)
 }
 
 fn should_skip_caller_frame(module_path: Option<&str>, symbol: Option<&str>) -> bool {
-    if let Some(path) = module_path {
-        let normalized = path.to_ascii_lowercase();
-        if normalized.contains("libc.so")
-            || normalized.contains("libdl.so")
-            || normalized.contains("ld-linux")
-            || normalized.contains("linux-vdso")
-        {
-            return true;
-        }
+    if is_runtime_frame(module_path) {
+        return true;
     }
 
     if let Some(symbol) = symbol {
