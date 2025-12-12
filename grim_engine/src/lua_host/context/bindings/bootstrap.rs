@@ -31,6 +31,22 @@ enum GlobalConst {
     Int(i32),
 }
 
+#[derive(Copy, Clone)]
+enum PreSystemPhase {
+    ConstantsAndLegacy,
+    SystemTableAndControls,
+    RuntimeBindings,
+    Stubs,
+}
+
+// Keep bootstrap ordering explicit so parity diffs point at the first divergent phase.
+const PRE_SYSTEM_PHASES: [PreSystemPhase; 4] = [
+    PreSystemPhase::ConstantsAndLegacy,
+    PreSystemPhase::SystemTableAndControls,
+    PreSystemPhase::RuntimeBindings,
+    PreSystemPhase::Stubs,
+];
+
 const ACTOR_TAG: i32 = 0x52544341; // 'ACTR'
 
 fn bind_const_globals<'lua>(
@@ -79,19 +95,53 @@ pub(crate) fn install_globals_pre_system(
 ) -> Result<()> {
     let globals = lua.globals();
 
+    for phase in PRE_SYSTEM_PHASES {
+        run_pre_system_phase(phase, lua, &globals, data_root, &context)?;
+    }
+
+    Ok(())
+}
+
+fn run_pre_system_phase<'lua>(
+    phase: PreSystemPhase,
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    data_root: &Path,
+    context: &Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    match phase {
+        PreSystemPhase::ConstantsAndLegacy => {
+            install_constants_and_legacy(lua, globals, context)?;
+        }
+        PreSystemPhase::SystemTableAndControls => {
+            install_system_table(lua, globals)?;
+        }
+        PreSystemPhase::RuntimeBindings => {
+            install_runtime_bindings(lua, globals, data_root, context)?;
+        }
+        PreSystemPhase::Stubs => install_stubbed_globals(lua, globals, context)?,
+    }
+    Ok(())
+}
+
+fn install_constants_and_legacy<'lua>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    context: &Rc<RefCell<EngineContext>>,
+) -> Result<()> {
     bind_const_globals(
         lua,
-        &globals,
+        globals,
         &[("_VERSION", GlobalConst::Str("Lua 3.1 (alpha)"))],
     )?;
 
-    install_legacy_io(lua, &globals)?;
+    install_legacy_io(lua, globals)?;
     let errorfb: Function = globals
         .get("error")
         .context("error handler missing from Lua state")?;
     log_push_cclosure("lua_pushCclosure", errorfb.to_pointer(), 0, Some("errorfb"));
-    bind_const_globals(lua, &globals, &[("_TRIGMODE", GlobalConst::Str("deg"))])?;
-    install_legacy_compat(lua, &globals, context.clone())?;
+    bind_const_globals(lua, globals, &[("_TRIGMODE", GlobalConst::Str("deg"))])?;
+    install_legacy_compat(lua, globals, context.clone())?;
     if let (Ok(settagmethod), Some(pow_fn)) = (
         globals.get::<_, Function>("settagmethod"),
         globals
@@ -107,17 +157,31 @@ pub(crate) fn install_globals_pre_system(
         log_push_number("0");
         let _ = settagmethod.call::<_, Value>((-1, "pow", pow_fn));
     }
-    install_legacy_math(lua, &globals)?;
-    install_pi_constant(lua, &globals)?;
+    install_legacy_math(lua, globals)?;
+    install_pi_constant(lua, globals)?;
     lua.gc_collect()?;
     log_event(LuaEvent::CollectGarbage {});
-    install_system_table(lua, &globals)?;
+    Ok(())
+}
 
-    install_dofile(lua, &globals, data_root, context.clone())?;
-    install_basic_functions_pre_system(lua, &globals, context.clone())?;
-    install_actor_stubs(lua, &globals, context.clone())?;
-    install_control_stubs(lua, &globals, context.clone())?;
+fn install_runtime_bindings<'lua>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    data_root: &Path,
+    context: &Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    install_dofile(lua, globals, data_root, context.clone())?;
+    install_basic_functions_pre_system(lua, globals, context.clone())?;
+    Ok(())
+}
 
+fn install_stubbed_globals<'lua>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    context: &Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    install_actor_stubs(lua, globals, context.clone())?;
+    install_control_stubs(lua, globals, context.clone())?;
     Ok(())
 }
 
@@ -932,6 +996,70 @@ fn register_nil_stub<'lua>(
     set_global(lua, globals, name, func)
 }
 
+#[derive(Copy, Clone)]
+enum ActorStub {
+    Nil(&'static str),
+    Bool(&'static str),
+    Int(&'static str),
+    Float(&'static str),
+    Vec3(&'static str),
+}
+
+// Keep stub order explicit so parity diffs point at the first divergence.
+const ACTOR_STUBS: &[ActorStub] = &[
+    ActorStub::Nil("SetActorColormap"),
+    ActorStub::Nil("SetActorTalkColor"),
+    ActorStub::Nil("SetActorWalkChore"),
+    ActorStub::Nil("SetActorTurnChores"),
+    ActorStub::Nil("SetActorRestChore"),
+    ActorStub::Nil("SetActorMumblechore"),
+    ActorStub::Nil("SetActorTalkChore"),
+    ActorStub::Nil("SetActorTurnRate"),
+    ActorStub::Nil("SetActorWalkRate"),
+    ActorStub::Nil("SetActorHead"),
+    ActorStub::Nil("SetActorLookRate"),
+    ActorStub::Nil("SetActorVisibility"),
+    ActorStub::Nil("SetActorFrustrumCull"),
+    ActorStub::Nil("SetActorFollowBoxes"),
+    ActorStub::Nil("SetActorScale"),
+    ActorStub::Nil("SetActorConstrain"),
+    ActorStub::Nil("SetActorCollisionMode"),
+    ActorStub::Nil("SetActorCollisionScale"),
+    ActorStub::Nil("SetActorTimeScale"),
+    ActorStub::Nil("SetActorChoreLooping"),
+    ActorStub::Nil("SetSelectedActor"),
+    ActorStub::Nil("PutActorAt"),
+    ActorStub::Nil("PutActorAtInterest"),
+    ActorStub::Nil("PutActorInSet"),
+    ActorStub::Nil("PlayActorChore"),
+    ActorStub::Nil("PlayActorChoreLooping"),
+    ActorStub::Nil("StopActorChore"),
+    ActorStub::Nil("CompleteActorChore"),
+    ActorStub::Nil("PushActorCostume"),
+    ActorStub::Nil("PopActorCostume"),
+    ActorStub::Nil("PrintActorCostumes"),
+    ActorStub::Nil("ActorLookAt"),
+    ActorStub::Nil("ShutUpActor"),
+    ActorStub::Bool("IsActorMoving"),
+    ActorStub::Bool("IsActorResting"),
+    ActorStub::Bool("IsActorTurning"),
+    ActorStub::Bool("IsActorChoring"),
+    ActorStub::Bool("IsActorInSector"),
+    ActorStub::Bool("TurnActorTo"),
+    ActorStub::Bool("WalkActorTo"),
+    ActorStub::Bool("WalkActorForward"),
+    ActorStub::Vec3("GetActorPos"),
+    ActorStub::Vec3("GetActorRot"),
+    ActorStub::Vec3("GetActorNodeLocation"),
+    ActorStub::Int("GetActorSector"),
+    ActorStub::Float("GetActorYawToPoint"),
+    ActorStub::Nil("GetActorCostume"),
+    ActorStub::Int("GetActorCostumeDepth"),
+    ActorStub::Int("GetActorLookRate"),
+    ActorStub::Int("GetActorWalkRate"),
+    ActorStub::Float("GetAngleBetweenActors"),
+];
+
 fn install_actor_stubs(
     lua: &Lua,
     globals: &Table,
@@ -965,65 +1093,17 @@ fn install_actor_stubs(
         })?;
     set_global(lua, globals, "SetActorCostume", set_actor_costume)?;
 
-    register_nil_stub(lua, globals, &context, "SetActorColormap")?;
-    register_nil_stub(lua, globals, &context, "SetActorTalkColor")?;
-    register_nil_stub(lua, globals, &context, "SetActorWalkChore")?;
-    register_nil_stub(lua, globals, &context, "SetActorTurnChores")?;
-    register_nil_stub(lua, globals, &context, "SetActorRestChore")?;
-    register_nil_stub(lua, globals, &context, "SetActorMumblechore")?;
-    register_nil_stub(lua, globals, &context, "SetActorTalkChore")?;
-    register_nil_stub(lua, globals, &context, "SetActorTurnRate")?;
-    register_nil_stub(lua, globals, &context, "SetActorWalkRate")?;
-    register_nil_stub(lua, globals, &context, "SetActorHead")?;
-    register_nil_stub(lua, globals, &context, "SetActorLookRate")?;
-    register_nil_stub(lua, globals, &context, "SetActorVisibility")?;
-    register_nil_stub(lua, globals, &context, "SetActorFrustrumCull")?;
-    register_nil_stub(lua, globals, &context, "SetActorFollowBoxes")?;
-    register_nil_stub(lua, globals, &context, "SetActorScale")?;
-    register_nil_stub(lua, globals, &context, "SetActorConstrain")?;
-    register_nil_stub(lua, globals, &context, "SetActorCollisionMode")?;
-    register_nil_stub(lua, globals, &context, "SetActorCollisionScale")?;
-    register_nil_stub(lua, globals, &context, "SetActorTimeScale")?;
-    register_nil_stub(lua, globals, &context, "SetActorChoreLooping")?;
-    register_nil_stub(lua, globals, &context, "SetSelectedActor")?;
-    register_nil_stub(lua, globals, &context, "PutActorAt")?;
-    register_nil_stub(lua, globals, &context, "PutActorAtInterest")?;
-    register_nil_stub(lua, globals, &context, "PutActorInSet")?;
-    register_nil_stub(lua, globals, &context, "PlayActorChore")?;
-    register_nil_stub(lua, globals, &context, "PlayActorChoreLooping")?;
-    register_nil_stub(lua, globals, &context, "StopActorChore")?;
-    register_nil_stub(lua, globals, &context, "CompleteActorChore")?;
-    register_nil_stub(lua, globals, &context, "PushActorCostume")?;
-    register_nil_stub(lua, globals, &context, "PopActorCostume")?;
-    register_nil_stub(lua, globals, &context, "PrintActorCostumes")?;
-    register_nil_stub(lua, globals, &context, "ActorLookAt")?;
-    register_nil_stub(lua, globals, &context, "ShutUpActor")?;
-
-    register_value_stub(lua, globals, &context, "IsActorMoving", false)?;
-    register_value_stub(lua, globals, &context, "IsActorResting", false)?;
-    register_value_stub(lua, globals, &context, "IsActorTurning", false)?;
-    register_value_stub(lua, globals, &context, "IsActorChoring", false)?;
-    register_value_stub(lua, globals, &context, "IsActorInSector", false)?;
-    register_value_stub(lua, globals, &context, "TurnActorTo", false)?;
-    register_value_stub(lua, globals, &context, "WalkActorTo", false)?;
-    register_value_stub(lua, globals, &context, "WalkActorForward", false)?;
-
-    register_value_stub(lua, globals, &context, "GetActorPos", (0.0, 0.0, 0.0))?;
-    register_value_stub(lua, globals, &context, "GetActorRot", (0.0, 0.0, 0.0))?;
-    register_value_stub(
-        lua,
-        globals,
-        &context,
-        "GetActorNodeLocation",
-        (0.0, 0.0, 0.0),
-    )?;
-    register_value_stub(lua, globals, &context, "GetActorSector", 0)?;
-    register_value_stub(lua, globals, &context, "GetActorYawToPoint", 0.0)?;
-    register_nil_stub(lua, globals, &context, "GetActorCostume")?;
-    register_value_stub(lua, globals, &context, "GetActorCostumeDepth", 0)?;
-    register_value_stub(lua, globals, &context, "GetActorLookRate", 0)?;
-    register_value_stub(lua, globals, &context, "GetActorWalkRate", 0)?;
-    register_value_stub(lua, globals, &context, "GetAngleBetweenActors", 0.0)?;
+    for stub in ACTOR_STUBS {
+        match stub {
+            ActorStub::Nil(name) => register_nil_stub(lua, globals, &context, name)?,
+            ActorStub::Bool(name) => register_value_stub(lua, globals, &context, name, false)?,
+            ActorStub::Int(name) => register_value_stub(lua, globals, &context, name, 0)?,
+            ActorStub::Float(name) => register_value_stub(lua, globals, &context, name, 0.0)?,
+            ActorStub::Vec3(name) => {
+                register_value_stub(lua, globals, &context, name, (0.0, 0.0, 0.0))?
+            }
+        }
+    }
 
     Ok(())
 }
