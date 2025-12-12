@@ -12,6 +12,7 @@ Guidance for contributors working on retail/engine parity. The goal is to **recr
 - Work on the **first** divergence you see. Ignore later “end-of-script” errors until the earlier mismatch is resolved; they often disappear once the first gap is fixed.
 - Confirm whether the divergence is semantic (wrong/missing binding, ref order, table shape) or mechanical (stack push order, GC timing). Fix semantics first.
 - Re-run the same short window after each change. Only extend the timeout when the early window is clean and you need to chase later behaviour.
+- Stop once the earliest divergence is resolved. Do not keep coding through the next failure in the same PR; re-run to surface the new earliest diff, then open a fresh change for that.
 
 ## Do / Don’t
 - Do implement the missing behaviour (e.g. register the real binding, call the real fallback, create/populate tables in the observed order).
@@ -26,5 +27,6 @@ Guidance for contributors working on retail/engine parity. The goal is to **recr
 
 ## When adding fixes
 - Keep changes tightly scoped to the observed divergence; avoid opportunistic refactors in the same PR so parity work stays reviewable.
+- Keep each PR scoped to a single resolved divergence. If the rerun reveals a new earliest mismatch, pause and document it for the next fix instead of folding it into the current work.
 - Capture the before/after divergence (log snippet or note) in the PR description so others understand what was fixed.
 - If you need to stub functionality, do so in a way that still mirrors retail sequencing and surface shape. Leave TODOs that reference the retail behaviour to be implemented.

@@ -2,22 +2,36 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::lua_host::legacy_lua::normalize_legacy_lua;
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use mlua::{Function, Lua, Result as LuaResult, Value, Variadic};
 
+use super::dofile::execute_script;
 use super::util::{
     describe_callable_label, describe_value, set_global, value_to_string, value_to_u32,
 };
 use crate::lua_host::context::EngineContext;
+use crate::lua_host::telemetry::log_dofile;
 
 pub(crate) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
-    let system_path = data_root.join("_system.decompiled.lua");
-    let source = std::fs::read_to_string(&system_path)
-        .with_context(|| format!("reading {}", system_path.display()))?;
-    let normalized = normalize_legacy_lua(&source);
-    let chunk = lua.load(&normalized).set_name("_system.decompiled.lua");
-    chunk.exec().context("executing _system.decompiled.lua")?;
+    let compiled = data_root.join("_system.lua");
+    let decompiled = data_root.join("_system.decompiled.lua");
+    ensure!(
+        compiled.is_file() || decompiled.is_file(),
+        "missing _system.lua under {}",
+        data_root.display()
+    );
+
+    // Retail logs _system.lua via dofile; mirror that telemetry even though we execute directly.
+    log_dofile("_system.lua");
+
+    let path = if compiled.is_file() {
+        compiled
+    } else {
+        decompiled
+    };
+    let executed =
+        execute_script(lua, &path).with_context(|| format!("executing {}", path.display()))?;
+    ensure!(executed.is_some(), "failed to execute {}", path.display());
     Ok(())
 }
 
