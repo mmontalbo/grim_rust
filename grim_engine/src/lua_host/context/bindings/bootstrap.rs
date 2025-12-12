@@ -31,20 +31,36 @@ enum GlobalConst {
     Int(i32),
 }
 
-#[derive(Copy, Clone)]
-enum PreSystemPhase {
-    ConstantsAndLegacy,
-    SystemTableAndControls,
-    RuntimeBindings,
-    Stubs,
+type PreSystemStep = fn(
+    &Lua,
+    &Table<'_>,
+    &Path,
+    &Rc<RefCell<EngineContext>>,
+) -> Result<()>;
+
+struct BootstrapStep {
+    name: &'static str,
+    apply: PreSystemStep,
 }
 
-// Keep bootstrap ordering explicit so parity diffs point at the first divergent phase.
-const PRE_SYSTEM_PHASES: [PreSystemPhase; 4] = [
-    PreSystemPhase::ConstantsAndLegacy,
-    PreSystemPhase::SystemTableAndControls,
-    PreSystemPhase::RuntimeBindings,
-    PreSystemPhase::Stubs,
+// Keep bootstrap ordering explicit so parity diffs point at the first divergent step.
+const PRE_SYSTEM_STEPS: &[BootstrapStep] = &[
+    BootstrapStep {
+        name: "constants_and_legacy",
+        apply: constants_and_legacy_step,
+    },
+    BootstrapStep {
+        name: "system_table_and_controls",
+        apply: system_table_step,
+    },
+    BootstrapStep {
+        name: "runtime_bindings",
+        apply: runtime_bindings_step,
+    },
+    BootstrapStep {
+        name: "stubs",
+        apply: stubs_step,
+    },
 ];
 
 const ACTOR_TAG: i32 = 0x52544341; // 'ACTR'
@@ -95,33 +111,49 @@ pub(crate) fn install_globals_pre_system(
 ) -> Result<()> {
     let globals = lua.globals();
 
-    for phase in PRE_SYSTEM_PHASES {
-        run_pre_system_phase(phase, lua, &globals, data_root, &context)?;
+    for step in PRE_SYSTEM_STEPS {
+        (step.apply)(lua, &globals, data_root, &context)
+            .with_context(|| format!("pre-system step {} failed", step.name))?;
     }
 
     Ok(())
 }
 
-fn run_pre_system_phase<'lua>(
-    phase: PreSystemPhase,
-    lua: &'lua Lua,
-    globals: &Table<'lua>,
+fn constants_and_legacy_step(
+    lua: &Lua,
+    globals: &Table<'_>,
+    _data_root: &Path,
+    context: &Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    install_constants_and_legacy(lua, globals, context)
+}
+
+fn system_table_step(
+    lua: &Lua,
+    globals: &Table<'_>,
+    _data_root: &Path,
+    _context: &Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    install_system_table(lua, globals)?;
+    Ok(())
+}
+
+fn runtime_bindings_step(
+    lua: &Lua,
+    globals: &Table<'_>,
     data_root: &Path,
     context: &Rc<RefCell<EngineContext>>,
 ) -> Result<()> {
-    match phase {
-        PreSystemPhase::ConstantsAndLegacy => {
-            install_constants_and_legacy(lua, globals, context)?;
-        }
-        PreSystemPhase::SystemTableAndControls => {
-            install_system_table(lua, globals)?;
-        }
-        PreSystemPhase::RuntimeBindings => {
-            install_runtime_bindings(lua, globals, data_root, context)?;
-        }
-        PreSystemPhase::Stubs => install_stubbed_globals(lua, globals, context)?,
-    }
-    Ok(())
+    install_runtime_bindings(lua, globals, data_root, context)
+}
+
+fn stubs_step(
+    lua: &Lua,
+    globals: &Table<'_>,
+    _data_root: &Path,
+    context: &Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    install_stubbed_globals(lua, globals, context)
 }
 
 fn install_constants_and_legacy<'lua>(
@@ -204,6 +236,25 @@ pub(crate) fn install_globals(
     install_globals_pre_system(lua, data_root, context.clone())?;
     install_globals_post_system(lua, context)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_system_steps_are_ordered_for_parity() {
+        let names: Vec<&str> = PRE_SYSTEM_STEPS.iter().map(|step| step.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "constants_and_legacy",
+                "system_table_and_controls",
+                "runtime_bindings",
+                "stubs"
+            ]
+        );
+    }
 }
 
 fn install_basic_functions_pre_system(
