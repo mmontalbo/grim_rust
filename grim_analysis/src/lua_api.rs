@@ -612,495 +612,342 @@ pub(crate) fn call_real_lua_error(message: *const c_char) -> bool {
     }
 }
 
-fn lua_push_c_closure_symbol() -> Option<LuaPushCClosureFn> {
-    *LUA_PUSH_CCLOSURE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushCclosure\0",
-            label: "lua_pushCclosure",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushCClosureFn>(ptr))
-    })
+// Helper to define symbol resolvers without repeating the OnceLock/dlsym boilerplate.
+macro_rules! define_symbol_resolver {
+    ($fn_name:ident, $once:ident, $type:ty, [$($symbol:expr => $label:expr),+ $(,)?]) => {
+        fn $fn_name() -> Option<$type> {
+            *$once.get_or_init(|| unsafe {
+                resolve_symbol_with_variants(&[
+                    $(SymbolVariant {
+                        symbol: $symbol,
+                        label: $label,
+                    },)+
+                ])
+                .map(|ptr| std::mem::transmute::<*mut c_void, $type>(ptr))
+            })
+        }
+    };
 }
 
-fn lua_dostring_symbol() -> Option<LuaDoStringFn> {
-    *LUA_DOSTRING.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_dostring\0",
-            label: "lua_dostring",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaDoStringFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_push_c_closure_symbol,
+    LUA_PUSH_CCLOSURE,
+    LuaPushCClosureFn,
+    [b"lua_pushCclosure\0" => "lua_pushCclosure"]
+);
 
-fn lua_dofile_symbol() -> Option<LuaDoFileFn> {
-    *LUA_DOFILE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_dofile\0",
-            label: "lua_dofile",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaDoFileFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_dostring_symbol,
+    LUA_DOSTRING,
+    LuaDoStringFn,
+    [b"lua_dostring\0" => "lua_dostring"]
+);
 
-fn lua_dobuffer_symbol() -> Option<LuaDoBufferFn> {
-    *LUA_DOBUFFER.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_dobuffer\0",
-            label: "lua_dobuffer",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaDoBufferFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_dofile_symbol,
+    LUA_DOFILE,
+    LuaDoFileFn,
+    [b"lua_dofile\0" => "lua_dofile"]
+);
 
-fn lua_call_symbol() -> Option<LuaCallFn> {
-    *LUA_CALL.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_call\0",
-            label: "lua_call",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCallFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_dobuffer_symbol,
+    LUA_DOBUFFER,
+    LuaDoBufferFn,
+    [b"lua_dobuffer\0" => "lua_dobuffer"]
+);
 
-fn lua_callfunction_symbol() -> Option<LuaCallFunctionFn> {
-    *LUA_CALLFUNCTION.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_callfunction\0",
-            label: "lua_callfunction",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCallFunctionFn>(ptr))
-    })
-}
+define_symbol_resolver!(lua_call_symbol, LUA_CALL, LuaCallFn, [b"lua_call\0" => "lua_call"]);
 
-fn lua_open_symbol() -> Option<LuaOpenFn> {
-    *LUA_OPEN.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_open\0",
-            label: "lua_open",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaOpenFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_callfunction_symbol,
+    LUA_CALLFUNCTION,
+    LuaCallFunctionFn,
+    [b"lua_callfunction\0" => "lua_callfunction"]
+);
 
-fn lua_newstate_symbol() -> Option<LuaNewStateFn> {
-    *LUA_NEWSTATE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_newstate\0",
-            label: "lua_newstate",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewStateFn>(ptr))
-    })
-}
+define_symbol_resolver!(lua_open_symbol, LUA_OPEN, LuaOpenFn, [b"lua_open\0" => "lua_open"]);
 
-fn lua_newthread_symbol() -> Option<LuaNewThreadFn> {
-    *LUA_NEWTHREAD.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_newthread\0",
-            label: "lua_newthread",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewThreadFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_newstate_symbol,
+    LUA_NEWSTATE,
+    LuaNewStateFn,
+    [b"lua_newstate\0" => "lua_newstate"]
+);
 
-fn lua_openlib_symbol() -> Option<LuaOpenLibFn> {
-    *LUA_OPENLIB.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[
-            SymbolVariant {
-                symbol: b"lua_openlib\0",
-                label: "lua_openlib",
-            },
-            SymbolVariant {
-                symbol: b"luaL_openlib\0",
-                label: "luaL_openlib",
-            },
-            SymbolVariant {
-                symbol: b"luaI_openlib\0",
-                label: "luaI_openlib",
-            },
-        ])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaOpenLibFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_newthread_symbol,
+    LUA_NEWTHREAD,
+    LuaNewThreadFn,
+    [b"lua_newthread\0" => "lua_newthread"]
+);
 
-fn lua_getobjname_symbol() -> Option<LuaGetObjNameFn> {
-    *LUA_GETOBJNAME.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_getobjname\0",
-            label: "lua_getobjname",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetObjNameFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_openlib_symbol,
+    LUA_OPENLIB,
+    LuaOpenLibFn,
+    [
+        b"lua_openlib\0" => "lua_openlib",
+        b"luaL_openlib\0" => "luaL_openlib",
+        b"luaI_openlib\0" => "luaI_openlib",
+    ]
+);
 
-fn lua_setglobal_symbol() -> Option<LuaSetGlobalFn> {
-    *LUA_SETGLOBAL.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_setglobal\0",
-            label: "lua_setglobal",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetGlobalFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_getobjname_symbol,
+    LUA_GETOBJNAME,
+    LuaGetObjNameFn,
+    [b"lua_getobjname\0" => "lua_getobjname"]
+);
 
-fn lua_getglobal_symbol() -> Option<LuaGetGlobalFn> {
-    *LUA_GETGLOBAL.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_getglobal\0",
-            label: "lua_getglobal",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetGlobalFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_setglobal_symbol,
+    LUA_SETGLOBAL,
+    LuaSetGlobalFn,
+    [b"lua_setglobal\0" => "lua_setglobal"]
+);
 
-fn lua_getcfunction_symbol() -> Option<LuaGetCFunctionFn> {
-    *LUA_GETCFUNCTION.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_getcfunction\0",
-            label: "lua_getcfunction",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetCFunctionFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_getglobal_symbol,
+    LUA_GETGLOBAL,
+    LuaGetGlobalFn,
+    [b"lua_getglobal\0" => "lua_getglobal"]
+);
 
-fn lua_lua2c_symbol() -> Option<LuaLua2CFn> {
-    *LUA_LUA2C.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_lua2C\0",
-            label: "lua_lua2C",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaLua2CFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_getcfunction_symbol,
+    LUA_GETCFUNCTION,
+    LuaGetCFunctionFn,
+    [b"lua_getcfunction\0" => "lua_getcfunction"]
+);
 
-fn lua_isnumber_symbol() -> Option<LuaIsNumberFn> {
-    *LUA_ISNUMBER.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_isnumber\0",
-            label: "lua_isnumber",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsNumberFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_lua2c_symbol,
+    LUA_LUA2C,
+    LuaLua2CFn,
+    [b"lua_lua2C\0" => "lua_lua2C"]
+);
 
-fn lua_isstring_symbol() -> Option<LuaIsStringFn> {
-    *LUA_ISSTRING.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_isstring\0",
-            label: "lua_isstring",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsStringFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_isnumber_symbol,
+    LUA_ISNUMBER,
+    LuaIsNumberFn,
+    [b"lua_isnumber\0" => "lua_isnumber"]
+);
 
-fn lua_istable_symbol() -> Option<LuaIsTableFn> {
-    *LUA_ISTABLE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_istable\0",
-            label: "lua_istable",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsTableFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_isstring_symbol,
+    LUA_ISSTRING,
+    LuaIsStringFn,
+    [b"lua_isstring\0" => "lua_isstring"]
+);
 
-fn lua_isfunction_symbol() -> Option<LuaIsFunctionFn> {
-    *LUA_ISFUNCTION.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_isfunction\0",
-            label: "lua_isfunction",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsFunctionFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_istable_symbol,
+    LUA_ISTABLE,
+    LuaIsTableFn,
+    [b"lua_istable\0" => "lua_istable"]
+);
 
-fn lua_iscfunction_symbol() -> Option<LuaIsCFunctionFn> {
-    *LUA_ISCFUNCTION.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_iscfunction\0",
-            label: "lua_iscfunction",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsCFunctionFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_isfunction_symbol,
+    LUA_ISFUNCTION,
+    LuaIsFunctionFn,
+    [b"lua_isfunction\0" => "lua_isfunction"]
+);
 
-fn lua_isuserdata_symbol() -> Option<LuaIsUserdataFn> {
-    *LUA_ISUSERDATA.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_isuserdata\0",
-            label: "lua_isuserdata",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaIsUserdataFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_iscfunction_symbol,
+    LUA_ISCFUNCTION,
+    LuaIsCFunctionFn,
+    [b"lua_iscfunction\0" => "lua_iscfunction"]
+);
 
-fn lua_getnumber_symbol() -> Option<LuaGetNumberFn> {
-    *LUA_GETNUMBER.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_getnumber\0",
-            label: "lua_getnumber",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetNumberFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_isuserdata_symbol,
+    LUA_ISUSERDATA,
+    LuaIsUserdataFn,
+    [b"lua_isuserdata\0" => "lua_isuserdata"]
+);
 
-fn lua_getstring_symbol() -> Option<LuaGetStringFn> {
-    *LUA_GETSTRING.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_getstring\0",
-            label: "lua_getstring",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetStringFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_getnumber_symbol,
+    LUA_GETNUMBER,
+    LuaGetNumberFn,
+    [b"lua_getnumber\0" => "lua_getnumber"]
+);
 
-fn lua_tag_symbol() -> Option<LuaTagFn> {
-    *LUA_TAG.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_tag\0",
-            label: "lua_tag",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaTagFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_getstring_symbol,
+    LUA_GETSTRING,
+    LuaGetStringFn,
+    [b"lua_getstring\0" => "lua_getstring"]
+);
 
-fn lua_pushnumber_symbol() -> Option<LuaPushNumberFn> {
-    *LUA_PUSHNUMBER.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushnumber\0",
-            label: "lua_pushnumber",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushNumberFn>(ptr))
-    })
-}
+define_symbol_resolver!(lua_tag_symbol, LUA_TAG, LuaTagFn, [b"lua_tag\0" => "lua_tag"]);
 
-fn lua_pushstring_symbol() -> Option<LuaPushStringFn> {
-    *LUA_PUSHSTRING.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushstring\0",
-            label: "lua_pushstring",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushStringFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_pushnumber_symbol,
+    LUA_PUSHNUMBER,
+    LuaPushNumberFn,
+    [b"lua_pushnumber\0" => "lua_pushnumber"]
+);
 
-fn lua_pushlstring_symbol() -> Option<LuaPushLStringFn> {
-    *LUA_PUSHLSTRING.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushlstring\0",
-            label: "lua_pushlstring",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushLStringFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_pushstring_symbol,
+    LUA_PUSHSTRING,
+    LuaPushStringFn,
+    [b"lua_pushstring\0" => "lua_pushstring"]
+);
 
-fn lua_pushusertag_symbol() -> Option<LuaPushUsertagFn> {
-    *LUA_PUSHUSERTAG.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushusertag\0",
-            label: "lua_pushusertag",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushUsertagFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_pushlstring_symbol,
+    LUA_PUSHLSTRING,
+    LuaPushLStringFn,
+    [b"lua_pushlstring\0" => "lua_pushlstring"]
+);
 
-fn lua_pushobject_symbol() -> Option<LuaPushObjectFn> {
-    *LUA_PUSHOBJECT.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushobject\0",
-            label: "lua_pushobject",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushObjectFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_pushusertag_symbol,
+    LUA_PUSHUSERTAG,
+    LuaPushUsertagFn,
+    [b"lua_pushusertag\0" => "lua_pushusertag"]
+);
 
-fn lua_pushnil_symbol() -> Option<LuaPushNilFn> {
-    *LUA_PUSHNIL.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushnil\0",
-            label: "lua_pushnil",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushNilFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_pushobject_symbol,
+    LUA_PUSHOBJECT,
+    LuaPushObjectFn,
+    [b"lua_pushobject\0" => "lua_pushobject"]
+);
 
-fn lua_pushvalue_symbol() -> Option<LuaPushValueFn> {
-    *LUA_PUSHVALUE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_pushvalue\0",
-            label: "lua_pushvalue",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaPushValueFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_pushnil_symbol,
+    LUA_PUSHNIL,
+    LuaPushNilFn,
+    [b"lua_pushnil\0" => "lua_pushnil"]
+);
 
-fn lua_ref_symbol() -> Option<LuaRefFn> {
-    *LUA_REF.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_ref\0",
-            label: "lua_ref",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRefFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_pushvalue_symbol,
+    LUA_PUSHVALUE,
+    LuaPushValueFn,
+    [b"lua_pushvalue\0" => "lua_pushvalue"]
+);
 
-fn lua_getref_symbol() -> Option<LuaGetRefFn> {
-    *LUA_GETREF.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_getref\0",
-            label: "lua_getref",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetRefFn>(ptr))
-    })
-}
+define_symbol_resolver!(lua_ref_symbol, LUA_REF, LuaRefFn, [b"lua_ref\0" => "lua_ref"]);
 
-fn lua_unref_symbol() -> Option<LuaUnrefFn> {
-    *LUA_UNREF.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_unref\0",
-            label: "lua_unref",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaUnrefFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_getref_symbol,
+    LUA_GETREF,
+    LuaGetRefFn,
+    [b"lua_getref\0" => "lua_getref"]
+);
 
-fn lua_settagmethod_symbol() -> Option<LuaSetTagMethodFn> {
-    *LUA_SETTAGMETHOD.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_settagmethod\0",
-            label: "lua_settagmethod",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetTagMethodFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_unref_symbol,
+    LUA_UNREF,
+    LuaUnrefFn,
+    [b"lua_unref\0" => "lua_unref"]
+);
 
-fn lua_collectgarbage_symbol() -> Option<LuaCollectGarbageFn> {
-    *LUA_COLLECTGARBAGE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_collectgarbage\0",
-            label: "lua_collectgarbage",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCollectGarbageFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_settagmethod_symbol,
+    LUA_SETTAGMETHOD,
+    LuaSetTagMethodFn,
+    [b"lua_settagmethod\0" => "lua_settagmethod"]
+);
 
-fn lua_error_symbol() -> Option<LuaErrorFn> {
-    *LUA_ERROR.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_error\0",
-            label: "lua_error",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaErrorFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_collectgarbage_symbol,
+    LUA_COLLECTGARBAGE,
+    LuaCollectGarbageFn,
+    [b"lua_collectgarbage\0" => "lua_collectgarbage"]
+);
 
-fn lua_createtable_symbol() -> Option<LuaCreateTableFn> {
-    *LUA_CREATETABLE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_createtable\0",
-            label: "lua_createtable",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCreateTableFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_error_symbol,
+    LUA_ERROR,
+    LuaErrorFn,
+    [b"lua_error\0" => "lua_error"]
+);
 
-fn lua_settable_symbol() -> Option<LuaSetTableFn> {
-    *LUA_SETTABLE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_settable\0",
-            label: "lua_settable",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetTableFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_createtable_symbol,
+    LUA_CREATETABLE,
+    LuaCreateTableFn,
+    [b"lua_createtable\0" => "lua_createtable"]
+);
 
-fn lua_rawsettable_symbol() -> Option<LuaRawSetTableFn> {
-    *LUA_RAWSETTABLE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_rawsettable\0",
-            label: "lua_rawsettable",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawSetTableFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_settable_symbol,
+    LUA_SETTABLE,
+    LuaSetTableFn,
+    [b"lua_settable\0" => "lua_settable"]
+);
 
-fn lua_gettable_symbol() -> Option<LuaGetTableFn> {
-    *LUA_GETTABLE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_gettable\0",
-            label: "lua_gettable",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaGetTableFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_rawsettable_symbol,
+    LUA_RAWSETTABLE,
+    LuaRawSetTableFn,
+    [b"lua_rawsettable\0" => "lua_rawsettable"]
+);
 
-fn lua_rawgettable_symbol() -> Option<LuaRawGetTableFn> {
-    *LUA_RAWGETTABLE.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_rawgettable\0",
-            label: "lua_rawgettable",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawGetTableFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_gettable_symbol,
+    LUA_GETTABLE,
+    LuaGetTableFn,
+    [b"lua_gettable\0" => "lua_gettable"]
+);
 
-fn lua_rawgetglobal_symbol() -> Option<LuaRawGetGlobalFn> {
-    *LUA_RAWGETGLOBAL.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_rawgetglobal\0",
-            label: "lua_rawgetglobal",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawGetGlobalFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_rawgettable_symbol,
+    LUA_RAWGETTABLE,
+    LuaRawGetTableFn,
+    [b"lua_rawgettable\0" => "lua_rawgettable"]
+);
 
-fn lua_rawsetglobal_symbol() -> Option<LuaRawSetGlobalFn> {
-    *LUA_RAWSETGLOBAL.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_rawsetglobal\0",
-            label: "lua_rawsetglobal",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaRawSetGlobalFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_rawgetglobal_symbol,
+    LUA_RAWGETGLOBAL,
+    LuaRawGetGlobalFn,
+    [b"lua_rawgetglobal\0" => "lua_rawgetglobal"]
+);
 
-fn lua_setfallback_symbol() -> Option<LuaSetFallbackFn> {
-    *LUA_SETFALLBACK.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_setfallback\0",
-            label: "lua_setfallback",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetFallbackFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_rawsetglobal_symbol,
+    LUA_RAWSETGLOBAL,
+    LuaRawSetGlobalFn,
+    [b"lua_rawsetglobal\0" => "lua_rawsetglobal"]
+);
 
-fn lua_newtag_symbol() -> Option<LuaNewTagFn> {
-    *LUA_NEWTAG.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_newtag\0",
-            label: "lua_newtag",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaNewTagFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_setfallback_symbol,
+    LUA_SETFALLBACK,
+    LuaSetFallbackFn,
+    [b"lua_setfallback\0" => "lua_setfallback"]
+);
 
-fn lua_copytagmethods_symbol() -> Option<LuaCopyTagMethodsFn> {
-    *LUA_COPYTAGMETHODS.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_copytagmethods\0",
-            label: "lua_copytagmethods",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaCopyTagMethodsFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_newtag_symbol,
+    LUA_NEWTAG,
+    LuaNewTagFn,
+    [b"lua_newtag\0" => "lua_newtag"]
+);
 
-fn lua_settag_symbol() -> Option<LuaSetTagFn> {
-    *LUA_SETTAG.get_or_init(|| unsafe {
-        resolve_symbol_with_variants(&[SymbolVariant {
-            symbol: b"lua_settag\0",
-            label: "lua_settag",
-        }])
-        .map(|ptr| std::mem::transmute::<*mut c_void, LuaSetTagFn>(ptr))
-    })
-}
+define_symbol_resolver!(
+    lua_copytagmethods_symbol,
+    LUA_COPYTAGMETHODS,
+    LuaCopyTagMethodsFn,
+    [b"lua_copytagmethods\0" => "lua_copytagmethods"]
+);
+
+define_symbol_resolver!(
+    lua_settag_symbol,
+    LUA_SETTAG,
+    LuaSetTagFn,
+    [b"lua_settag\0" => "lua_settag"]
+);
 
 #[derive(Clone, Copy)]
 struct SymbolVariant {

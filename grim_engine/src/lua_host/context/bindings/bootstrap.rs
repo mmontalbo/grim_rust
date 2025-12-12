@@ -31,12 +31,7 @@ enum GlobalConst {
     Int(i32),
 }
 
-type PreSystemStep = fn(
-    &Lua,
-    &Table<'_>,
-    &Path,
-    &Rc<RefCell<EngineContext>>,
-) -> Result<()>;
+type PreSystemStep = fn(&Lua, &Table<'_>, &Path, &Rc<RefCell<EngineContext>>) -> Result<()>;
 
 struct BootstrapStep {
     name: &'static str,
