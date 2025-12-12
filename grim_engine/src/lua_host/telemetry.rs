@@ -7,17 +7,19 @@ use std::{
     },
 };
 
-use grim_telemetry_common::{
-    EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
-    UpvaluePreview, ValueFields, ValueType,
-};
 use grim_telemetry_common::trace_utils::{
     caller_origin_details, describe_closure_target, origin_fields_from_details,
     semantic_set_table_entry,
 };
+use grim_telemetry_common::{
+    EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
+    UpvaluePreview, ValueFields, ValueType,
+};
 
 // Re-export common helpers so callers keep using the telemetry module surface.
-pub(crate) use grim_telemetry_common::trace_utils::{ptr_to_handle, register_table_label, table_label};
+pub(crate) use grim_telemetry_common::trace_utils::{
+    ptr_to_handle, register_table_label, table_label,
+};
 
 const ENGINE_ID: &str = "grim_engine";
 const VM_ID: &str = "lua";

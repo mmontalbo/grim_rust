@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 
 use grim_telemetry_common::{
-    trace_utils::{format_number_for_log, truncate_for_log, value_fields_from_number, value_fields_from_string},
+    trace_utils::{
+        format_number_for_log, truncate_for_log, value_fields_from_number, value_fields_from_string,
+    },
     OriginFields, UpvaluePreview, ValueFields, ValueType,
 };
 use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};

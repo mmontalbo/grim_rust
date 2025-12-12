@@ -17,8 +17,9 @@ use crate::{
     symbol_map::lookup_symbol_from_map,
 };
 use grim_telemetry_common::trace_utils::{
-    caller_origin_details, describe_closure_target, format_number_for_log, origin_fields_from_details,
-    semantic_set_table_entry, truncate_for_log, value_fields_from_number, value_fields_from_string,
+    caller_origin_details, describe_closure_target, format_number_for_log,
+    origin_fields_from_details, semantic_set_table_entry, truncate_for_log,
+    value_fields_from_number, value_fields_from_string,
 };
 use libc::c_int;
 use std::{
@@ -436,12 +437,16 @@ fn caller_origin_fields() -> OriginFields {
 }
 
 /// Builds origin fields from a frame address and its resolved module/symbol details.
-fn origin_fields_with_map(details: &grim_telemetry_common::trace_utils::ClosureDetails) -> OriginFields {
+fn origin_fields_with_map(
+    details: &grim_telemetry_common::trace_utils::ClosureDetails,
+) -> OriginFields {
     let mut fields = origin_fields_from_details(details);
     if fields.symbol.is_none() {
-        if let Some(map_symbol) =
-            lookup_symbol_from_map(details.address, details.module.as_deref(), details.module_base)
-        {
+        if let Some(map_symbol) = lookup_symbol_from_map(
+            details.address,
+            details.module.as_deref(),
+            details.module_base,
+        ) {
             fields.symbol = Some(render_symbol_with_offset(
                 &map_symbol.name,
                 map_symbol.distance,

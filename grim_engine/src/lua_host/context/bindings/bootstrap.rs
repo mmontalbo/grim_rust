@@ -1084,13 +1084,12 @@ fn install_actor_stubs(
     set_global(lua, globals, "LoadActor", load_actor)?;
 
     let set_actor_costume_ctx = context.clone();
-    let set_actor_costume =
-        lua.create_function(move |_, args: Variadic<Value>| {
-            set_actor_costume_ctx
-                .borrow_mut()
-                .log_event("SetActorCostume (stub)");
-            Ok(args.get(1).cloned().unwrap_or(Value::Nil))
-        })?;
+    let set_actor_costume = lua.create_function(move |_, args: Variadic<Value>| {
+        set_actor_costume_ctx
+            .borrow_mut()
+            .log_event("SetActorCostume (stub)");
+        Ok(args.get(1).cloned().unwrap_or(Value::Nil))
+    })?;
     set_global(lua, globals, "SetActorCostume", set_actor_costume)?;
 
     for stub in ACTOR_STUBS {
