@@ -259,6 +259,8 @@ fn install_index_hook(
     fallbacks: Rc<RefCell<LegacyFallbacks>>,
     verbose: bool,
 ) -> LuaResult<()> {
+    let table_meta = lua.create_table()?;
+    let table_meta_key = lua.create_registry_value(table_meta.clone())?;
     let globals_ptr = globals.to_pointer();
     register_table_label(globals_ptr, "global:_G");
     // Prevent the global reentrancy flag from triggering the index fallback when unset.
@@ -352,12 +354,30 @@ fn install_index_hook(
         result
     })?;
 
-    let metatable = match globals.get_metatable() {
-        Some(table) => table,
-        None => lua.create_table()?,
-    };
-    metatable.set("__index", index_fb)?;
-    globals.set_metatable(Some(metatable));
+    let newindex_fb =
+        lua.create_function(move |lua_ctx, (table, key, value): (Table, Value, Value)| {
+            let table_meta: Table = lua_ctx.registry_value(&table_meta_key)?;
+            if let Value::Table(t) = &value {
+                if t.get_metatable().is_none() {
+                    t.set_metatable(Some(table_meta.clone()));
+                }
+            }
+            table.raw_set(key, value)?;
+            Ok(())
+        })?;
+
+    table_meta.set("__index", index_fb)?;
+    table_meta.set("__newindex", newindex_fb)?;
+
+    globals.set_metatable(Some(table_meta.clone()));
+    for pair in globals.clone().pairs::<Value, Value>() {
+        let (_, value) = pair?;
+        if let Value::Table(t) = &value {
+            if t.get_metatable().is_none() {
+                t.set_metatable(Some(table_meta.clone()));
+            }
+        }
+    }
     Ok(())
 }
 

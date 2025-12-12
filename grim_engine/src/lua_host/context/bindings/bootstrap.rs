@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result};
 use mlua::{
-    Error as LuaError, Function, Lua, MultiValue, Result as LuaResult, Table, Value, Variadic,
+    Error as LuaError, Function, IntoLuaMulti, Lua, MultiValue, Result as LuaResult, Table, Value,
+    Variadic,
 };
 
 use crate::lua_host::telemetry::{
@@ -115,6 +116,7 @@ pub(crate) fn install_globals_pre_system(
     install_dofile(lua, &globals, data_root, context.clone())?;
     install_basic_functions_pre_system(lua, &globals, context.clone())?;
     install_actor_stubs(lua, &globals, context.clone())?;
+    install_control_stubs(lua, &globals, context.clone())?;
 
     Ok(())
 }
@@ -896,6 +898,40 @@ fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {
     Ok(())
 }
 
+fn register_value_stub<'lua, R>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    context: &Rc<RefCell<EngineContext>>,
+    name: &str,
+    ret: R,
+) -> LuaResult<()>
+where
+    R: Copy + for<'a> IntoLuaMulti<'a> + 'static,
+{
+    let ctx = context.clone();
+    let label = name.to_string();
+    let func = lua.create_function(move |_, _: Variadic<Value>| {
+        ctx.borrow_mut().log_event(format!("{label} (stub)"));
+        Ok(ret)
+    })?;
+    set_global(lua, globals, name, func)
+}
+
+fn register_nil_stub<'lua>(
+    lua: &'lua Lua,
+    globals: &Table<'lua>,
+    context: &Rc<RefCell<EngineContext>>,
+    name: &str,
+) -> LuaResult<()> {
+    let ctx = context.clone();
+    let label = name.to_string();
+    let func = lua.create_function(move |_, _: Variadic<Value>| {
+        ctx.borrow_mut().log_event(format!("{label} (stub)"));
+        Ok(Value::Nil)
+    })?;
+    set_global(lua, globals, name, func)
+}
+
 fn install_actor_stubs(
     lua: &Lua,
     globals: &Table,
@@ -917,7 +953,93 @@ fn install_actor_stubs(
         log_push_usertag(fabricated.raw, ACTOR_TAG, handle.clone());
         Ok(userdata)
     })?;
-    set_global(lua, globals, "LoadActor", load_actor)
+    set_global(lua, globals, "LoadActor", load_actor)?;
+
+    let set_actor_costume_ctx = context.clone();
+    let set_actor_costume =
+        lua.create_function(move |_, args: Variadic<Value>| {
+            set_actor_costume_ctx
+                .borrow_mut()
+                .log_event("SetActorCostume (stub)");
+            Ok(args.get(1).cloned().unwrap_or(Value::Nil))
+        })?;
+    set_global(lua, globals, "SetActorCostume", set_actor_costume)?;
+
+    register_nil_stub(lua, globals, &context, "SetActorColormap")?;
+    register_nil_stub(lua, globals, &context, "SetActorTalkColor")?;
+    register_nil_stub(lua, globals, &context, "SetActorWalkChore")?;
+    register_nil_stub(lua, globals, &context, "SetActorTurnChores")?;
+    register_nil_stub(lua, globals, &context, "SetActorRestChore")?;
+    register_nil_stub(lua, globals, &context, "SetActorMumblechore")?;
+    register_nil_stub(lua, globals, &context, "SetActorTalkChore")?;
+    register_nil_stub(lua, globals, &context, "SetActorTurnRate")?;
+    register_nil_stub(lua, globals, &context, "SetActorWalkRate")?;
+    register_nil_stub(lua, globals, &context, "SetActorHead")?;
+    register_nil_stub(lua, globals, &context, "SetActorLookRate")?;
+    register_nil_stub(lua, globals, &context, "SetActorVisibility")?;
+    register_nil_stub(lua, globals, &context, "SetActorFrustrumCull")?;
+    register_nil_stub(lua, globals, &context, "SetActorFollowBoxes")?;
+    register_nil_stub(lua, globals, &context, "SetActorScale")?;
+    register_nil_stub(lua, globals, &context, "SetActorConstrain")?;
+    register_nil_stub(lua, globals, &context, "SetActorCollisionMode")?;
+    register_nil_stub(lua, globals, &context, "SetActorCollisionScale")?;
+    register_nil_stub(lua, globals, &context, "SetActorTimeScale")?;
+    register_nil_stub(lua, globals, &context, "SetActorChoreLooping")?;
+    register_nil_stub(lua, globals, &context, "SetSelectedActor")?;
+    register_nil_stub(lua, globals, &context, "PutActorAt")?;
+    register_nil_stub(lua, globals, &context, "PutActorAtInterest")?;
+    register_nil_stub(lua, globals, &context, "PutActorInSet")?;
+    register_nil_stub(lua, globals, &context, "PlayActorChore")?;
+    register_nil_stub(lua, globals, &context, "PlayActorChoreLooping")?;
+    register_nil_stub(lua, globals, &context, "StopActorChore")?;
+    register_nil_stub(lua, globals, &context, "CompleteActorChore")?;
+    register_nil_stub(lua, globals, &context, "PushActorCostume")?;
+    register_nil_stub(lua, globals, &context, "PopActorCostume")?;
+    register_nil_stub(lua, globals, &context, "PrintActorCostumes")?;
+    register_nil_stub(lua, globals, &context, "ActorLookAt")?;
+    register_nil_stub(lua, globals, &context, "ShutUpActor")?;
+
+    register_value_stub(lua, globals, &context, "IsActorMoving", false)?;
+    register_value_stub(lua, globals, &context, "IsActorResting", false)?;
+    register_value_stub(lua, globals, &context, "IsActorTurning", false)?;
+    register_value_stub(lua, globals, &context, "IsActorChoring", false)?;
+    register_value_stub(lua, globals, &context, "IsActorInSector", false)?;
+    register_value_stub(lua, globals, &context, "TurnActorTo", false)?;
+    register_value_stub(lua, globals, &context, "WalkActorTo", false)?;
+    register_value_stub(lua, globals, &context, "WalkActorForward", false)?;
+
+    register_value_stub(lua, globals, &context, "GetActorPos", (0.0, 0.0, 0.0))?;
+    register_value_stub(lua, globals, &context, "GetActorRot", (0.0, 0.0, 0.0))?;
+    register_value_stub(
+        lua,
+        globals,
+        &context,
+        "GetActorNodeLocation",
+        (0.0, 0.0, 0.0),
+    )?;
+    register_value_stub(lua, globals, &context, "GetActorSector", 0)?;
+    register_value_stub(lua, globals, &context, "GetActorYawToPoint", 0.0)?;
+    register_nil_stub(lua, globals, &context, "GetActorCostume")?;
+    register_value_stub(lua, globals, &context, "GetActorCostumeDepth", 0)?;
+    register_value_stub(lua, globals, &context, "GetActorLookRate", 0)?;
+    register_value_stub(lua, globals, &context, "GetActorWalkRate", 0)?;
+    register_value_stub(lua, globals, &context, "GetAngleBetweenActors", 0.0)?;
+
+    Ok(())
+}
+
+fn install_control_stubs(
+    lua: &Lua,
+    globals: &Table,
+    context: Rc<RefCell<EngineContext>>,
+) -> LuaResult<()> {
+    register_nil_stub(lua, globals, &context, "EnableControl")?;
+    register_nil_stub(lua, globals, &context, "DisableControl")?;
+    register_value_stub(lua, globals, &context, "GetControlState", 0.0)?;
+    register_nil_stub(lua, globals, &context, "ResetMarioControls")?;
+    register_nil_stub(lua, globals, &context, "MarioStyleControl")?;
+    register_nil_stub(lua, globals, &context, "TombRaiderControl")?;
+    Ok(())
 }
 
 fn install_stubbed_tables(

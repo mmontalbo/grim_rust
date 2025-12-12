@@ -112,6 +112,38 @@ mod tests {
     }
 
     #[test]
+    fn index_fallback_applies_to_tables() {
+        let lua = setup_lua();
+        let globals = lua.globals();
+        let setfallback: Function = globals.get("setfallback").unwrap();
+        let handler = lua
+            .create_function(|_, (table, field): (Value, Value)| {
+                if let Value::Table(child) = table {
+                    if let Ok(Value::Table(parent)) = child.get::<_, Value>("parent") {
+                        return parent.get(field);
+                    }
+                }
+                Ok(Value::Nil)
+            })
+            .unwrap();
+        setfallback.call::<_, Value>(("index", handler)).unwrap();
+        let value: String = lua
+            .load(
+                r#"
+local Actor = { greet = function(self) return "hi" end }
+function Actor:create()
+    return { parent = self }
+end
+child = Actor:create()
+return child:greet()
+"#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(value, "hi");
+    }
+
+    #[test]
     fn gettable_fallback_available_via_tag_lookup() {
         let lua = setup_lua();
         let globals = lua.globals();
