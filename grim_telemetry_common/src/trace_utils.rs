@@ -109,6 +109,19 @@ pub fn is_runtime_frame(module_path: Option<&str>) -> bool {
     }
 }
 
+/// Baseline caller skip: filters out runtime frames, then defers to a crate-specific predicate.
+/// Use this in both engine and shim to avoid subtle divergence in caller attribution.
+pub fn should_skip_caller_frame(
+    module_path: Option<&str>,
+    symbol: Option<&str>,
+    extra_skip: impl Fn(Option<&str>, Option<&str>) -> bool,
+) -> bool {
+    if is_runtime_frame(module_path) {
+        return true;
+    }
+    extra_skip(module_path, symbol)
+}
+
 /// Resolves module/symbol info for a pointer into `OriginFields`.
 pub fn origin_fields_for_ptr(ptr: *const c_void) -> OriginFields {
     if ptr.is_null() {

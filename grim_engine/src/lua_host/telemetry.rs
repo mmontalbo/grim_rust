@@ -9,7 +9,8 @@ use std::{
 
 pub(crate) use grim_telemetry_common::trace_utils::origin_fields_for_ptr;
 use grim_telemetry_common::trace_utils::{
-    caller_origin_fields as trace_caller_origin_fields, is_runtime_frame, semantic_set_table_entry,
+    caller_origin_fields as trace_caller_origin_fields, handle_hex, semantic_set_table_entry,
+    should_skip_caller_frame as common_should_skip_caller_frame,
 };
 use grim_telemetry_common::{
     EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
@@ -18,7 +19,7 @@ use grim_telemetry_common::{
 
 // Re-export common helpers so callers keep using the telemetry module surface.
 pub(crate) use grim_telemetry_common::trace_utils::{
-    handle_hex, ptr_to_handle, register_table_label, table_label,
+    ptr_to_handle, register_table_label, table_label,
 };
 
 const ENGINE_ID: &str = "grim_engine";
@@ -403,16 +404,9 @@ fn caller_origin_fields() -> OriginFields {
 }
 
 fn should_skip_caller_frame(module_path: Option<&str>, symbol: Option<&str>) -> bool {
-    if is_runtime_frame(module_path) {
-        return true;
-    }
-
-    if let Some(symbol) = symbol {
-        let normalized = symbol.to_ascii_lowercase();
-        if normalized.contains("lua_host::telemetry") {
-            return true;
-        }
-    }
-
-    false
+    common_should_skip_caller_frame(module_path, symbol, |_, symbol| {
+        symbol
+            .map(|sym| sym.to_ascii_lowercase().contains("lua_host::telemetry"))
+            .unwrap_or(false)
+    })
 }

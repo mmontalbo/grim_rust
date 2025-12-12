@@ -2,15 +2,15 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use grim_telemetry_common::EventBuilder;
-use grim_telemetry_common::OriginFields;
+use grim_telemetry_common::trace_utils::handle_hex;
+use grim_telemetry_common::{EventBuilder, OriginFields};
 use mlua::{
     Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Value,
     Variadic,
 };
 
 use crate::lua_host::telemetry::{
-    handle_hex, log_event, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
+    log_event, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
     normalize_handle, origin_fields_for_ptr, ptr_to_handle, register_table_label, table_label,
 };
 
