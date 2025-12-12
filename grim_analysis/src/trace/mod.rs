@@ -19,7 +19,7 @@ use crate::{
 use grim_telemetry_common::trace_utils::{
     caller_origin_details, describe_closure_target, format_number_for_log,
     origin_fields_from_details, semantic_set_table_entry, truncate_for_log,
-    value_fields_from_number, value_fields_from_string,
+    upvalue_preview_from_meta, value_fields_from_meta, ValueMeta,
 };
 use libc::c_int;
 use std::{
@@ -280,104 +280,56 @@ fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
 
 /// Converts a value description into telemetry-ready `ValueFields`.
 fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
-    match value {
-        ValueDetails::Number(value) => ValueFields {
-            ..value_fields_from_number(*value)
-        },
-        ValueDetails::String(text) => ValueFields {
-            ..value_fields_from_string(text)
-        },
-        ValueDetails::Nil => ValueFields {
-            value_type: Some(ValueType::Nil),
-            ..ValueFields::default()
-        },
-        ValueDetails::Table { tag } => ValueFields {
-            value_type: Some(ValueType::Table),
-            tag: *tag,
-            ..ValueFields::default()
-        },
-        ValueDetails::Function { tag } => ValueFields {
-            value_type: Some(ValueType::Function),
-            tag: *tag,
-            ..ValueFields::default()
-        },
-        ValueDetails::CFunction { tag, func } => ValueFields {
-            value_type: Some(ValueType::Cfunction),
-            func: func.map(|addr| format!("0x{addr:08x}")),
-            tag: *tag,
-            ..ValueFields::default()
-        },
-        ValueDetails::Userdata { tag } => ValueFields {
-            value_type: Some(ValueType::Userdata),
-            tag: *tag,
-            ..ValueFields::default()
-        },
-        ValueDetails::Unknown { tag } => ValueFields {
-            value_type: Some(ValueType::Unknown),
-            tag: *tag,
-            ..ValueFields::default()
-        },
-    }
+    value_fields_from_meta(&value_meta_from_details(value))
 }
 
 /// Converts a value description into a compact upvalue preview.
 fn upvalue_preview_from_details(value: &ValueDetails) -> UpvaluePreview {
+    upvalue_preview_from_meta(&value_meta_from_details(value))
+}
+
+fn value_meta_from_details(value: &ValueDetails) -> ValueMeta {
     match value {
-        ValueDetails::Number(value) => UpvaluePreview {
+        ValueDetails::Number(value) => ValueMeta {
             kind: ValueType::Number,
             value: Some(format_number_for_log(*value)),
-            value_len: None,
-            preview: None,
-            tag: None,
+            ..ValueMeta::default()
         },
-        ValueDetails::String(text) => UpvaluePreview {
+        ValueDetails::String(text) => ValueMeta {
             kind: ValueType::String,
-            value: None,
             value_len: Some(text.len()),
             preview: Some(truncate_for_log(text, 80)),
-            tag: None,
+            ..ValueMeta::default()
         },
-        ValueDetails::Nil => UpvaluePreview {
+        ValueDetails::Nil => ValueMeta {
             kind: ValueType::Nil,
-            value: None,
-            value_len: None,
-            preview: None,
-            tag: None,
+            ..ValueMeta::default()
         },
-        ValueDetails::Table { tag } => UpvaluePreview {
+        ValueDetails::Table { tag } => ValueMeta {
             kind: ValueType::Table,
-            value: None,
-            value_len: None,
-            preview: None,
             tag: *tag,
+            ..ValueMeta::default()
         },
-        ValueDetails::Function { tag } => UpvaluePreview {
+        ValueDetails::Function { tag } => ValueMeta {
             kind: ValueType::Function,
-            value: None,
-            value_len: None,
-            preview: None,
             tag: *tag,
+            ..ValueMeta::default()
         },
-        ValueDetails::CFunction { tag, .. } => UpvaluePreview {
+        ValueDetails::CFunction { tag, func } => ValueMeta {
             kind: ValueType::Cfunction,
-            value: None,
-            value_len: None,
-            preview: None,
             tag: *tag,
+            func: func.map(|addr| format!("0x{addr:08x}")),
+            ..ValueMeta::default()
         },
-        ValueDetails::Userdata { tag, .. } => UpvaluePreview {
+        ValueDetails::Userdata { tag } => ValueMeta {
             kind: ValueType::Userdata,
-            value: None,
-            value_len: None,
-            preview: None,
             tag: *tag,
+            ..ValueMeta::default()
         },
-        ValueDetails::Unknown { tag } => UpvaluePreview {
+        ValueDetails::Unknown { tag } => ValueMeta {
             kind: ValueType::Unknown,
-            value: None,
-            value_len: None,
-            preview: None,
             tag: *tag,
+            ..ValueMeta::default()
         },
     }
 }

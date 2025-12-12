@@ -2,7 +2,8 @@ use std::cell::RefCell;
 
 use grim_telemetry_common::{
     trace_utils::{
-        format_number_for_log, truncate_for_log, value_fields_from_number, value_fields_from_string,
+        format_number_for_log, truncate_for_log, upvalue_preview_from_meta, value_fields_from_meta,
+        ValueMeta,
     },
     OriginFields, UpvaluePreview, ValueFields, ValueType,
 };
@@ -229,62 +230,77 @@ pub(crate) fn value_to_string(value: &Value) -> Option<String> {
 }
 
 pub(crate) fn value_fields_from_lua(value: &Value) -> ValueFields {
-    let mut fields = ValueFields::default();
-    match value {
-        Value::Nil => {
-            fields.value_type = Some(ValueType::Nil);
-        }
-        Value::Boolean(flag) => {
-            fields.value_type = Some(ValueType::Unknown);
-            fields.value = Some(flag.to_string());
-        }
-        Value::Integer(num) => {
-            fields.value_type = Some(ValueType::Number);
-            fields.value = Some(num.to_string());
-        }
-        Value::Number(num) => {
-            return value_fields_from_number(*num);
-        }
-        Value::String(text) => {
-            let rendered = String::from_utf8_lossy(text.as_bytes());
-            return value_fields_from_string(&rendered);
-        }
-        Value::Table(_table) => {
-            fields.value_type = Some(ValueType::Table);
-        }
-        Value::Function(func) => {
-            let info = func.info();
-            let what = info.what.as_ref();
-            fields.value_type = Some(match what {
-                "C" | "Rust" => ValueType::Cfunction,
-                _ => ValueType::Function,
-            });
-            let ptr = func.to_pointer();
-            fields.func = Some(format!("0x{:08x}", ptr as usize));
-        }
-        Value::UserData(data) => {
-            fields.value_type = Some(ValueType::Userdata);
-            if let Ok(handle) = data.borrow::<TaggedHandle>() {
-                fields.tag = Some(handle.tag);
-            } else if let Ok(color) = data.borrow::<ColorHandle>() {
-                fields.tag = Some(COLOR_TAG);
-                fields.value = Some(format!("0x{:06x}", color.encoded()));
-            }
-        }
-        Value::Thread(_) | Value::LightUserData(_) | Value::Error(_) => {
-            fields.value_type = Some(ValueType::Unknown);
-        }
-    }
-    fields
+    value_fields_from_meta(&value_meta_from_lua(value))
 }
 
 pub(crate) fn value_to_upvalue_preview(value: &Value) -> UpvaluePreview {
-    let fields = value_fields_from_lua(value);
-    UpvaluePreview {
-        kind: fields.value_type.unwrap_or(ValueType::Unknown),
-        value: fields.value,
-        value_len: fields.value_len,
-        preview: fields.value_preview,
-        tag: fields.tag,
+    upvalue_preview_from_meta(&value_meta_from_lua(value))
+}
+
+fn value_meta_from_lua(value: &Value) -> ValueMeta {
+    match value {
+        Value::Nil => ValueMeta {
+            kind: ValueType::Nil,
+            ..ValueMeta::default()
+        },
+        Value::Boolean(flag) => ValueMeta {
+            kind: ValueType::Unknown,
+            value: Some(flag.to_string()),
+            ..ValueMeta::default()
+        },
+        Value::Integer(num) => ValueMeta {
+            kind: ValueType::Number,
+            value: Some(num.to_string()),
+            ..ValueMeta::default()
+        },
+        Value::Number(num) => ValueMeta {
+            kind: ValueType::Number,
+            value: Some(format_number_for_log(*num)),
+            ..ValueMeta::default()
+        },
+        Value::String(text) => {
+            let rendered = String::from_utf8_lossy(text.as_bytes());
+            ValueMeta {
+                kind: ValueType::String,
+                value_len: Some(text.as_bytes().len()),
+                preview: Some(truncate_for_log(&rendered, 80)),
+                ..ValueMeta::default()
+            }
+        }
+        Value::Table(_) => ValueMeta {
+            kind: ValueType::Table,
+            ..ValueMeta::default()
+        },
+        Value::Function(func) => {
+            let info = func.info();
+            let what = info.what.as_ref();
+            let kind = match what {
+                "C" | "Rust" => ValueType::Cfunction,
+                _ => ValueType::Function,
+            };
+            let ptr = func.to_pointer();
+            ValueMeta {
+                kind,
+                func: Some(format!("0x{:08x}", ptr as usize)),
+                ..ValueMeta::default()
+            }
+        }
+        Value::UserData(data) => {
+            let mut meta = ValueMeta {
+                kind: ValueType::Userdata,
+                ..ValueMeta::default()
+            };
+            if let Ok(handle) = data.borrow::<TaggedHandle>() {
+                meta.tag = Some(handle.tag);
+            } else if let Ok(color) = data.borrow::<ColorHandle>() {
+                meta.tag = Some(COLOR_TAG);
+                meta.value = Some(format!("0x{:06x}", color.encoded()));
+            }
+            meta
+        }
+        Value::Thread(_) | Value::LightUserData(_) | Value::Error(_) => ValueMeta {
+            kind: ValueType::Unknown,
+            ..ValueMeta::default()
+        },
     }
 }

@@ -175,6 +175,53 @@ pub fn truncate_for_log(text: &str, max_len: usize) -> String {
     truncated
 }
 
+/// A uniform description of a value for telemetry rendering.
+#[derive(Clone, Debug)]
+pub struct ValueMeta {
+    pub kind: ValueType,
+    pub value: Option<String>,
+    pub value_len: Option<usize>,
+    pub preview: Option<String>,
+    pub tag: Option<i32>,
+    pub func: Option<String>,
+}
+
+impl Default for ValueMeta {
+    fn default() -> Self {
+        Self {
+            kind: ValueType::Unknown,
+            value: None,
+            value_len: None,
+            preview: None,
+            tag: None,
+            func: None,
+        }
+    }
+}
+
+/// Builds `ValueFields` from a `ValueMeta` descriptor.
+pub fn value_fields_from_meta(meta: &ValueMeta) -> ValueFields {
+    ValueFields {
+        value_type: Some(meta.kind.clone()),
+        value: meta.value.clone(),
+        value_len: meta.value_len,
+        value_preview: meta.preview.clone(),
+        tag: meta.tag,
+        func: meta.func.clone(),
+    }
+}
+
+/// Builds an `UpvaluePreview` from a `ValueMeta` descriptor.
+pub fn upvalue_preview_from_meta(meta: &ValueMeta) -> UpvaluePreview {
+    UpvaluePreview {
+        kind: meta.kind.clone(),
+        value: meta.value.clone(),
+        value_len: meta.value_len,
+        preview: meta.preview.clone(),
+        tag: meta.tag,
+    }
+}
+
 extern "C" {
     fn backtrace(buffer: *mut *mut c_void, size: c_int) -> c_int;
 }
