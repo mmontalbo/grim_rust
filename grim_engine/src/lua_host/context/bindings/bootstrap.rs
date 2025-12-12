@@ -10,17 +10,16 @@ use mlua::{
 
 use crate::lua_host::telemetry::{
     log_create_table, log_dofile, log_event, log_push_cclosure, log_push_number, log_push_object,
-    log_push_usertag, log_set_fallback, log_set_table_entry, next_fabricated_handle, ptr_to_handle,
-    register_tag,
+    log_push_usertag, log_set_fallback, next_fabricated_handle, ptr_to_handle, register_tag,
 };
 use grim_telemetry_common::{LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::{install_legacy_compat, install_legacy_math};
 use super::util::{
-    set_global, value_fields_from_lua, value_to_string, value_to_upvalue_preview,
-    with_registered_global_hint, with_suppressed_registered_globals, ColorHandle,
-    RegisteredGlobalMeta, TaggedHandle, COLOR_TAG,
+    set_global, set_table_entry_with_telemetry, value_fields_from_lua, value_to_string,
+    value_to_upvalue_preview, with_registered_global_hint, with_suppressed_registered_globals,
+    ColorHandle, RegisteredGlobalMeta, TaggedHandle, COLOR_TAG,
 };
 use super::{store_registry_value, PinnedRegistryKeys};
 use crate::lua_host::context::EngineContext;
@@ -619,18 +618,16 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
     let controls_fields = value_fields_from_lua(&Value::Table(controls.clone()));
     log_create_table(controls_handle.clone(), controls_fields.clone());
 
-    let key_preview = value_to_upvalue_preview(&Value::String(lua.create_string("controls")?));
-    let value_preview = value_to_upvalue_preview(&Value::Table(controls.clone()));
-    log_set_table_entry(
-        system_handle.clone(),
-        system_handle_label.clone(),
-        key_preview,
-        value_preview,
+    set_table_entry_with_telemetry(
+        &system,
+        &system_handle,
+        &system_fields,
+        system_handle_label.as_ref(),
+        Value::String(lua.create_string("controls")?),
+        Value::Table(controls.clone()),
         None,
-        Some(system_fields.clone()),
-        Some((controls_handle.clone(), None, controls_fields.clone())),
-    );
-    system.set("controls", controls.clone())?;
+        None,
+    )?;
     populate_controls_table(lua, &controls, &controls_handle, &controls_fields)?;
 
     // Retail fetches the stored system ref before installing default handlers; mirror the fetches without storing the closures.
@@ -649,16 +646,16 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
         0,
         Some("DefaultCamChangeHandlerL"),
     );
-    log_set_table_entry(
-        system_handle.clone(),
-        system_handle_label.clone(),
-        value_to_upvalue_preview(&Value::String(lua.create_string("camChangeHandler")?)),
-        cam_change_preview,
+    set_table_entry_with_telemetry(
+        &system,
+        &system_handle,
+        &system_fields,
+        system_handle_label.as_ref(),
+        Value::String(lua.create_string("camChangeHandler")?),
+        Value::Function(default_cam_change.clone()),
         None,
-        Some(system_fields.clone()),
         None,
-    );
-    system.set("camChangeHandler", default_cam_change)?;
+    )?;
 
     let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     let default_control_preview = UpvaluePreview {
@@ -676,17 +673,16 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
             0,
             Some("DefaultControlHandlerL"),
         );
-        let key_preview = value_to_upvalue_preview(&Value::String(lua.create_string(key)?));
-        log_set_table_entry(
-            system_handle.clone(),
-            system_handle_label.clone(),
-            key_preview,
-            default_control_preview.clone(),
+        set_table_entry_with_telemetry(
+            &system_for_handler,
+            &system_handle,
+            &system_fields,
+            system_handle_label.as_ref(),
+            Value::String(lua.create_string(key)?),
+            Value::Function(default_control.clone()),
             None,
-            Some(system_fields.clone()),
             None,
-        );
-        system_for_handler.set(key, default_control.clone())?;
+        )?;
     }
 
     pinned_refs.push(system_ref.key);
@@ -885,19 +881,16 @@ fn apply_control_manifest(
     manifest: &[(&str, i32)],
 ) -> LuaResult<()> {
     for (name, code) in manifest {
-        let key_value = Value::String(lua.create_string(*name)?);
-        let key_preview = value_to_upvalue_preview(&key_value);
-        let value_preview = value_to_upvalue_preview(&Value::Integer(*code as i64));
-        log_set_table_entry(
-            controls_handle.clone(),
+        set_table_entry_with_telemetry(
+            controls,
+            controls_handle,
+            controls_fields,
             None,
-            key_preview,
-            value_preview,
+            Value::String(lua.create_string(*name)?),
+            Value::Integer(*code as i64),
             None,
-            Some(controls_fields.clone()),
             None,
-        );
-        controls.set(*name, *code)?;
+        )?;
     }
     Ok(())
 }

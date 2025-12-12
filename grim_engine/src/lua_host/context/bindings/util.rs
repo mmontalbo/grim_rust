@@ -11,8 +11,8 @@ use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 
 use crate::lua_host::telemetry::{
     log_lua_setglobal, log_push_cclosure, log_push_nil, log_push_number, log_push_object,
-    log_push_string, log_registered_constant, log_registered_global, normalize_handle,
-    origin_fields_for_ptr, ptr_to_handle, register_table_label,
+    log_push_string, log_registered_constant, log_registered_global, log_set_table_entry,
+    normalize_handle, origin_fields_for_ptr, ptr_to_handle, register_table_label,
 };
 
 #[derive(Clone)]
@@ -109,6 +109,33 @@ pub(super) fn handle_from_value(value: &Value) -> Option<String> {
         Value::Thread(thread) => Some(ptr_to_handle(thread.to_pointer())),
         _ => None,
     }
+}
+
+/// Logs a semantic table entry mutation and performs the actual set on the table.
+pub(crate) fn set_table_entry_with_telemetry<'lua>(
+    table: &Table<'lua>,
+    table_handle: &str,
+    table_fields: &ValueFields,
+    table_label: Option<&String>,
+    key: Value<'lua>,
+    value: Value<'lua>,
+    value_handle_label: Option<String>,
+    note: Option<String>,
+) -> LuaResult<()> {
+    let key_preview = value_to_upvalue_preview(&key);
+    let value_preview = value_to_upvalue_preview(&value);
+    let value_fields = value_fields_from_lua(&value);
+    let value_handle = handle_from_value(&value);
+    log_set_table_entry(
+        table_handle.to_string(),
+        table_label.cloned(),
+        key_preview,
+        value_preview,
+        note,
+        Some(table_fields.clone()),
+        value_handle.map(|handle| (handle, value_handle_label, value_fields.clone())),
+    );
+    table.set(key, value)
 }
 
 pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
