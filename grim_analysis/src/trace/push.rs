@@ -8,14 +8,16 @@ use crate::{
     },
     telemetry,
 };
+use grim_telemetry_common::trace_utils::cstr_opt;
 use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 
 use super::{
-    caller_origin_fields, describe_lua_value, format_number_for_log, log_event_with_seq,
-    origin_fields, record_push_preview, remember_registered_global_candidate, truncate_for_log,
-    upvalue_preview_from_details, value_fields_from_details, ClosureOrigin,
+    caller_origin_fields, describe_lua_value, log_event_with_seq, origin_fields,
+    record_push_preview, remember_registered_global_candidate, upvalue_preview_from_details,
+    value_fields_from_details, ClosureOrigin,
 };
+use grim_telemetry_common::trace_utils::{format_number_for_log, truncate_for_log};
 
 /// Traces pushing a C closure, capturing origin metadata and upvalue count.
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {
@@ -95,7 +97,7 @@ pub(crate) unsafe fn trace_lua_pushnil() {
 
 /// Traces pushing a NUL-terminated string.
 pub(crate) unsafe fn trace_lua_pushstring(value: *const c_char) {
-    let text = super::cstr_opt(value).unwrap_or_else(|| "<null>".to_string());
+    let text = cstr_opt(value).unwrap_or_else(|| "<null>".to_string());
     let preview = truncate_for_log(&text, 80);
     let log_seq = log_event_with_seq(LuaEvent::PushString {
         len: text.len(),

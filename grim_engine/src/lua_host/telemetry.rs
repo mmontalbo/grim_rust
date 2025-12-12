@@ -1,8 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    ffi::{c_void, CStr},
-    mem::MaybeUninit,
-    ptr,
+    ffi::c_void,
     sync::{
         atomic::{AtomicU32, Ordering},
         Mutex, OnceLock,
@@ -13,6 +11,13 @@ use grim_telemetry_common::{
     EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
     UpvaluePreview, ValueFields, ValueType,
 };
+use grim_telemetry_common::trace_utils::{
+    caller_origin_details, describe_closure_target, origin_fields_from_details,
+    semantic_set_table_entry,
+};
+
+// Re-export common helpers so callers keep using the telemetry module surface.
+pub(crate) use grim_telemetry_common::trace_utils::{ptr_to_handle, register_table_label, table_label};
 
 const ENGINE_ID: &str = "grim_engine";
 const VM_ID: &str = "lua";
@@ -20,7 +25,6 @@ const VM_ID: &str = "lua";
 static FABRICATED_HANDLE: AtomicU32 = AtomicU32::new(1);
 static KNOWN_TAGS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
 static FABRICATED_BY_LABEL: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-static TABLE_LABELS: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
 
 static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     engine_id: ENGINE_ID,
@@ -32,31 +36,6 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
 
 pub(crate) fn log_event(event: impl Into<EventBuilder>) {
     LOGGER.log_event(event);
-}
-
-pub(crate) fn register_table_label(ptr: *const c_void, label: impl Into<String>) {
-    if ptr.is_null() {
-        return;
-    }
-    let labels = TABLE_LABELS.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut map) = labels.lock() {
-        map.entry(ptr as usize).or_insert_with(|| label.into());
-    }
-}
-
-pub(crate) fn table_label(ptr: *const c_void) -> Option<String> {
-    if ptr.is_null() {
-        return None;
-    }
-    let labels = TABLE_LABELS.get_or_init(|| Mutex::new(HashMap::new()));
-    labels
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&(ptr as usize)).cloned())
-}
-
-pub(crate) fn ptr_to_handle(func: *const c_void) -> String {
-    format!("0x{:08x}", func as usize)
 }
 
 #[derive(Clone, Debug)]
@@ -238,27 +217,15 @@ pub(crate) fn log_set_table_entry(
     value_handle: Option<(String, Option<String>, ValueFields)>,
 ) {
     let caller = caller_origin_fields();
-    let semantic_caller = caller.clone();
-    let semantic_key = key.clone();
-    let semantic_value = value.clone();
-    let semantic_table_handle = table_handle.clone();
-    let semantic_table_handle_label = table_handle_label.clone();
-    let semantic_note = note.clone();
     // Retail telemetry records pushing the target table before setting entries.
     let table_fields = table_fields.unwrap_or_else(|| {
         let mut fields = ValueFields::default();
         fields.value_type = Some(ValueType::Table);
         fields
     });
-    let semantic_table_fields = Some(table_fields.clone());
-    let semantic_value_handle = value_handle.as_ref().map(|(handle, _, _)| handle.clone());
-    let semantic_value_handle_label = value_handle
-        .as_ref()
-        .and_then(|(_, label, _)| label.clone());
-    let semantic_value_fields = value_handle.as_ref().map(|(_, _, fields)| fields.clone());
     log_push_object(table_handle.clone(), table_fields.clone());
     log_push_from_preview(&key);
-    if let Some((value_handle, _, value_fields)) = value_handle {
+    if let Some((value_handle, _, value_fields)) = value_handle.clone() {
         log_push_object(value_handle, value_fields);
     } else {
         log_push_from_preview(&value);
@@ -267,18 +234,24 @@ pub(crate) fn log_set_table_entry(
         note: note.clone(),
         caller: caller.clone(),
     });
-    log_event(LuaSemanticEvent::SemanticSetTableEntry {
-        table_handle: semantic_table_handle,
-        table_handle_label: semantic_table_handle_label,
-        table_fields: semantic_table_fields,
-        key: semantic_key,
-        value: semantic_value,
-        value_handle: semantic_value_handle,
-        value_handle_label: semantic_value_handle_label,
-        value_fields: semantic_value_fields,
-        note: semantic_note,
-        caller: semantic_caller,
-    });
+    let semantic_value_handle = value_handle.as_ref().map(|(handle, _, _)| handle.clone());
+    let semantic_value_handle_label = value_handle
+        .as_ref()
+        .and_then(|(_, label, _)| label.clone());
+    let semantic_value_fields = value_handle.as_ref().map(|(_, _, fields)| fields.clone());
+    let semantic_event = semantic_set_table_entry(
+        table_handle,
+        table_handle_label,
+        Some(table_fields),
+        key,
+        value,
+        semantic_value_handle,
+        semantic_value_handle_label,
+        semantic_value_fields,
+        note,
+        caller,
+    );
+    log_event(semantic_event);
 }
 
 pub(crate) fn log_set_tag(tag: i32, note: Option<String>) {
@@ -424,52 +397,17 @@ fn stable_fabricated_handle(label: &str) -> String {
 }
 
 pub(crate) fn origin_fields_for_ptr(ptr: *const c_void) -> OriginFields {
-    let mut fields = OriginFields::default();
     if ptr.is_null() {
-        return fields;
+        return OriginFields::default();
     }
-    fields.origin = Some(format!("0x{:08x}", ptr as usize));
     let details = describe_closure_target(ptr);
-    if let Some(module) = details.module {
-        fields.module = Some(module);
-    }
-    if let Some(symbol) = details.symbol {
-        fields.symbol = Some(symbol);
-    }
-    fields
+    origin_fields_from_details(&details)
 }
 
 fn caller_origin_fields() -> OriginFields {
-    let mut frames: [*mut c_void; 32] = [ptr::null_mut(); 32];
-    let depth = unsafe { backtrace(frames.as_mut_ptr(), frames.len() as i32) };
-    if depth <= 0 {
-        return OriginFields::default();
-    }
-    for addr in frames.iter().take(depth as usize).skip(1) {
-        if addr.is_null() {
-            continue;
-        }
-        let ptr = *addr as *const c_void;
-        let details = describe_closure_target(ptr);
-        if should_skip_caller_frame(details.module.as_deref(), details.symbol.as_deref()) {
-            continue;
-        }
-        let mut fields = OriginFields::default();
-        fields.origin = Some(format!("0x{:08x}", ptr as usize));
-        if let Some(module) = details.module {
-            fields.module = Some(module);
-        }
-        if let Some(symbol) = details.symbol {
-            fields.symbol = Some(symbol);
-        }
-        return fields;
-    }
-    OriginFields::default()
-}
-
-struct ClosureDetails {
-    module: Option<String>,
-    symbol: Option<String>,
+    caller_origin_details(should_skip_caller_frame)
+        .map(|details| origin_fields_from_details(&details))
+        .unwrap_or_default()
 }
 
 fn should_skip_caller_frame(module_path: Option<&str>, symbol: Option<&str>) -> bool {
@@ -492,32 +430,4 @@ fn should_skip_caller_frame(module_path: Option<&str>, symbol: Option<&str>) -> 
     }
 
     false
-}
-
-fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
-    unsafe {
-        let mut info = MaybeUninit::<libc::Dl_info>::zeroed();
-        if libc::dladdr(ptr, info.as_mut_ptr()) == 0 {
-            return ClosureDetails {
-                module: None,
-                symbol: None,
-            };
-        }
-        let info = info.assume_init();
-        let module = cstr_opt(info.dli_fname);
-        let symbol = cstr_opt(info.dli_sname);
-        ClosureDetails { module, symbol }
-    }
-}
-
-unsafe fn cstr_opt(ptr: *const libc::c_char) -> Option<String> {
-    if ptr.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
-    }
-}
-
-extern "C" {
-    fn backtrace(buffer: *mut *mut c_void, size: i32) -> i32;
 }

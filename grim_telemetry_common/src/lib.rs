@@ -16,6 +16,8 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub mod trace_utils;
+
 pub const DEFAULT_FULLSCREEN_DURATION_MS: u128 = 4_200;
 pub const DEFAULT_POLL_STEP_MS: u128 = 80;
 

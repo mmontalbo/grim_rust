@@ -6,6 +6,8 @@ use crate::{
     },
     telemetry,
 };
+use grim_telemetry_common::trace_utils::cstr_opt;
+use grim_telemetry_common::trace_utils::truncate_for_log;
 use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 
@@ -31,7 +33,7 @@ fn forward_int_result(label: &str, result: Option<c_int>) -> c_int {
 /// Executes a Lua file while logging the call and forwarding to the retail VM.
 pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
     record_non_push_event();
-    let label = super::cstr_opt(path).unwrap_or_else(|| "<null>".to_string());
+    let label = cstr_opt(path).unwrap_or_else(|| "<null>".to_string());
     telemetry::observe_lua_activity();
     log_event(LuaEvent::Dofile { path: label });
     forward_int_result("lua_dofile", call_real_lua_dofile(path))
@@ -40,8 +42,8 @@ pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
 /// Executes a Lua string chunk while logging and forwarding to the retail VM.
 pub(crate) unsafe fn trace_lua_dostring(chunk: *const c_char) -> c_int {
     record_non_push_event();
-    let snippet = super::cstr_opt(chunk)
-        .map(|s| super::truncate_for_log(&s, 80))
+    let snippet = cstr_opt(chunk)
+        .map(|s| truncate_for_log(&s, 80))
         .unwrap_or_else(|| "<null>".to_string());
     telemetry::observe_lua_activity();
     log_event(LuaEvent::Dostring { snippet });
@@ -54,7 +56,7 @@ pub(crate) unsafe fn trace_lua_dobuffer(
     name: *const c_char,
 ) -> c_int {
     record_non_push_event();
-    let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     telemetry::observe_lua_activity();
     log_event(LuaEvent::Dobuffer { name: label, size });
     forward_int_result("lua_dobuffer", call_real_lua_dobuffer(buffer, size, name))
@@ -63,7 +65,7 @@ pub(crate) unsafe fn trace_lua_dobuffer(
 /// Traces a `lua_call` invocation by name.
 pub(crate) unsafe fn trace_lua_call(name: *const c_char) -> c_int {
     record_non_push_event();
-    let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     log_event(LuaEvent::Call { name: label });
     forward_int_result("lua_call", call_real_lua_call(name))
 }
@@ -109,8 +111,8 @@ pub(crate) unsafe fn trace_lua_collectgarbage() {
 /// Traces a `lua_error` call, including the truncated error message.
 pub(crate) unsafe fn trace_lua_error(message: *const c_char) {
     record_non_push_event();
-    let text = super::cstr_opt(message)
-        .map(|s| super::truncate_for_log(&s, 120))
+    let text = cstr_opt(message)
+        .map(|s| truncate_for_log(&s, 120))
         .unwrap_or_else(|| "<null>".to_string());
     log_event(LuaEvent::LuaError { message: text });
     if !call_real_lua_error(message) {

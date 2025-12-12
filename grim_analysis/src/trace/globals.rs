@@ -5,6 +5,7 @@ use crate::{
         call_real_lua_rawsetglobal, call_real_lua_setglobal, LuaObject,
     },
 };
+use grim_telemetry_common::trace_utils::cstr_opt;
 use libc::c_char;
 use std::ffi::c_void;
 
@@ -17,7 +18,7 @@ use super::{
 /// Traces a raw global read (no metamethods) and records the returned handle/value.
 pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
     record_non_push_event();
-    let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     match call_real_lua_rawgetglobal(name) {
         Some(handle) => {
             let handle_label = format!("global:{label}");
@@ -43,7 +44,7 @@ pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
 /// Traces a raw global write (no metamethods) and emits metadata about the stored value.
 pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     record_non_push_event();
-    let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     let mut handle_field = None;
     let mut values = ValueFields::default();
     let mut note = None;
@@ -77,7 +78,7 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
 /// Traces a global set, emitting semantic bind events for functions/constants.
 pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
     record_non_push_event();
-    let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
     let caller = super::caller_origin_fields();
 
     if call_real_lua_setglobal(name) {
@@ -142,7 +143,7 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
 /// Traces a global read and increments access counters for the symbol.
 pub(crate) unsafe fn trace_lua_getglobal(name: *const c_char) -> LuaObject {
     record_non_push_event();
-    let label = super::cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
+    let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
 
     let handle = match call_real_lua_getglobal(name) {
         Some(handle) => handle,

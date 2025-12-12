@@ -16,12 +16,14 @@ use crate::{
     },
     symbol_map::lookup_symbol_from_map,
 };
-use libc::{c_char, c_int, Dl_info};
+use grim_telemetry_common::trace_utils::{
+    caller_origin_details, describe_closure_target, format_number_for_log, origin_fields_from_details,
+    semantic_set_table_entry, truncate_for_log, value_fields_from_number, value_fields_from_string,
+};
+use libc::c_int;
 use std::{
     collections::{HashMap, VecDeque},
-    ffi::{c_void, CStr},
-    mem::MaybeUninit,
-    ptr,
+    ffi::c_void,
     sync::{Mutex, OnceLock},
 };
 
@@ -64,10 +66,6 @@ static GLOBAL_ACCESS_TRACKER: OnceLock<Mutex<GlobalAccessTracker>> = OnceLock::n
 static HANDLE_LABELS: OnceLock<Mutex<HandleLabelTracker>> = OnceLock::new();
 static PUSH_EVENT_TRACKER: OnceLock<Mutex<PushEventTracker>> = OnceLock::new();
 static REGISTERED_GLOBAL_CANDIDATES: OnceLock<Mutex<RegisteredGlobalTracker>> = OnceLock::new();
-
-extern "C" {
-    fn backtrace(buffer: *mut *mut c_void, size: c_int) -> c_int;
-}
 
 /// Caches metadata about a push so later table operations can correlate key/value pairs.
 fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<LuaObject>) {
@@ -134,8 +132,6 @@ fn emit_set_table_entry(
                 ..ValueFields::default()
             })
         });
-    let semantic_note = note.clone();
-    let semantic_caller = caller.clone();
     let key_push = &pushes[pushes.len() - 2];
     let value_push = pushes.last().unwrap();
     let value_handle = value_push
@@ -146,18 +142,19 @@ fn emit_set_table_entry(
         .handle
         .and_then(describe_lua_value)
         .map(|details| value_fields_from_details(&details));
-    log_semantic_event(LuaSemanticEvent::SemanticSetTableEntry {
-        table_handle: table_handle_hex,
+    let semantic_event = semantic_set_table_entry(
+        table_handle_hex,
         table_handle_label,
         table_fields,
-        key: key_push.preview.clone(),
-        value: value_push.preview.clone(),
+        key_push.preview.clone(),
+        value_push.preview.clone(),
         value_handle,
         value_handle_label,
         value_fields,
-        note: semantic_note,
-        caller: semantic_caller,
-    });
+        note,
+        caller,
+    );
+    log_semantic_event(semantic_event);
 }
 
 /// Picks a table handle from captured pushes when none was provided directly.
@@ -248,25 +245,6 @@ fn registered_global_tracker() -> &'static Mutex<RegisteredGlobalTracker> {
         .get_or_init(|| Mutex::new(RegisteredGlobalTracker::new(MAX_PENDING_REGISTERED_GLOBALS)))
 }
 
-/// Renders floats cleanly for logging, stripping trailing decimals when whole.
-fn format_number_for_log(value: f64) -> String {
-    if (value.fract() - 0.0).abs() < f64::EPSILON {
-        format!("{value:.0}")
-    } else {
-        format!("{value}")
-    }
-}
-
-/// Truncates a long string for logging while indicating it was shortened.
-fn truncate_for_log(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        return text.to_string();
-    }
-    let mut truncated = text[..max_len].to_string();
-    truncated.push_str("...");
-    truncated
-}
-
 /// Inspects a Lua handle into a structured value description.
 fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
     if handle == 0 {
@@ -303,15 +281,10 @@ fn describe_lua_value(handle: LuaObject) -> Option<ValueDetails> {
 fn value_fields_from_details(value: &ValueDetails) -> ValueFields {
     match value {
         ValueDetails::Number(value) => ValueFields {
-            value_type: Some(ValueType::Number),
-            value: Some(format_number_for_log(*value)),
-            ..ValueFields::default()
+            ..value_fields_from_number(*value)
         },
         ValueDetails::String(text) => ValueFields {
-            value_type: Some(ValueType::String),
-            value_len: Some(text.len()),
-            value_preview: Some(truncate_for_log(text, 80)),
-            ..ValueFields::default()
+            ..value_fields_from_string(text)
         },
         ValueDetails::Nil => ValueFields {
             value_type: Some(ValueType::Nil),
@@ -457,55 +430,30 @@ fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
 
 /// Captures the immediate non-shim caller using a backtrace and resolves it to module/symbol info.
 fn caller_origin_fields() -> OriginFields {
-    let mut frames: [*mut c_void; 32] = [ptr::null_mut(); 32];
-    let depth = unsafe { backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
-    if depth <= 0 {
-        return OriginFields::default();
-    }
-
-    for addr in frames.iter().take(depth as usize).skip(1) {
-        if addr.is_null() {
-            continue;
-        }
-        let ptr = *addr as *const c_void;
-        let details = describe_closure_target(ptr);
-        if should_skip_caller_frame(details.module.as_deref()) {
-            continue;
-        }
-        return origin_fields_from_frame(ptr as usize, details);
-    }
-
-    OriginFields::default()
+    caller_origin_details(should_skip_caller_frame)
+        .map(|details| origin_fields_with_map(&details))
+        .unwrap_or_default()
 }
 
 /// Builds origin fields from a frame address and its resolved module/symbol details.
-fn origin_fields_from_frame(addr: usize, details: ClosureDetails) -> OriginFields {
-    let ClosureDetails {
-        module,
-        module_base,
-        symbol,
-    } = details;
-    let mut fields = OriginFields::default();
-    fields.origin = Some(format!("0x{addr:08x}"));
-
-    if let Some(module) = module.as_ref() {
-        fields.module = Some(module.clone());
+fn origin_fields_with_map(details: &grim_telemetry_common::trace_utils::ClosureDetails) -> OriginFields {
+    let mut fields = origin_fields_from_details(details);
+    if fields.symbol.is_none() {
+        if let Some(map_symbol) =
+            lookup_symbol_from_map(details.address, details.module.as_deref(), details.module_base)
+        {
+            fields.symbol = Some(render_symbol_with_offset(
+                &map_symbol.name,
+                map_symbol.distance,
+            ));
+            fields.symbol_source = Some("map".to_string());
+        }
     }
-    if let Some(symbol) = symbol {
-        fields.symbol = Some(symbol);
-    } else if let Some(map_symbol) = lookup_symbol_from_map(addr, module.as_deref(), module_base) {
-        fields.symbol = Some(render_symbol_with_offset(
-            &map_symbol.name,
-            map_symbol.distance,
-        ));
-        fields.symbol_source = Some("map".to_string());
-    }
-
     fields
 }
 
 /// Filters out frames from the shim or libc so we attribute the caller to retail code.
-fn should_skip_caller_frame(module_path: Option<&str>) -> bool {
+fn should_skip_caller_frame(module_path: Option<&str>, _symbol: Option<&str>) -> bool {
     match module_path {
         Some(path) => {
             let normalized = path.to_ascii_lowercase();
@@ -516,48 +464,6 @@ fn should_skip_caller_frame(module_path: Option<&str>) -> bool {
                 || normalized.contains("linux-vdso")
         }
         None => false,
-    }
-}
-
-struct ClosureDetails {
-    module: Option<String>,
-    module_base: Option<usize>,
-    symbol: Option<String>,
-}
-
-/// Describes the module/symbol information for a closure pointer using `dladdr`.
-fn describe_closure_target(ptr: *const c_void) -> ClosureDetails {
-    unsafe {
-        let mut info = MaybeUninit::<Dl_info>::zeroed();
-        if libc::dladdr(ptr, info.as_mut_ptr()) == 0 {
-            return ClosureDetails {
-                module: None,
-                module_base: None,
-                symbol: None,
-            };
-        }
-        let info = info.assume_init();
-        let module = cstr_opt(info.dli_fname);
-        let module_base = if info.dli_fbase.is_null() {
-            None
-        } else {
-            Some(info.dli_fbase as usize)
-        };
-        let symbol = cstr_opt(info.dli_sname);
-        ClosureDetails {
-            module,
-            module_base,
-            symbol,
-        }
-    }
-}
-
-/// Converts a potentially null C string into an owned `String`.
-unsafe fn cstr_opt(ptr: *const c_char) -> Option<String> {
-    if ptr.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     }
 }
 

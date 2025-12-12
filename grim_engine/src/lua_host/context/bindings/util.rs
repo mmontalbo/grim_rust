@@ -1,6 +1,9 @@
 use std::cell::RefCell;
 
-use grim_telemetry_common::{OriginFields, UpvaluePreview, ValueFields, ValueType};
+use grim_telemetry_common::{
+    trace_utils::{format_number_for_log, truncate_for_log, value_fields_from_number, value_fields_from_string},
+    OriginFields, UpvaluePreview, ValueFields, ValueType,
+};
 use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 
 use crate::lua_host::telemetry::{
@@ -238,15 +241,11 @@ pub(crate) fn value_fields_from_lua(value: &Value) -> ValueFields {
             fields.value = Some(num.to_string());
         }
         Value::Number(num) => {
-            fields.value_type = Some(ValueType::Number);
-            fields.value = Some(format_number_for_log(*num));
+            return value_fields_from_number(*num);
         }
         Value::String(text) => {
-            fields.value_type = Some(ValueType::String);
-            let bytes = text.as_bytes();
-            let rendered = String::from_utf8_lossy(bytes).into_owned();
-            fields.value_len = Some(bytes.len());
-            fields.value_preview = Some(truncate_for_log(&rendered, 80));
+            let rendered = String::from_utf8_lossy(text.as_bytes());
+            return value_fields_from_string(&rendered);
         }
         Value::Table(_table) => {
             fields.value_type = Some(ValueType::Table);
@@ -286,21 +285,4 @@ pub(crate) fn value_to_upvalue_preview(value: &Value) -> UpvaluePreview {
         preview: fields.value_preview,
         tag: fields.tag,
     }
-}
-
-fn format_number_for_log(value: f64) -> String {
-    if (value.fract() - 0.0).abs() < f64::EPSILON {
-        format!("{value:.0}")
-    } else {
-        format!("{value}")
-    }
-}
-
-fn truncate_for_log(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        return text.to_string();
-    }
-    let mut truncated = text[..max_len].to_string();
-    truncated.push_str("...");
-    truncated
 }

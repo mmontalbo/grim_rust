@@ -6,6 +6,7 @@ use crate::{
         call_real_lua_settagmethod, LuaCFunction, LuaObject,
     },
 };
+use grim_telemetry_common::trace_utils::cstr_opt;
 use libc::{c_char, c_int};
 use std::ffi::c_void;
 
@@ -20,7 +21,7 @@ pub(crate) unsafe fn trace_lua_setfallback(
     func: LuaCFunction,
 ) -> LuaObject {
     record_non_push_event();
-    let name = super::cstr_opt(event_name).unwrap_or_else(|| "<null>".to_string());
+    let name = cstr_opt(event_name).unwrap_or_else(|| "<null>".to_string());
     let origin = ClosureOrigin::new(func as *const c_void);
     let caller = caller_origin_fields();
     match call_real_lua_setfallback(event_name, func) {
@@ -108,7 +109,7 @@ pub(crate) unsafe fn trace_lua_settag(tag: c_int) {
 
 /// Traces installing a tag method handler for a given event.
 pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
-    let event_label = super::cstr_opt(event).unwrap_or_else(|| "<null>".to_string());
+    let event_label = cstr_opt(event).unwrap_or_else(|| "<null>".to_string());
     let top_handle = call_real_lua_getparam(-1);
     let mut values = ValueFields::default();
     let mut handle_field = None;
