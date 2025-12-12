@@ -85,7 +85,6 @@ pub(crate) fn install_globals_pre_system(
     )?;
 
     install_legacy_io(lua, &globals)?;
-    install_control_stubs(lua, &globals)?;
     let errorfb: Function = globals
         .get("error")
         .context("error handler missing from Lua state")?;
@@ -138,25 +137,6 @@ pub(crate) fn install_globals(
 ) -> Result<()> {
     install_globals_pre_system(lua, data_root, context.clone())?;
     install_globals_post_system(lua, context)?;
-    Ok(())
-}
-
-fn install_control_stubs(lua: &Lua, globals: &Table) -> LuaResult<()> {
-    let noop = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?;
-    let noop_bool = lua.create_function(|_, _: Variadic<Value>| Ok(Value::Boolean(false)))?;
-    for name in [
-        "EnableControl",
-        "DisableControl",
-        "EnableAllControl",
-        "ResetMarioControl",
-        "MarioControl",
-        "MarioStyleControl",
-        "TombRaiderControl",
-        "PrintControl",
-    ] {
-        set_global(lua, globals, name, noop.clone())?;
-    }
-    set_global(lua, globals, "GetControl", noop_bool)?;
     Ok(())
 }
 
@@ -515,7 +495,7 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
         lua,
         Value::Table(system.clone()),
         1,
-        None,
+        Some(0),
         Some("global:system".to_string()),
         Some(system_handle.clone()),
         system_handle_label.clone(),

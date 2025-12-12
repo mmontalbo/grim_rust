@@ -1,0 +1,30 @@
+# Parity Divergence Workflow
+
+Guidance for contributors working on retail/engine parity. The goal is to **recreate retail behaviour**, not to cosmetically align logs. Use this as a checklist before changing `grim_engine` or telemetry.
+
+## Ground truth
+- Retail telemetry is the source of truth. Do not suppress retail events or invent engine events to make traces line up.
+- `grctl` parity logs default to the semantic stream; use `--raw` only when you need VM details to debug stack mechanics.
+- Divergences are meaningful signals. If the engine emits an extra event, assumes a ref order, or omits a call, treat it as a real behavioural gap to fix.
+
+## Workflow (per bug/feature)
+- Start with a short run to find the first break: `./grctl.sh parity start --timeout 3` then `./grctl.sh parity logs` (or `--from-start`) to spot the earliest divergence.
+- Work on the **first** divergence you see. Ignore later “end-of-script” errors until the earlier mismatch is resolved; they often disappear once the first gap is fixed.
+- Confirm whether the divergence is semantic (wrong/missing binding, ref order, table shape) or mechanical (stack push order, GC timing). Fix semantics first.
+- Re-run the same short window after each change. Only extend the timeout when the early window is clean and you need to chase later behaviour.
+
+## Do / Don’t
+- Do implement the missing behaviour (e.g. register the real binding, call the real fallback, create/populate tables in the observed order).
+- Do add targeted telemetry if you need more detail, but keep the semantic/raw split intact.
+- Don’t mask or reorder events just to silence the diff; if retail sets a tag method, the engine must set the same hook for the same reason.
+- Don’t gate retail-consistent code paths behind debug flags to “pass parity”; parity should fall out of correct behaviour.
+
+## Example: first divergence fix
+- Context: earliest mismatch was in bootstrap ordering. The engine bound control stubs before `_TRIGMODE` and stored `system` under a new ref instead of retail’s ref 0, causing downstream ref/order skew.
+- Fix: remove the early control stub bindings, bind `_TRIGMODE` directly after legacy IO/errorfb, and store `system` with `ref=0` before populating `controls` via `lua_getref`. After this, the semantic streams matched through controls setup.
+- Result: the next earliest divergence surfaced deeper (_actors.lua expecting Actor methods), showing the workflow: clear the earliest diff, rerun the short window, let the next real gap emerge.
+
+## When adding fixes
+- Keep changes tightly scoped to the observed divergence; avoid opportunistic refactors in the same PR so parity work stays reviewable.
+- Capture the before/after divergence (log snippet or note) in the PR description so others understand what was fixed.
+- If you need to stub functionality, do so in a way that still mirrors retail sequencing and surface shape. Leave TODOs that reference the retail behaviour to be implemented.

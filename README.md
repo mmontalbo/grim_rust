@@ -22,7 +22,7 @@ flow and prototype modern tooling around it.
   `grim_analysis/README.rust_shim.md`.
 - `grim_engine/` – prototype runtime host; see `grim_engine/README.md`.
 - `grim_formats/` – asset format helpers and CLIs; see `grim_formats/README.md`.
-- `docs/` – reference notes for current tooling.
+- `docs/` – reference notes for current tooling (see `docs/parity_workflow.md` for parity debugging workflow).
 - `tools/` – repo-level utilities such as `tools/sync_assets.sh` for asset
   preparation and commit helpers.
 
