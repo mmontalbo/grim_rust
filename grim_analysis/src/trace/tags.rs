@@ -11,7 +11,7 @@ use libc::{c_char, c_int};
 use std::ffi::c_void;
 
 use super::{
-    caller_origin_fields, describe_lua_value, origin_fields, record_non_push_event,
+    caller_origin_fields, describe_lua_value, handle_hex, origin_fields, record_non_push_event,
     remember_handle_label, value_fields_from_details, ClosureOrigin,
 };
 
@@ -31,18 +31,18 @@ pub(crate) unsafe fn trace_lua_setfallback(
                 .unwrap_or_default();
             let handle_label = format!("fallback:{name}");
             remember_handle_label(handle, handle_label.clone());
-            let handle_hex = format!("0x{handle:08x}");
+            let handle_hex_str = handle_hex(handle as usize);
             let origin_fields = origin_fields(Some(&origin));
             super::log_semantic_event(LuaSemanticEvent::SemanticSetFallback {
                 fallback: name.clone(),
-                handle: handle_hex.clone(),
+                handle: handle_hex_str.clone(),
                 values: values.clone(),
                 origin: origin_fields.clone(),
                 caller: caller.clone(),
             });
             log_event(LuaEvent::SetFallback {
                 fallback: name,
-                handle: handle_hex,
+                handle: handle_hex_str,
                 values,
                 origin: origin_fields,
                 caller,
@@ -115,7 +115,7 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
     let mut handle_field = None;
     let mut origin = None;
     if let Some(handle) = top_handle {
-        handle_field = Some(format!("0x{handle:08x}"));
+        handle_field = Some(handle_hex(handle as usize));
         if let Some(details) = describe_lua_value(handle) {
             values = value_fields_from_details(&details);
             if let Some(addr) = call_real_lua_getcfunction(handle) {

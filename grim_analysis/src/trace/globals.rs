@@ -11,8 +11,8 @@ use std::ffi::c_void;
 
 use super::{
     callfunction_tracker, describe_lua_value, emit_registered_constant, emit_registered_global,
-    origin_fields, record_non_push_event, remember_handle_label, take_registered_global_candidate,
-    value_fields_from_details, ClosureOrigin,
+    handle_hex, origin_fields, record_non_push_event, remember_handle_label,
+    take_registered_global_candidate, value_fields_from_details, ClosureOrigin,
 };
 
 /// Traces a raw global read (no metamethods) and records the returned handle/value.
@@ -28,7 +28,7 @@ pub(crate) unsafe fn trace_lua_rawgetglobal(name: *const c_char) -> LuaObject {
                 .unwrap_or_default();
             log_event(LuaEvent::RawGetGlobal {
                 name: label.clone(),
-                handle: format!("0x{handle:08x}"),
+                handle: handle_hex(handle as usize),
                 label: Some(handle_label),
                 values,
             });
@@ -52,7 +52,7 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     let caller = super::caller_origin_fields();
     if call_real_lua_rawsetglobal(name) {
         if let Some(handle) = call_real_lua_rawgetglobal(name) {
-            handle_field = Some(format!("0x{handle:08x}"));
+            handle_field = Some(handle_hex(handle as usize));
             let resolved_label = format!("global:{label}");
             computed_label = Some(resolved_label.clone());
             remember_handle_label(handle, resolved_label);
@@ -109,7 +109,7 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
 
             log_event_with_seq(LuaEvent::BindGlobal {
                 name: label.clone(),
-                handle: format!("0x{handle:08x}"),
+                handle: handle_hex(handle as usize),
                 label: Some(handle_label.clone()),
                 values: values.clone(),
                 origin: origin_fields(origin.as_ref()),
@@ -159,7 +159,7 @@ pub(crate) unsafe fn trace_lua_getglobal(name: *const c_char) -> LuaObject {
         remember_handle_label(handle, handle_label.clone());
         log_event(LuaEvent::GetGlobal {
             name: label.clone(),
-            handle: format!("0x{handle:08x}"),
+            handle: handle_hex(handle as usize),
             label: handle_label,
             count,
         });

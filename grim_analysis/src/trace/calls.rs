@@ -12,8 +12,8 @@ use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 
 use super::{
-    callfunction_tracker, origin_fields, record_non_push_event, remember_handle_label_if_missing,
-    resolve_lua_function_label,
+    callfunction_tracker, handle_hex, origin_fields, record_non_push_event,
+    remember_handle_label_if_missing, resolve_lua_function_label, LOG_PREVIEW_MAX_LEN,
 };
 
 /// Normalizes optional integer returns, logging when symbols are missing.
@@ -43,7 +43,7 @@ pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
 pub(crate) unsafe fn trace_lua_dostring(chunk: *const c_char) -> c_int {
     record_non_push_event();
     let snippet = cstr_opt(chunk)
-        .map(|s| truncate_for_log(&s, 80))
+        .map(|s| truncate_for_log(&s, LOG_PREVIEW_MAX_LEN))
         .unwrap_or_else(|| "<null>".to_string());
     telemetry::observe_lua_activity();
     log_event(LuaEvent::Dostring { snippet });
@@ -80,7 +80,7 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
     if let Ok(mut tracker) = callfunction_tracker().lock() {
         let sample = tracker.record(handle, &label);
         log_event(LuaEvent::CallFunc {
-            handle: format!("0x{handle:08x}"),
+            handle: handle_hex(handle as usize),
             label: label.clone(),
             calls: Some(sample.count),
             note: None,
@@ -89,7 +89,7 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
     } else {
         log_line("lua_callfunction tracker mutex poisoned; falling back to minimal log");
         log_event(LuaEvent::CallFunc {
-            handle: format!("0x{handle:08x}"),
+            handle: handle_hex(handle as usize),
             label: label.clone(),
             calls: None,
             note: Some("tracker_poisoned".to_string()),

@@ -8,7 +8,9 @@ use std::{
     mem::MaybeUninit,
 };
 
-use super::{caller_origin_fields, origin_fields, record_non_push_event, ClosureOrigin};
+use super::{
+    caller_origin_fields, handle_hex, origin_fields, record_non_push_event, ClosureOrigin,
+};
 
 const MAX_OPENLIB_ENTRIES: usize = 256;
 const MAX_NAME_BYTES: usize = 256;
@@ -35,8 +37,8 @@ pub(crate) unsafe fn trace_lua_openlib(
         let origin = origin_fields(Some(&entry.origin));
         log_event(LuaEvent::RegisterNative {
             name: entry.name,
-            handle: handle.unwrap_or_else(|| format!("0x{func_addr:08x}")),
-            func: format!("0x{func_addr:08x}"),
+            handle: handle.unwrap_or_else(|| handle_hex(func_addr)),
+            func: handle_hex(func_addr),
             upvalues: nup,
             origin,
             caller: caller.clone(),
@@ -102,7 +104,7 @@ unsafe fn resolve_registered_handle(
     if !libname.is_null() || entry.name_ptr.is_null() {
         return None;
     }
-    call_real_lua_getglobal(entry.name_ptr).map(|handle: LuaObject| format!("0x{handle:08x}"))
+    call_real_lua_getglobal(entry.name_ptr).map(|handle: LuaObject| handle_hex(handle as usize))
 }
 
 /// Returns true when the pointer appears to live inside a mapped module.

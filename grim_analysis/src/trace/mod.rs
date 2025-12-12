@@ -28,6 +28,8 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+pub(crate) use grim_telemetry_common::trace_utils::{handle_hex, LOG_PREVIEW_MAX_LEN};
+
 mod calls;
 mod globals;
 mod openlib;
@@ -123,7 +125,7 @@ fn emit_set_table_entry(
         Some(handle) => handle,
         None => return,
     };
-    let table_handle_hex = format!("0x{handle:08x}");
+    let table_handle_hex = handle_hex(handle as usize);
     let table_handle_label = handle_label_for(handle);
     let table_fields = describe_lua_value(handle)
         .map(|value| value_fields_from_details(&value))
@@ -137,7 +139,7 @@ fn emit_set_table_entry(
     let value_push = pushes.last().unwrap();
     let value_handle = value_push
         .handle
-        .map(|value_handle| format!("0x{value_handle:08x}"));
+        .map(|value_handle| handle_hex(value_handle as usize));
     let value_handle_label = value_push.handle.and_then(handle_label_for);
     let value_fields = value_push
         .handle
@@ -179,7 +181,7 @@ fn emit_registered_global(
     let origin_fields = origin_fields(origin.as_ref());
     log_semantic_event(LuaSemanticEvent::SemanticBindGlobal {
         name: name.to_string(),
-        handle: format!("0x{handle:08x}"),
+        handle: handle_hex(handle as usize),
         label: Some(label.clone()),
         values: values.clone(),
         upvalues: Some(upvalues),
@@ -198,7 +200,7 @@ fn emit_registered_constant(
     let origin_fields = origin_fields(origin.as_ref());
     log_semantic_event(LuaSemanticEvent::SemanticBindConstant {
         name: name.to_string(),
-        handle: format!("0x{handle:08x}"),
+        handle: handle_hex(handle as usize),
         label: Some(label.clone()),
         values: values.clone(),
         origin: origin_fields.clone(),
@@ -298,7 +300,7 @@ fn value_meta_from_details(value: &ValueDetails) -> ValueMeta {
         ValueDetails::String(text) => ValueMeta {
             kind: ValueType::String,
             value_len: Some(text.len()),
-            preview: Some(truncate_for_log(text, 80)),
+            preview: Some(truncate_for_log(text, LOG_PREVIEW_MAX_LEN)),
             ..ValueMeta::default()
         },
         ValueDetails::Nil => ValueMeta {
@@ -318,7 +320,7 @@ fn value_meta_from_details(value: &ValueDetails) -> ValueMeta {
         ValueDetails::CFunction { tag, func } => ValueMeta {
             kind: ValueType::Cfunction,
             tag: *tag,
-            func: func.map(|addr| format!("0x{addr:08x}")),
+            func: func.map(|addr| handle_hex(addr)),
             ..ValueMeta::default()
         },
         ValueDetails::Userdata { tag } => ValueMeta {
@@ -360,7 +362,7 @@ enum ValueDetails {
 fn origin_fields(origin: Option<&ClosureOrigin>) -> OriginFields {
     let mut fields = OriginFields::default();
     if let Some(origin) = origin {
-        fields.origin = Some(format!("0x{addr:08x}", addr = origin.func_addr));
+        fields.origin = Some(handle_hex(origin.func_addr));
         if let Some(module) = &origin.module {
             fields.module = Some(module.clone());
         }
@@ -661,12 +663,12 @@ fn resolve_lua_function_label(handle: LuaObject) -> String {
                 return format!("function:{name}");
             }
             (Some(kind), None) if !kind.is_empty() => {
-                return format!("{kind} handle=0x{handle:08x}");
+                return format!("{kind} handle={}", handle_hex(handle as usize));
             }
             _ => {}
         }
     }
-    format!("handle=0x{handle:08x}")
+    format!("handle={}", handle_hex(handle as usize))
 }
 
 /// Singleton accessor for the callfunction tracker.

@@ -10,7 +10,7 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_event, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
+    handle_hex, log_event, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
     normalize_handle, origin_fields_for_ptr, ptr_to_handle, register_table_label, table_label,
 };
 
@@ -207,7 +207,7 @@ fn install_fallback_globals<'lua>(
             Some(
                 preferred_handle
                     .clone()
-                    .unwrap_or_else(|| format!("0x{:08x}", next_fabricated_handle().raw as u32)),
+                    .unwrap_or_else(|| handle_hex(next_fabricated_handle().raw as usize)),
             ),
         );
         let handle = preferred_handle.unwrap_or(fabricated);

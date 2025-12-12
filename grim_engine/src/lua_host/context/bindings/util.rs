@@ -2,8 +2,8 @@ use std::cell::RefCell;
 
 use grim_telemetry_common::{
     trace_utils::{
-        format_number_for_log, truncate_for_log, upvalue_preview_from_meta, value_fields_from_meta,
-        ValueMeta,
+        format_number_for_log, handle_hex, truncate_for_log, upvalue_preview_from_meta,
+        value_fields_from_meta, ValueMeta, LOG_PREVIEW_MAX_LEN,
     },
     OriginFields, UpvaluePreview, ValueFields, ValueType,
 };
@@ -152,7 +152,7 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
         Value::String(text) => {
             let bytes = text.as_bytes();
             let rendered = String::from_utf8_lossy(bytes).into_owned();
-            let preview = truncate_for_log(&rendered, 80);
+            let preview = truncate_for_log(&rendered, LOG_PREVIEW_MAX_LEN);
             log_push_string(bytes.len(), preview);
         }
         Value::Table(_) => {
@@ -263,7 +263,7 @@ fn value_meta_from_lua(value: &Value) -> ValueMeta {
             ValueMeta {
                 kind: ValueType::String,
                 value_len: Some(text.as_bytes().len()),
-                preview: Some(truncate_for_log(&rendered, 80)),
+                preview: Some(truncate_for_log(&rendered, LOG_PREVIEW_MAX_LEN)),
                 ..ValueMeta::default()
             }
         }
@@ -281,7 +281,7 @@ fn value_meta_from_lua(value: &Value) -> ValueMeta {
             let ptr = func.to_pointer();
             ValueMeta {
                 kind,
-                func: Some(format!("0x{:08x}", ptr as usize)),
+                func: Some(handle_hex(ptr as usize)),
                 ..ValueMeta::default()
             }
         }

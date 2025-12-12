@@ -29,6 +29,7 @@ Guidance for contributors working on retail/engine parity. The goal is to **recr
 - Engine instrumentation lives in `grim_engine/src/lua_host/telemetry.rs`; prefer its shared helpers (`caller_origin_fields`, `origin_fields_for_ptr`) over ad-hoc origin handling so semantic/raw streams stay comparable to retail.
 - Retail shim instrumentation lives in `grim_analysis/src/trace`; it uses the same helpers and symbol map fallback for unresolved symbols.
 - Shared telemetry utilities live in `grim_telemetry_common/src/trace_utils.rs`; use `is_runtime_frame` as the baseline skip list before adding crate-specific skips to keep caller attribution consistent.
+- Handle formatting and preview length helpers are centralized in `grim_telemetry_common::trace_utils` (`handle_hex`, `LOG_PREVIEW_MAX_LEN`) so tweaks stay in sync across the engine and retail shim.
 
 ## When adding fixes
 - Keep changes tightly scoped to the observed divergence; avoid opportunistic refactors in the same PR so parity work stays reviewable.

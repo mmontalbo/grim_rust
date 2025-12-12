@@ -13,9 +13,9 @@ use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 
 use super::{
-    caller_origin_fields, describe_lua_value, log_event_with_seq, origin_fields,
+    caller_origin_fields, describe_lua_value, handle_hex, log_event_with_seq, origin_fields,
     record_push_preview, remember_registered_global_candidate, upvalue_preview_from_details,
-    value_fields_from_details, ClosureOrigin,
+    value_fields_from_details, ClosureOrigin, LOG_PREVIEW_MAX_LEN,
 };
 use grim_telemetry_common::trace_utils::{format_number_for_log, truncate_for_log};
 
@@ -26,7 +26,7 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
     let caller = caller_origin_fields();
     let event = LuaEvent::PushCclosure {
         name: label.to_string(),
-        func: format!("0x{func_addr:08x}"),
+        func: handle_hex(func_addr),
         upvalues,
         origin: origin_fields(origin.as_ref()),
         caller,
@@ -36,7 +36,7 @@ pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upv
         closure_log_seq,
         UpvaluePreview {
             kind: ValueType::Cfunction,
-            value: Some(format!("0x{func_addr:08x}")),
+            value: Some(handle_hex(func_addr)),
             value_len: None,
             preview: None,
             tag: None,
@@ -98,7 +98,7 @@ pub(crate) unsafe fn trace_lua_pushnil() {
 /// Traces pushing a NUL-terminated string.
 pub(crate) unsafe fn trace_lua_pushstring(value: *const c_char) {
     let text = cstr_opt(value).unwrap_or_else(|| "<null>".to_string());
-    let preview = truncate_for_log(&text, 80);
+    let preview = truncate_for_log(&text, LOG_PREVIEW_MAX_LEN);
     let log_seq = log_event_with_seq(LuaEvent::PushString {
         len: text.len(),
         preview: preview.clone(),
@@ -127,7 +127,7 @@ pub(crate) unsafe fn trace_lua_pushlstring(value: *const c_char, len: size_t) {
         let bytes = std::slice::from_raw_parts(value as *const u8, len);
         String::from_utf8_lossy(bytes).into_owned()
     };
-    let preview = truncate_for_log(&text, 80);
+    let preview = truncate_for_log(&text, LOG_PREVIEW_MAX_LEN);
     let log_seq = log_event_with_seq(LuaEvent::PushLstring {
         len,
         preview: preview.clone(),
@@ -181,7 +181,7 @@ pub(crate) unsafe fn trace_lua_pushobject(object: LuaObject) {
         .map(value_fields_from_details)
         .unwrap_or_default();
     let log_seq = log_event_with_seq(LuaEvent::PushObject {
-        handle: format!("0x{object:08x}"),
+        handle: handle_hex(object as usize),
         values,
     });
     if let Some(preview) = value_details.as_ref().map(upvalue_preview_from_details) {

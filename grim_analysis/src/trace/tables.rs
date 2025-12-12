@@ -7,8 +7,8 @@ use crate::{
 };
 
 use super::{
-    caller_origin_fields, describe_lua_value, emit_set_table_entry, record_non_push_event,
-    take_recent_pushes, value_fields_from_details,
+    caller_origin_fields, describe_lua_value, emit_set_table_entry, handle_hex,
+    record_non_push_event, take_recent_pushes, value_fields_from_details,
 };
 
 /// Traces table creation and records the resulting handle metadata.
@@ -21,7 +21,7 @@ pub(crate) unsafe fn trace_lua_createtable() -> LuaObject {
                 .map(|value| value_fields_from_details(&value))
                 .unwrap_or_default();
             log_event(LuaEvent::CreateTable {
-                handle: format!("0x{handle:08x}"),
+                handle: handle_hex(handle as usize),
                 values,
                 caller,
             });
@@ -88,7 +88,7 @@ pub(crate) unsafe fn trace_lua_gettable() -> LuaObject {
                 .map(|value| value_fields_from_details(&value))
                 .unwrap_or_default();
             log_event(LuaEvent::GetTable {
-                handle: format!("0x{handle:08x}"),
+                handle: handle_hex(handle as usize),
                 values,
             });
             handle
@@ -109,7 +109,7 @@ pub(crate) unsafe fn trace_lua_rawgettable() -> LuaObject {
                 .map(|value| value_fields_from_details(&value))
                 .unwrap_or_default();
             log_event(LuaEvent::RawgetTable {
-                handle: format!("0x{handle:08x}"),
+                handle: handle_hex(handle as usize),
                 values,
             });
             handle

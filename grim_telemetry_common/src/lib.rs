@@ -1,3 +1,4 @@
+use crate::trace_utils::handle_hex;
 use libc::pid_t;
 use serde::{
     de::{self, Deserializer, Visitor},
@@ -492,7 +493,7 @@ fn serialize_pointer_hex<S>(value: &i32, serializer: S) -> Result<S::Ok, S::Erro
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("0x{addr:08x}", addr = *value as u32))
+    serializer.serialize_str(&handle_hex(*value as usize))
 }
 
 fn deserialize_pointer_hex<'de, D>(deserializer: D) -> Result<i32, D::Error>

@@ -18,7 +18,7 @@ use grim_telemetry_common::{
 
 // Re-export common helpers so callers keep using the telemetry module surface.
 pub(crate) use grim_telemetry_common::trace_utils::{
-    ptr_to_handle, register_table_label, table_label,
+    handle_hex, ptr_to_handle, register_table_label, table_label,
 };
 
 const ENGINE_ID: &str = "grim_engine";
@@ -390,12 +390,12 @@ fn stable_fabricated_handle(label: &str) -> String {
             .entry(label.to_string())
             .or_insert_with(|| {
                 let next = FABRICATED_HANDLE.fetch_add(1, Ordering::Relaxed);
-                format!("0x{next:08x}")
+                handle_hex(next as usize)
             })
             .clone();
     }
     let next = FABRICATED_HANDLE.fetch_add(1, Ordering::Relaxed);
-    format!("0x{next:08x}")
+    handle_hex(next as usize)
 }
 
 fn caller_origin_fields() -> OriginFields {

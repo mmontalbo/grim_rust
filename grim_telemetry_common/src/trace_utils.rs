@@ -8,6 +8,9 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+/// Default maximum length for value previews in telemetry logs.
+pub const LOG_PREVIEW_MAX_LEN: usize = 80;
+
 /// Details about a resolved closure/function pointer.
 #[derive(Clone, Debug)]
 pub struct ClosureDetails {
@@ -19,7 +22,12 @@ pub struct ClosureDetails {
 
 /// Formats a pointer value into the canonical hex handle representation.
 pub fn ptr_to_handle(ptr: *const c_void) -> String {
-    format!("0x{:08x}", ptr as usize)
+    handle_hex(ptr as usize)
+}
+
+/// Formats an address/handle into the canonical hex string representation.
+pub fn handle_hex(handle: usize) -> String {
+    format!("0x{handle:08x}")
 }
 
 /// Converts a potentially null C string into an owned `String`.
@@ -122,7 +130,7 @@ pub fn caller_origin_fields(
 /// Builds `OriginFields` from resolved closure details.
 pub fn origin_fields_from_details(details: &ClosureDetails) -> OriginFields {
     let mut fields = OriginFields::default();
-    fields.origin = Some(format!("0x{:08x}", details.address as usize));
+    fields.origin = Some(handle_hex(details.address));
     if let Some(module) = details.module.as_ref() {
         fields.module = Some(module.clone());
     }
@@ -272,7 +280,7 @@ pub fn value_fields_from_string(text: &str) -> ValueFields {
     ValueFields {
         value_type: Some(ValueType::String),
         value_len: Some(text.len()),
-        value_preview: Some(truncate_for_log(text, 80)),
+        value_preview: Some(truncate_for_log(text, LOG_PREVIEW_MAX_LEN)),
         ..ValueFields::default()
     }
 }
