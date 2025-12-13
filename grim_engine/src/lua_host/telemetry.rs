@@ -34,7 +34,7 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     vm_id: VM_ID,
     log_env_vars: &["GRIM_ENGINE_LOG"],
     line_prefix: "grim_engine",
-    run_id_env: None,
+    run_id_env: Some("GRCTL_RUN_ID"),
 });
 
 pub(crate) fn log_event(event: impl Into<EventBuilder>) {
@@ -57,12 +57,28 @@ pub(crate) fn log_dofile(path: &str) {
     });
 }
 
-pub(crate) fn log_engine_exit(status: &str, note: Option<&str>) {
+pub(crate) fn log_engine_exit(
+    status: &str,
+    note: Option<&str>,
+    code: Option<i32>,
+    signal: Option<i32>,
+    cause: Option<&str>,
+) {
     let mut builder = EventBuilder::new("engine_exit")
         .kv("status", status)
-        .kv("stream", "semantic");
+        .kv("stream", "semantic")
+        .kv("component", ENGINE_ID);
     if let Some(text) = note {
         builder = builder.kv("note", text);
+    }
+    if let Some(code) = code {
+        builder = builder.kv("code", code);
+    }
+    if let Some(signal) = signal {
+        builder = builder.kv("signal", signal);
+    }
+    if let Some(text) = cause {
+        builder = builder.kv("cause", text);
     }
     log_event(builder);
 }

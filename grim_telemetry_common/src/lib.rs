@@ -274,7 +274,7 @@ fn stream_kind_from_object(obj: &JsonMap<String, JsonValue>) -> StreamKind {
         return StreamKind::from_field(stream);
     }
     if let Some(event) = obj.get("event").and_then(|v| v.as_str()) {
-        if event.starts_with("semantic_") || event == "component_exit" || event == "engine_exit" {
+        if event.starts_with("semantic_") || event == "engine_exit" {
             return StreamKind::Semantic;
         }
     }

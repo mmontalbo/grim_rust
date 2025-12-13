@@ -56,6 +56,7 @@ impl LogEntry {
                     | "stream"
                     | "cause"
                     | "engine"
+                    | "component"
                     | "vm_id"
                     | "logger"
                     | "run_id"
@@ -206,7 +207,7 @@ fn stream_from_object(event: &str, object: &JsonMap<String, JsonValue>) -> Strea
     if let Some(stream) = object.get("stream").and_then(|v| v.as_str()) {
         return StreamKind::from_field(stream);
     }
-    if event.starts_with("semantic_") || event == "component_exit" || event == "engine_exit" {
+    if event.starts_with("semantic_") || event == "engine_exit" {
         return StreamKind::Semantic;
     }
     StreamKind::Other
@@ -307,25 +308,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_component_exit_as_semantic() {
-        let line = r#"{"seq":"000010","event":"component_exit","status":"exit_code","code":1,"note":"boom","stream":"semantic"}"#;
+    fn parses_engine_exit_as_semantic() {
+        let line = r#"{"seq":"000010","event":"engine_exit","status":"exit_code","code":1,"note":"boom","stream":"semantic"}"#;
         let entry = parse_line(line).expect("should parse");
         assert_eq!(entry.stream, StreamKind::Semantic);
-        assert_eq!(entry.display_event(), "component_exit");
+        assert_eq!(entry.display_event(), "engine_exit");
         assert_eq!(entry.seq_min, 10);
         assert!(entry.summary.contains("status=exit_code"));
     }
 
     #[test]
     fn omits_cause_from_summary() {
-        let line = r#"{"seq":"000011","event":"component_exit","status":"unknown","note":"oops","cause":"Caused by: runtime error","stream":"semantic"}"#;
+        let line = r#"{"seq":"000011","event":"engine_exit","status":"unknown","note":"oops","cause":"Caused by: runtime error","stream":"semantic"}"#;
         let entry = parse_line(line).expect("should parse");
         assert!(!entry.summary.contains("cause="));
     }
 
     #[test]
     fn keeps_cause_with_pipes_when_metadata_present() {
-        let line = r#"{"seq":"000012","event":"component_exit","status":"exit_code","cause":"Caused by: | runtime error: boom | stack traceback:","stream":"semantic","wall_ts":"123","pid":1,"tid":2}"#;
+        let line = r#"{"seq":"000012","event":"engine_exit","status":"exit_code","cause":"Caused by: | runtime error: boom | stack traceback:","stream":"semantic","wall_ts":"123","pid":1,"tid":2}"#;
         let entry = parse_line(line).expect("should parse");
         let cause = entry.field_value("cause").expect("cause");
         assert!(cause.contains("runtime error: boom"));

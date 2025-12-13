@@ -13,8 +13,14 @@ use anyhow::{Context, Result};
 use grim_telemetry_common::EventBuilder;
 use mlua::{Lua, LuaOptions, StdLib, Table, Value};
 
-pub fn log_engine_exit(status: &str, note: Option<&str>) {
-    telemetry::log_engine_exit(status, note);
+pub fn log_engine_exit(
+    status: &str,
+    note: Option<&str>,
+    code: Option<i32>,
+    signal: Option<i32>,
+    cause: Option<&str>,
+) {
+    telemetry::log_engine_exit(status, note, code, signal, cause);
 }
 
 fn run_phase<T>(name: &str, phase: impl FnOnce() -> Result<T>) -> Result<T> {
