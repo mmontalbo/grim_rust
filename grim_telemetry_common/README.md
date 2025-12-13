@@ -14,6 +14,16 @@ stream; use their `--raw` / `--stream raw` switches to opt in to the raw view.
 For the wider Lua API goals and telemetry background, see
 `docs/lua_native_api.md`.
 
+## Sequence numbers
+
+Each telemetry line carries two counters:
+
+- `seq` counts events within the tagged stream (`raw` or `semantic`).
+- `log_seq` is the overall emission order across all streams.
+
+Viewers prefer the stream-specific `seq` so raw and semantic numbering stay
+independent.
+
 Origin and handle helpers in `src/trace_utils.rs` are shared by the engine host
 and retail shim; use `is_runtime_frame` as the baseline skip list and
 `caller_origin_fields`/`origin_fields_for_ptr` to avoid diverging caller

@@ -34,8 +34,16 @@ pub struct TelemetryConfig {
 pub struct TelemetryLogger {
     config: TelemetryConfig,
     sink: OnceLock<LogSink>,
-    event_seq: AtomicU64,
+    log_seq: AtomicU64,
+    raw_seq: AtomicU64,
+    semantic_seq: AtomicU64,
     run_id: OnceLock<Option<String>>,
+}
+
+struct SequenceNumbers {
+    log_seq_display: String,
+    stream_seq: u64,
+    stream_seq_display: String,
 }
 
 impl TelemetryLogger {
@@ -43,14 +51,19 @@ impl TelemetryLogger {
         Self {
             config,
             sink: OnceLock::new(),
-            event_seq: AtomicU64::new(0),
+            log_seq: AtomicU64::new(0),
+            raw_seq: AtomicU64::new(0),
+            semantic_seq: AtomicU64::new(0),
             run_id: OnceLock::new(),
         }
     }
 
     pub fn log_line(&self, message: &str) {
-        let builder = EventBuilder::new("log_line").kv("message", message);
-        let _ = self.log_event_with_seq(builder);
+        if self.config.line_prefix.is_empty() {
+            eprintln!("{message}");
+        } else {
+            eprintln!("[{}] {message}", self.config.line_prefix);
+        }
     }
 
     pub fn log_event(&self, event: impl Into<EventBuilder>) {
@@ -59,32 +72,28 @@ impl TelemetryLogger {
 
     pub fn log_event_with_seq(&self, event: impl Into<EventBuilder>) -> u64 {
         let event = event.into();
-        let seq = self.event_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        self.log_event_with_seq_display(event, format!("{seq:06}"));
-        seq
+        let stream = event.stream_kind();
+        let seqs = self.next_sequences(stream);
+        let stream_seq = seqs.stream_seq;
+        self.log_event_inner(event, seqs);
+        stream_seq
     }
 
-    pub fn log_event_with_seq_display(
-        &self,
-        event: impl Into<EventBuilder>,
-        seq_display: impl Into<String>,
-    ) {
-        self.log_event_inner(event.into(), seq_display.into());
-    }
-
-    pub fn next_seq(&self) -> u64 {
-        self.event_seq.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    fn log_event_inner(&self, event: EventBuilder, seq_display: String) {
+    fn log_event_inner(&self, event: EventBuilder, seqs: SequenceNumbers) {
         let ts = elapsed_millis();
         let run_id = self
             .run_id
             .get_or_init(|| self.config.run_id_env.and_then(|name| env::var(name).ok()))
             .clone()
             .unwrap_or_default();
+        let SequenceNumbers {
+            log_seq_display,
+            stream_seq_display,
+            ..
+        } = seqs;
         let mut object = event.finish();
-        object.insert("seq".to_string(), JsonValue::String(seq_display));
+        object.insert("seq".to_string(), JsonValue::String(stream_seq_display));
+        object.insert("log_seq".to_string(), JsonValue::String(log_seq_display));
         object.insert("ts".to_string(), JsonValue::String(format!("{ts:08}")));
         object.insert(
             "engine".to_string(),
@@ -117,6 +126,21 @@ impl TelemetryLogger {
             .sink
             .get_or_init(|| LogSink::init(self.config.log_env_vars));
         sink.write_json(object);
+    }
+
+    fn next_sequences(&self, stream: StreamKind) -> SequenceNumbers {
+        let log_seq = self.log_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let stream_seq = match stream {
+            StreamKind::Raw => self.raw_seq.fetch_add(1, Ordering::Relaxed) + 1,
+            StreamKind::Semantic => self.semantic_seq.fetch_add(1, Ordering::Relaxed) + 1,
+            StreamKind::Other => log_seq,
+        };
+
+        SequenceNumbers {
+            log_seq_display: format!("{log_seq:06}"),
+            stream_seq,
+            stream_seq_display: format!("{stream_seq:06}"),
+        }
     }
 }
 
@@ -242,6 +266,10 @@ pub fn stream_kind_from_line(line: &str) -> StreamKind {
     let Ok(JsonValue::Object(obj)) = serde_json::from_str::<JsonValue>(line) else {
         return StreamKind::Other;
     };
+    stream_kind_from_object(&obj)
+}
+
+fn stream_kind_from_object(obj: &JsonMap<String, JsonValue>) -> StreamKind {
     if let Some(stream) = obj.get("stream").and_then(|v| v.as_str()) {
         return StreamKind::from_field(stream);
     }
@@ -257,7 +285,18 @@ pub fn parse_seq_field(line: &str) -> Option<SeqRange> {
     let Ok(JsonValue::Object(obj)) = serde_json::from_str::<JsonValue>(line) else {
         return None;
     };
-    let seq_value = obj.get("seq")?;
+    parse_seq_from_object(&obj, "seq")
+}
+
+pub fn parse_log_seq_field(line: &str) -> Option<SeqRange> {
+    let Ok(JsonValue::Object(obj)) = serde_json::from_str::<JsonValue>(line) else {
+        return None;
+    };
+    parse_seq_from_object(&obj, "log_seq")
+}
+
+fn parse_seq_from_object(obj: &JsonMap<String, JsonValue>, key: &str) -> Option<SeqRange> {
+    let seq_value = obj.get(key)?;
     let seq_text = match seq_value {
         JsonValue::String(text) => text.clone(),
         JsonValue::Number(num) => num.to_string(),
@@ -270,13 +309,11 @@ pub fn normalize_seq_for_filter(
     stream: StreamKind,
     seq: SeqRange,
     filter: StreamFilter,
-    semantic_counter: &mut u64,
 ) -> Option<SeqRange> {
     match filter {
         StreamFilter::Semantic => {
             if matches!(stream, StreamKind::Semantic) {
-                *semantic_counter = semantic_counter.saturating_add(1);
-                Some(SeqRange::new(*semantic_counter, *semantic_counter))
+                Some(seq)
             } else {
                 None
             }
@@ -288,14 +325,7 @@ pub fn normalize_seq_for_filter(
                 Some(seq)
             }
         }
-        StreamFilter::All => {
-            if matches!(stream, StreamKind::Semantic) {
-                *semantic_counter = semantic_counter.saturating_add(1);
-                Some(SeqRange::new(*semantic_counter, *semantic_counter))
-            } else {
-                Some(seq)
-            }
-        }
+        StreamFilter::All => Some(seq),
     }
 }
 
@@ -327,6 +357,10 @@ impl EventBuilder {
 
     pub fn finish(self) -> JsonMap<String, JsonValue> {
         self.fields
+    }
+
+    fn stream_kind(&self) -> StreamKind {
+        stream_kind_from_object(&self.fields)
     }
 }
 
@@ -1116,23 +1150,75 @@ mod tests {
 
     #[test]
     fn normalize_seq_handles_filters() {
-        let mut counter = 0;
         let seq = SeqRange::new(5, 5);
-        let semantic = normalize_seq_for_filter(
-            StreamKind::Semantic,
-            seq,
-            StreamFilter::Semantic,
-            &mut counter,
-        )
-        .unwrap();
-        assert_eq!(semantic.min, 1);
-        assert!(normalize_seq_for_filter(
-            StreamKind::Semantic,
-            seq,
-            StreamFilter::Raw,
-            &mut counter
-        )
-        .is_none());
+        let semantic =
+            normalize_seq_for_filter(StreamKind::Semantic, seq, StreamFilter::Semantic).unwrap();
+        assert_eq!(semantic.min, 5);
+        assert!(normalize_seq_for_filter(StreamKind::Semantic, seq, StreamFilter::Raw).is_none());
+    }
+
+    #[test]
+    fn stream_sequences_use_stream_counters() {
+        let path = env::temp_dir().join(format!(
+            "grim_telemetry_seq_test_{}.log",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("timestamp")
+                .as_nanos()
+        ));
+        env::set_var("GRIM_TELEMETRY_TEST_LOG", &path);
+        let logger = TelemetryLogger::new(TelemetryConfig {
+            engine_id: "test_engine",
+            vm_id: "test_vm",
+            log_env_vars: &["GRIM_TELEMETRY_TEST_LOG"],
+            line_prefix: "test",
+            run_id_env: None,
+        });
+
+        let raw_seq1 = logger.log_event_with_seq(LuaEvent::CollectGarbage {});
+        let semantic_seq = logger.log_event_with_seq(LuaSemanticEvent::SemanticTagAlias {
+            tag: 1,
+            alias: "alias".to_string(),
+            origin: OriginFields::default(),
+        });
+        let raw_seq2 = logger.log_event_with_seq(LuaEvent::CollectGarbage {});
+
+        let contents = std::fs::read_to_string(&path).expect("read log file");
+        let mut lines = contents.lines();
+        let raw_line: serde_json::Value =
+            serde_json::from_str(lines.next().expect("raw line")).expect("raw json");
+        let semantic_line: serde_json::Value =
+            serde_json::from_str(lines.next().expect("semantic line")).expect("semantic json");
+        let raw_line_2: serde_json::Value =
+            serde_json::from_str(lines.next().expect("second raw line")).expect("raw json");
+
+        assert_eq!(raw_seq1, 1);
+        assert_eq!(semantic_seq, 1);
+        assert_eq!(raw_seq2, 2);
+        assert_eq!(raw_line.get("seq").and_then(|v| v.as_str()), Some("000001"));
+        assert_eq!(
+            raw_line.get("log_seq").and_then(|v| v.as_str()),
+            Some("000001")
+        );
+        assert_eq!(
+            semantic_line.get("seq").and_then(|v| v.as_str()),
+            Some("000001")
+        );
+        assert_eq!(
+            semantic_line.get("log_seq").and_then(|v| v.as_str()),
+            Some("000002")
+        );
+        assert_eq!(
+            raw_line_2.get("seq").and_then(|v| v.as_str()),
+            Some("000002")
+        );
+        assert_eq!(
+            raw_line_2.get("log_seq").and_then(|v| v.as_str()),
+            Some("000003")
+        );
+
+        let _ = std::fs::remove_file(&path);
+        env::remove_var("GRIM_TELEMETRY_TEST_LOG");
     }
 
     #[test]

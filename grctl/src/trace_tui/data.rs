@@ -22,6 +22,7 @@ pub struct LogEntry {
     pub orig_seq_display: String,
     pub orig_seq_min: u64,
     pub orig_seq_max: u64,
+    pub has_log_seq: bool,
     pub event: String,
     pub stream: StreamKind,
     pub fields: Vec<Field>,
@@ -51,6 +52,7 @@ impl LogEntry {
                 field.key.as_str(),
                 "event"
                     | "seq"
+                    | "log_seq"
                     | "stream"
                     | "cause"
                     | "engine"
@@ -166,8 +168,10 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
     let stream = stream_from_object(&event, object);
     let seq_display = render_seq(object.get("seq")?)?;
     let seq_range = parse_seq_range(&seq_display)?;
-    let seq_min = seq_range.min;
-    let seq_max = seq_range.max;
+    let log_seq_rendered = object.get("log_seq").and_then(render_seq);
+    let has_log_seq = log_seq_rendered.is_some();
+    let log_seq_display = log_seq_rendered.unwrap_or_else(|| seq_display.clone());
+    let log_seq_range = parse_seq_range(&log_seq_display).unwrap_or(seq_range);
 
     let mut fields = Vec::with_capacity(object.len());
     let mut keys: Vec<_> = object.keys().collect();
@@ -183,11 +187,12 @@ fn parse_line(raw: &str) -> Option<LogEntry> {
 
     let mut entry = LogEntry {
         seq_display: seq_display.clone(),
-        seq_min,
-        seq_max,
-        orig_seq_display: seq_display,
-        orig_seq_min: seq_min,
-        orig_seq_max: seq_max,
+        seq_min: seq_range.min,
+        seq_max: seq_range.max,
+        orig_seq_display: log_seq_display,
+        orig_seq_min: log_seq_range.min,
+        orig_seq_max: log_seq_range.max,
+        has_log_seq,
         event,
         stream,
         fields,
@@ -228,20 +233,26 @@ fn render_value(value: &JsonValue) -> String {
 }
 
 fn assign_stream_sequences(entries: &mut [LogEntry]) {
+    if entries.iter().all(|entry| entry.has_log_seq) {
+        return;
+    }
+
+    let mut raw_seq = 0u64;
     let mut semantic_seq = 0u64;
 
     for entry in entries.iter_mut() {
         match entry.stream {
+            StreamKind::Raw | StreamKind::Other => {
+                raw_seq = raw_seq.saturating_add(1);
+                entry.seq_display = format!("{raw_seq:06}");
+                entry.seq_min = raw_seq;
+                entry.seq_max = raw_seq;
+            }
             StreamKind::Semantic => {
                 semantic_seq = semantic_seq.saturating_add(1);
                 entry.seq_display = format!("{semantic_seq:06}");
                 entry.seq_min = semantic_seq;
                 entry.seq_max = semantic_seq;
-            }
-            _ => {
-                entry.seq_display = entry.orig_seq_display.clone();
-                entry.seq_min = entry.orig_seq_min;
-                entry.seq_max = entry.orig_seq_max;
             }
         }
     }

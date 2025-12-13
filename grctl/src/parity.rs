@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use grim_telemetry_common::{
-    normalize_seq_for_filter, parse_seq_field, stream_kind_from_line, SeqRange, StreamFilter,
-    StreamKind,
+    normalize_seq_for_filter, parse_log_seq_field, parse_seq_field, stream_kind_from_line,
+    SeqRange, StreamFilter, StreamKind,
 };
 use serde_json::Value as JsonValue;
 
@@ -24,6 +24,31 @@ struct EventLine {
     event: String,
 }
 
+#[derive(Clone, Copy)]
+struct ClassifiedLine {
+    stream: StreamKind,
+    seq: SeqRange,
+    has_log_seq: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SeqCounters {
+    raw: u64,
+    semantic: u64,
+}
+
+impl SeqCounters {
+    fn next_raw(&mut self) -> u64 {
+        self.raw = self.raw.saturating_add(1);
+        self.raw
+    }
+
+    fn next_semantic(&mut self) -> u64 {
+        self.semantic = self.semantic.saturating_add(1);
+        self.semantic
+    }
+}
+
 #[derive(Debug)]
 struct FirstDiff {
     position: usize,
@@ -32,10 +57,53 @@ struct FirstDiff {
     context: Vec<String>,
 }
 
-fn classify_line(line: &str) -> Option<(StreamKind, SeqRange)> {
+fn classify_line(line: &str) -> Option<ClassifiedLine> {
     let stream = stream_kind_from_line(line);
     let seq = parse_seq_field(line)?;
-    Some((stream, seq))
+    let has_log_seq = parse_log_seq_field(line).is_some();
+    Some(ClassifiedLine {
+        stream,
+        seq,
+        has_log_seq,
+    })
+}
+
+fn normalize_classified_seq(
+    classified: &ClassifiedLine,
+    filter: StreamFilter,
+    counters: &mut SeqCounters,
+) -> Option<SeqRange> {
+    if classified.has_log_seq {
+        return normalize_seq_for_filter(classified.stream, classified.seq, filter);
+    }
+
+    match filter {
+        StreamFilter::Semantic => {
+            if matches!(classified.stream, StreamKind::Semantic) {
+                let seq = counters.next_semantic();
+                Some(SeqRange::new(seq, seq))
+            } else {
+                None
+            }
+        }
+        StreamFilter::Raw => {
+            if matches!(classified.stream, StreamKind::Semantic) {
+                None
+            } else {
+                let seq = counters.next_raw();
+                Some(SeqRange::new(seq, seq))
+            }
+        }
+        StreamFilter::All => {
+            if matches!(classified.stream, StreamKind::Semantic) {
+                let seq = counters.next_semantic();
+                Some(SeqRange::new(seq, seq))
+            } else {
+                let seq = counters.next_raw();
+                Some(SeqRange::new(seq, seq))
+            }
+        }
+    }
 }
 
 pub fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
@@ -147,17 +215,16 @@ pub fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
     } else {
         fs::metadata(&retail_log).map(|m| m.len()).unwrap_or(0)
     };
-    let mut engine_sem_seq = if semantic_only && !args.from_start {
-        collect_lines(&engine_log, StreamFilter::Semantic)?.len() as u64
+    let mut engine_counters = if args.from_start {
+        SeqCounters::default()
     } else {
-        0
+        initial_counters(&engine_log)?
     };
-    let mut retail_sem_seq = if semantic_only && !args.from_start {
-        collect_lines(&retail_log, StreamFilter::Semantic)?.len() as u64
+    let mut retail_counters = if args.from_start {
+        SeqCounters::default()
     } else {
-        0
+        initial_counters(&retail_log)?
     };
-
     let poll = Duration::from_millis(args.poll_ms);
     loop {
         let mut new_seqs: BTreeSet<u64> = BTreeSet::new();
@@ -187,8 +254,8 @@ pub fn parity_logs(args: ParityLogsArgs, paths: &Paths) -> Result<()> {
             Err(err) => return Err(err).context(format!("reading {}", retail_log.display())),
         };
 
-        let engine_events = normalize_new_events(engine_lines, stream_filter, &mut engine_sem_seq);
-        let retail_events = normalize_new_events(retail_lines, stream_filter, &mut retail_sem_seq);
+        let engine_events = normalize_new_events(engine_lines, stream_filter, &mut engine_counters);
+        let retail_events = normalize_new_events(retail_lines, stream_filter, &mut retail_counters);
 
         for (seq, line) in engine_events {
             let entry = printed.entry(seq).or_insert((None, None));
@@ -233,18 +300,39 @@ fn resolve_parity_run_id(paths: &Paths, selection: &RunSelection) -> Result<Stri
     }
 }
 
+fn initial_counters(path: &Path) -> Result<SeqCounters> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(SeqCounters::default()),
+        Err(err) => return Err(err).context(format!("opening {}", path.display())),
+    };
+    let reader = BufReader::new(file);
+    let mut counters = SeqCounters::default();
+    for line in reader.lines() {
+        let line = line?;
+        let Some(classified) = classify_line(&line) else {
+            continue;
+        };
+        if matches!(classified.stream, StreamKind::Semantic) {
+            counters.semantic = counters.semantic.saturating_add(1);
+        } else {
+            counters.raw = counters.raw.saturating_add(1);
+        }
+    }
+    Ok(counters)
+}
+
 fn collect_lines(path: &Path, filter: StreamFilter) -> Result<Vec<(u64, String)>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
-    let mut semantic_seq = 0u64;
+    let mut counters = SeqCounters::default();
     for line in reader.lines() {
         let line = line?;
-        let Some((stream, seq)) = classify_line(&line) else {
+        let Some(classified) = classify_line(&line) else {
             continue;
         };
-        if let Some(display_seq) = normalize_seq_for_filter(stream, seq, filter, &mut semantic_seq)
-        {
+        if let Some(display_seq) = normalize_classified_seq(&classified, filter, &mut counters) {
             entries.push((display_seq.min, line));
         }
     }
@@ -497,14 +585,14 @@ fn read_new_lines(path: &Path, position: &mut u64) -> io::Result<Vec<String>> {
 fn normalize_new_events(
     lines: Vec<String>,
     filter: StreamFilter,
-    semantic_counter: &mut u64,
+    counters: &mut SeqCounters,
 ) -> Vec<(u64, String)> {
     let mut events = Vec::new();
     for line in lines {
-        let Some((stream, seq_range)) = classify_line(&line) else {
+        let Some(classified) = classify_line(&line) else {
             continue;
         };
-        if let Some(seq) = normalize_seq_for_filter(stream, seq_range, filter, semantic_counter) {
+        if let Some(seq) = normalize_classified_seq(&classified, filter, counters) {
             events.push((seq.min, line));
         }
     }

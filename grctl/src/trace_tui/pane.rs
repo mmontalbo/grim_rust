@@ -50,7 +50,7 @@ impl Pane {
             if let Some(pos) = self
                 .visible_indices
                 .iter()
-                .position(|idx| self.entries[*idx].seq_min == seq)
+                .position(|idx| self.entries[*idx].orig_seq_min == seq)
             {
                 self.selected = pos;
                 self.sync_state();
@@ -515,7 +515,7 @@ fn detail_text(entry: &LogEntry, parity: Option<&ParityStatus>) -> Text<'static>
 
     let mut lines: Vec<Line> = Vec::new();
     for field in entry.fields.iter() {
-        if field.key == "seq" || field.key == "event" {
+        if field.key == "seq" || field.key == "log_seq" || field.key == "event" {
             continue;
         }
         if field.key == "cause" {
