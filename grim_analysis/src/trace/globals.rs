@@ -12,7 +12,8 @@ use std::ffi::c_void;
 use super::{
     callfunction_tracker, describe_lua_value, emit_registered_constant, emit_registered_global,
     handle_hex, origin_fields, record_non_push_event, remember_handle_label,
-    take_registered_global_candidate, value_fields_from_details, ClosureOrigin,
+    remember_ref_alias_candidate, take_registered_global_candidate, value_fields_from_details,
+    ClosureOrigin,
 };
 
 /// Traces a raw global read (no metamethods) and records the returned handle/value.
@@ -65,6 +66,9 @@ pub(crate) unsafe fn trace_lua_rawsetglobal(name: *const c_char) {
     } else {
         note = Some("lua_rawsetglobal_missing".to_string());
     }
+    if note.is_none() {
+        remember_ref_alias_candidate(label.clone());
+    }
     log_event(LuaEvent::RawSetGlobal {
         name: label,
         handle: handle_field,
@@ -115,10 +119,11 @@ pub(crate) unsafe fn trace_lua_setglobal(name: *const c_char) {
                 origin: origin_fields(origin.as_ref()),
                 caller: caller.clone(),
             });
+            remember_ref_alias_candidate(label.clone());
 
             if is_closure {
                 // If this closure was just pushed, consume the pending candidate to emit a
-                // SemanticBindGlobal (with upvalue count + origin) instead of a constant bind.
+                // SemanticBindGlobalClosure (with upvalue count + origin) instead of a constant bind.
                 if let Some(func_addr) = func_ptr.map(|func| func as *const c_void as usize) {
                     if let Some(mut candidate) = take_registered_global_candidate(func_addr) {
                         let merged_origin = candidate.origin.take().or(origin.clone());

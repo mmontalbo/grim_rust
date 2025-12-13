@@ -569,6 +569,8 @@ pub struct ValueFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub func: Option<String>,
 }
 
@@ -588,7 +590,8 @@ pub struct UpvaluePreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LuaSemanticEvent {
-    SemanticBindGlobal {
+    #[serde(rename = "semantic_bind_global_closure")]
+    SemanticBindGlobalClosure {
         name: String,
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -600,7 +603,8 @@ pub enum LuaSemanticEvent {
         #[serde(flatten)]
         origin: OriginFields,
     },
-    SemanticBindConstant {
+    #[serde(rename = "semantic_bind_global_constant")]
+    SemanticBindGlobalConstant {
         name: String,
         handle: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -629,6 +633,14 @@ pub enum LuaSemanticEvent {
         #[serde(rename = "caller")]
         caller: OriginFields,
     },
+    #[serde(rename = "semantic_tag_alias")]
+    SemanticTagAlias {
+        tag: i32,
+        alias: String,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "semantic_ref_store")]
     SemanticStoreRef {
         lock: i32,
         #[serde(rename = "ref")]
@@ -638,13 +650,18 @@ pub enum LuaSemanticEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_kind: Option<ValueType>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         value_fields: Option<ValueFields>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         #[serde(flatten)]
         origin: OriginFields,
     },
-    SemanticFetchRef {
+    #[serde(rename = "semantic_ref_load")]
+    SemanticLoadRef {
         #[serde(rename = "ref")]
         reference: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -652,15 +669,32 @@ pub enum LuaSemanticEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_kind: Option<ValueType>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         #[serde(flatten)]
         origin: OriginFields,
     },
+    #[serde(rename = "semantic_ref_unref")]
     SemanticUnref {
         #[serde(rename = "ref")]
         reference: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_kind: Option<ValueType>,
+        #[serde(flatten)]
+        origin: OriginFields,
+    },
+    #[serde(rename = "semantic_ref_batch")]
+    SemanticRefBatch {
+        kind: String,
+        count: u32,
+        start_ref: i32,
     },
     SemanticSetFallback {
         fallback: String,
@@ -679,6 +713,8 @@ pub enum LuaSemanticEvent {
         handle: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag_alias: Option<String>,
         #[serde(flatten)]
         origin: OriginFields,
     },
@@ -734,6 +770,12 @@ pub enum LuaEvent {
         calls: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+        ref_id: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ref_alias: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ref_value_kind: Option<ValueType>,
         #[serde(flatten)]
         origin: OriginFields,
     },
@@ -793,13 +835,17 @@ pub enum LuaEvent {
         polls: Option<u64>,
     },
     #[serde(rename = "lua_getref")]
-    FetchRef {
+    LoadRef {
         #[serde(rename = "ref")]
         reference: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_kind: Option<ValueType>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         #[serde(flatten)]
@@ -957,6 +1003,8 @@ pub enum LuaEvent {
         tag: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag_alias: Option<String>,
     },
     #[serde(rename = "lua_settagmethod")]
     SetTagmethod {
@@ -966,6 +1014,8 @@ pub enum LuaEvent {
         handle: Option<String>,
         #[serde(flatten)]
         values: ValueFields,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag_alias: Option<String>,
         #[serde(flatten)]
         origin: OriginFields,
     },
@@ -1060,7 +1110,7 @@ mod tests {
     fn stream_detection_prefers_semantic_tag() {
         let raw_line = r#"{"seq":"000001","stream":"raw","event":"lua_pushnil"}"#;
         assert_eq!(stream_kind_from_line(raw_line), StreamKind::Raw);
-        let semantic_line = r#"{"seq":"000002","event":"semantic_bind_global"}"#;
+        let semantic_line = r#"{"seq":"000002","event":"semantic_bind_global_closure"}"#;
         assert_eq!(stream_kind_from_line(semantic_line), StreamKind::Semantic);
     }
 
@@ -1312,7 +1362,7 @@ mod tests {
 
     #[test]
     fn semantic_events_serialize_with_stream() {
-        let event = LuaSemanticEvent::SemanticBindGlobal {
+        let event = LuaSemanticEvent::SemanticBindGlobalClosure {
             name: "foo".to_string(),
             handle: "0x00000002".to_string(),
             label: Some("global:foo".to_string()),
@@ -1327,7 +1377,7 @@ mod tests {
         let fields = EventBuilder::from(event).finish();
         assert_eq!(
             fields.get("event").and_then(|v| v.as_str()),
-            Some("semantic_bind_global")
+            Some("semantic_bind_global_closure")
         );
         assert_eq!(
             fields.get("stream").and_then(|v| v.as_str()),

@@ -84,6 +84,12 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
             label: label.clone(),
             calls: Some(sample.count),
             note: None,
+            ref_id: sample.ref_meta.as_ref().map(|meta| meta.ref_id),
+            ref_alias: sample.ref_meta.as_ref().and_then(|meta| meta.alias.clone()),
+            ref_value_kind: sample
+                .ref_meta
+                .as_ref()
+                .and_then(|meta| meta.value_kind.clone()),
             origin: origin_fields(sample.origin.as_ref()),
         });
     } else {
@@ -93,6 +99,9 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
             label: label.clone(),
             calls: None,
             note: Some("tracker_poisoned".to_string()),
+            ref_id: None,
+            ref_alias: None,
+            ref_value_kind: None,
             origin: OriginFields::default(),
         });
     }

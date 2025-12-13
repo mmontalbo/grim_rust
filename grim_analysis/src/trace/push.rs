@@ -8,7 +8,7 @@ use crate::{
     },
     telemetry,
 };
-use grim_telemetry_common::trace_utils::cstr_opt;
+use grim_telemetry_common::trace_utils::{cstr_opt, tag_alias};
 use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 
@@ -153,6 +153,7 @@ pub(crate) unsafe fn trace_lua_pushusertag(id: c_int, tag: c_int) {
     let values = ValueFields {
         value_type: Some(ValueType::Userdata),
         tag: Some(tag),
+        tag_label: tag_alias(tag),
         ..ValueFields::default()
     };
     let caller = caller_origin_fields();

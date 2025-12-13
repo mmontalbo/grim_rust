@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::lua_host::telemetry::{
-    log_fetch_ref, log_store_ref, normalize_handle, register_table_label,
+    log_load_ref, log_store_ref, normalize_handle, register_table_label,
 };
 
 use super::util::{handle_from_value, value_fields_from_lua};
@@ -19,7 +19,7 @@ pub(crate) struct RegistryRef {
 
 impl RegistryRef {
     pub(crate) fn log_fetch(&self, origin: OriginFields, note: Option<String>) {
-        log_fetch_ref(
+        log_load_ref(
             self.reference,
             self.handle.clone(),
             self.label.clone(),
@@ -183,7 +183,7 @@ impl RefRegistry {
             let value: Value = lua.registry_value(&entry.key)?;
             return T::from_lua(value, lua).map(Some);
         }
-        log_fetch_ref(reference, None, None, note_on_missing, origin);
+        log_load_ref(reference, None, None, note_on_missing, origin);
         Ok(None)
     }
 

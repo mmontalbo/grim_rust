@@ -185,7 +185,52 @@ pub fn semantic_set_table_entry(
     }
 }
 
+static TAG_ALIASES: OnceLock<Mutex<HashMap<i32, String>>> = OnceLock::new();
+static REF_ALIASES: OnceLock<Mutex<HashMap<i32, RefAlias>>> = OnceLock::new();
 static TABLE_LABELS: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Default)]
+pub struct RefAlias {
+    pub alias: Option<String>,
+    pub value_kind: Option<ValueType>,
+}
+
+/// Records a friendly alias for a tag if one is not already present.
+pub fn register_tag_alias(tag: i32, alias: impl Into<String>) {
+    let aliases = TAG_ALIASES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = aliases.lock() {
+        map.entry(tag).or_insert_with(|| alias.into());
+    }
+}
+
+/// Retrieves a recorded alias for a tag, when available.
+pub fn tag_alias(tag: i32) -> Option<String> {
+    TAG_ALIASES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&tag).cloned())
+}
+
+/// Stores alias metadata for a reference, including the value kind when known.
+pub fn remember_ref_alias(reference: i32, alias: Option<String>, value_kind: Option<ValueType>) {
+    if alias.is_none() && value_kind.is_none() {
+        return;
+    }
+    let aliases = REF_ALIASES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = aliases.lock() {
+        map.insert(reference, RefAlias { alias, value_kind });
+    }
+}
+
+/// Fetches the alias/value-kind pair for a reference.
+pub fn ref_alias(reference: i32) -> Option<RefAlias> {
+    REF_ALIASES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&reference).cloned())
+}
 
 /// Registers a human-readable label for a table pointer if one is not already stored.
 pub fn register_table_label(ptr: *const c_void, label: impl Into<String>) {
@@ -261,6 +306,7 @@ pub fn value_fields_from_meta(meta: &ValueMeta) -> ValueFields {
         value_len: meta.value_len,
         value_preview: meta.preview.clone(),
         tag: meta.tag,
+        tag_label: meta.tag.and_then(tag_alias),
         func: meta.func.clone(),
     }
 }

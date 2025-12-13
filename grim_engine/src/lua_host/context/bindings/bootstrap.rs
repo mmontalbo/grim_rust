@@ -18,8 +18,8 @@ use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::{install_legacy_compat, install_legacy_math};
 use super::util::{
     set_global, set_table_entry_with_telemetry, value_fields_from_lua, value_to_string,
-    value_to_upvalue_preview, with_registered_global_hint, with_suppressed_registered_globals,
-    ColorHandle, RegisteredGlobalMeta, TaggedHandle, COLOR_TAG,
+    with_registered_global_hint, with_suppressed_registered_globals, ColorHandle,
+    RegisteredGlobalMeta, TaggedHandle, COLOR_TAG,
 };
 use super::{store_registry_value, PinnedRegistryKeys};
 use crate::lua_host::context::EngineContext;
@@ -632,7 +632,7 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
 
     // Retail fetches the stored system ref before installing default handlers; mirror the fetches without storing the closures.
     let default_cam_change = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-    let cam_change_preview = UpvaluePreview {
+    let _cam_change_preview = UpvaluePreview {
         kind: ValueType::Cfunction,
         value: Some(ptr_to_handle(default_cam_change.to_pointer())),
         value_len: None,
@@ -658,7 +658,7 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
     )?;
 
     let default_control = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
-    let default_control_preview = UpvaluePreview {
+    let _default_control_preview = UpvaluePreview {
         kind: ValueType::Cfunction,
         value: Some(ptr_to_handle(default_control.to_pointer())),
         value_len: None,

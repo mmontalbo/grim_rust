@@ -18,7 +18,7 @@ use crate::{
 };
 use grim_telemetry_common::trace_utils::{
     caller_origin_details, describe_closure_target, format_number_for_log,
-    origin_fields_from_details, semantic_set_table_entry,
+    origin_fields_from_details, ref_alias, remember_ref_alias, semantic_set_table_entry,
     should_skip_caller_frame as common_should_skip_caller_frame, truncate_for_log,
     upvalue_preview_from_meta, value_fields_from_meta, ValueMeta,
 };
@@ -68,6 +68,8 @@ const MAX_PENDING_REGISTERED_GLOBALS: usize = 8;
 static CALLFUNCTION_TRACKER: OnceLock<Mutex<CallfunctionTracker>> = OnceLock::new();
 static GLOBAL_ACCESS_TRACKER: OnceLock<Mutex<GlobalAccessTracker>> = OnceLock::new();
 static HANDLE_LABELS: OnceLock<Mutex<HandleLabelTracker>> = OnceLock::new();
+static REF_ALIAS_TRACKER: OnceLock<Mutex<RefAliasTracker>> = OnceLock::new();
+static REF_BATCH_EXIT_FLUSH: OnceLock<()> = OnceLock::new();
 static PUSH_EVENT_TRACKER: OnceLock<Mutex<PushEventTracker>> = OnceLock::new();
 static REGISTERED_GLOBAL_CANDIDATES: OnceLock<Mutex<RegisteredGlobalTracker>> = OnceLock::new();
 
@@ -85,6 +87,21 @@ fn record_push_preview(log_seq: u64, preview: UpvaluePreview, handle: Option<Lua
 
 /// Clears pending push context when a non-push API call occurs.
 fn record_non_push_event() {
+    record_non_push_event_with_flush(true);
+}
+
+/// Clears push context without flushing pending ref batches (used by lua_ref).
+fn record_non_push_event_skip_ref_batch() {
+    record_non_push_event_with_flush(false);
+}
+
+fn record_non_push_event_with_flush(flush_ref_batch: bool) {
+    if flush_ref_batch {
+        flush_ref_batch_event();
+        if let Ok(mut tracker) = ref_alias_tracker().lock() {
+            tracker.clear_alias();
+        }
+    }
     // A non-push (e.g. call, get) means pending push context is no longer meaningful.
     if let Ok(mut tracker) = push_event_tracker().lock() {
         tracker.record_non_push();
@@ -146,6 +163,9 @@ fn emit_set_table_entry(
         .handle
         .and_then(describe_lua_value)
         .map(|details| value_fields_from_details(&details));
+    if let Some(alias) = ref_alias_from_table(table_handle_label.as_ref(), &key_push.preview) {
+        remember_ref_alias_candidate(alias);
+    }
     let semantic_event = semantic_set_table_entry(
         table_handle_hex,
         table_handle_label,
@@ -170,6 +190,26 @@ fn table_handle_from_pushes(pushes: &[TrackedPush]) -> Option<LuaObject> {
         .and_then(|push| push.handle)
 }
 
+fn ref_alias_from_table(
+    table_handle_label: Option<&String>,
+    key: &UpvaluePreview,
+) -> Option<String> {
+    if !matches!(key.kind, ValueType::String) {
+        return None;
+    }
+    let key_text = key
+        .preview
+        .as_ref()
+        .or(key.value.as_ref())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())?;
+    if let Some(label) = table_handle_label {
+        Some(format!("{label}:{key_text}"))
+    } else {
+        Some(key_text.to_string())
+    }
+}
+
 /// Emits a semantic binding event for a function registered as a global.
 fn emit_registered_global(
     name: &str,
@@ -180,7 +220,7 @@ fn emit_registered_global(
     origin: Option<ClosureOrigin>,
 ) {
     let origin_fields = origin_fields(origin.as_ref());
-    log_semantic_event(LuaSemanticEvent::SemanticBindGlobal {
+    log_semantic_event(LuaSemanticEvent::SemanticBindGlobalClosure {
         name: name.to_string(),
         handle: handle_hex(handle as usize),
         label: Some(label.clone()),
@@ -199,7 +239,7 @@ fn emit_registered_constant(
     origin: Option<ClosureOrigin>,
 ) {
     let origin_fields = origin_fields(origin.as_ref());
-    log_semantic_event(LuaSemanticEvent::SemanticBindConstant {
+    log_semantic_event(LuaSemanticEvent::SemanticBindGlobalConstant {
         name: name.to_string(),
         handle: handle_hex(handle as usize),
         label: Some(label.clone()),
@@ -528,6 +568,7 @@ struct CallfunctionTracker {
     counts: HashMap<LuaObject, u64>,
     labels: HashMap<LuaObject, String>,
     origins: HashMap<LuaObject, ClosureOrigin>,
+    ref_meta: RefHandleTracker,
 }
 
 impl CallfunctionTracker {
@@ -539,6 +580,7 @@ impl CallfunctionTracker {
             counts: HashMap::new(),
             labels: HashMap::new(),
             origins: HashMap::new(),
+            ref_meta: RefHandleTracker::new(),
         }
     }
 
@@ -583,13 +625,23 @@ impl CallfunctionTracker {
             .entry(handle)
             .or_insert_with(|| label.to_string());
         let origin = self.origin_for(handle);
-        CallSample { count, origin }
+        let ref_meta = self.ref_meta.meta_for(handle);
+        CallSample {
+            count,
+            origin,
+            ref_meta,
+        }
+    }
+
+    fn remember_ref_meta(&mut self, handle: LuaObject, meta: RefHandleMeta) {
+        self.ref_meta.remember(handle, meta);
     }
 }
 
 struct CallSample {
     count: u64,
     origin: Option<ClosureOrigin>,
+    ref_meta: Option<RefHandleMeta>,
 }
 
 struct GlobalAccessTracker {
@@ -640,6 +692,78 @@ impl HandleLabelTracker {
     /// Fetches the label for a handle if available.
     fn label_for(&self, handle: LuaObject) -> Option<String> {
         self.labels.get(&handle).cloned()
+    }
+}
+
+struct RefAliasTracker {
+    pending_alias: Option<String>,
+    batch: Option<RefBatch>,
+}
+
+impl RefAliasTracker {
+    fn new() -> Self {
+        Self {
+            pending_alias: None,
+            batch: None,
+        }
+    }
+
+    fn remember_alias(&mut self, alias: String) {
+        self.pending_alias = Some(alias);
+    }
+
+    fn take_alias(&mut self) -> Option<String> {
+        self.pending_alias.take()
+    }
+
+    fn clear_alias(&mut self) {
+        self.pending_alias = None;
+    }
+
+    fn record_batch(&mut self, alias: Option<&str>, reference: i32) -> Option<RefBatch> {
+        let Some(kind) = alias.map(ref_alias_kind) else {
+            return self.flush_batch();
+        };
+        if let Some(batch) = self.batch.as_mut() {
+            if batch.kind == kind && reference == batch.last_ref + 1 {
+                batch.count += 1;
+                batch.last_ref = reference;
+                return None;
+            }
+        }
+        let previous = self.batch.take();
+        self.batch = Some(RefBatch {
+            kind,
+            start_ref: reference,
+            last_ref: reference,
+            count: 1,
+        });
+        previous
+    }
+
+    fn flush_batch(&mut self) -> Option<RefBatch> {
+        self.batch.take()
+    }
+}
+
+struct RefBatch {
+    kind: String,
+    start_ref: i32,
+    last_ref: i32,
+    count: u32,
+}
+
+impl RefBatch {
+    fn into_event(self) -> Option<LuaSemanticEvent> {
+        if self.count > 1 {
+            Some(LuaSemanticEvent::SemanticRefBatch {
+                kind: self.kind,
+                count: self.count,
+                start_ref: self.start_ref,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -718,6 +842,96 @@ fn handle_label_for(handle: LuaObject) -> Option<String> {
         .lock()
         .ok()
         .and_then(|tracker| tracker.label_for(handle))
+}
+
+#[derive(Clone)]
+struct RefHandleMeta {
+    ref_id: i32,
+    alias: Option<String>,
+    value_kind: Option<ValueType>,
+}
+
+struct RefHandleTracker {
+    entries: HashMap<LuaObject, RefHandleMeta>,
+}
+
+impl RefHandleTracker {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn remember(&mut self, handle: LuaObject, meta: RefHandleMeta) {
+        self.entries.insert(handle, meta);
+    }
+
+    fn meta_for(&self, handle: LuaObject) -> Option<RefHandleMeta> {
+        self.entries.get(&handle).cloned()
+    }
+}
+
+fn ref_alias_tracker() -> &'static Mutex<RefAliasTracker> {
+    REF_ALIAS_TRACKER.get_or_init(|| Mutex::new(RefAliasTracker::new()))
+}
+
+fn remember_ref_alias_candidate(alias: impl Into<String>) {
+    let alias = alias.into();
+    if alias.is_empty() {
+        return;
+    }
+    if let Ok(mut tracker) = ref_alias_tracker().lock() {
+        tracker.remember_alias(alias);
+    } else {
+        log_line("ref alias tracker mutex poisoned; dropping alias candidate");
+    }
+}
+
+fn take_ref_alias_candidate() -> Option<String> {
+    ref_alias_tracker()
+        .lock()
+        .ok()
+        .and_then(|mut tracker| tracker.take_alias())
+}
+
+fn record_ref_batch(alias: Option<&str>, reference: i32) {
+    ensure_ref_batch_exit_flush_registered();
+    if let Ok(mut tracker) = ref_alias_tracker().lock() {
+        let ended = tracker.record_batch(alias, reference);
+        if let Some(event) = ended.and_then(|batch| batch.into_event()) {
+            log_semantic_event(event);
+        }
+    } else {
+        log_line("ref alias tracker mutex poisoned; skipping batch record");
+    }
+}
+
+fn flush_ref_batch_event() {
+    if let Ok(mut tracker) = ref_alias_tracker().lock() {
+        if let Some(event) = tracker.flush_batch().and_then(|batch| batch.into_event()) {
+            log_semantic_event(event);
+        }
+    } else {
+        log_line("ref alias tracker mutex poisoned; skipping batch flush");
+    }
+}
+
+fn ref_alias_kind(alias: &str) -> String {
+    alias
+        .split_once(':')
+        .map(|(prefix, _)| prefix.to_string())
+        .unwrap_or_else(|| alias.to_string())
+}
+
+fn ensure_ref_batch_exit_flush_registered() {
+    REF_BATCH_EXIT_FLUSH.get_or_init(|| unsafe {
+        // Best-effort flush so the last batch is emitted even if no later non-push occurs.
+        libc::atexit(flush_ref_batch_atexit);
+    });
+}
+
+extern "C" fn flush_ref_batch_atexit() {
+    flush_ref_batch_event();
 }
 
 #[derive(Clone)]

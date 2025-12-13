@@ -161,7 +161,7 @@ pub(crate) fn log_registered_global(
     values: ValueFields,
     origin: OriginFields,
 ) {
-    log_event(LuaSemanticEvent::SemanticBindGlobal {
+    log_event(LuaSemanticEvent::SemanticBindGlobalClosure {
         name: name.to_string(),
         handle: handle.clone(),
         label: label.clone(),
@@ -178,7 +178,7 @@ pub(crate) fn log_registered_constant(
     values: ValueFields,
     origin: OriginFields,
 ) {
-    log_event(LuaSemanticEvent::SemanticBindConstant {
+    log_event(LuaSemanticEvent::SemanticBindGlobalConstant {
         name: name.to_string(),
         handle: handle.clone(),
         label: label.clone(),
@@ -258,7 +258,11 @@ pub(crate) fn log_set_table_entry(
 }
 
 pub(crate) fn log_set_tag(tag: i32, note: Option<String>) {
-    log_event(LuaEvent::SetTag { tag, note });
+    log_event(LuaEvent::SetTag {
+        tag,
+        note,
+        tag_alias: None,
+    });
 }
 
 pub(crate) fn register_tag(tag: i32, note: Option<String>) {
@@ -283,6 +287,10 @@ pub(crate) fn log_store_ref(
         reference,
         handle: handle.clone(),
         label: label.clone(),
+        alias: None,
+        value_kind: value_fields
+            .as_ref()
+            .and_then(|fields| fields.value_type.clone()),
         value_fields: value_fields.clone(),
         note: None,
         origin: origin.clone(),
@@ -310,6 +318,7 @@ pub(crate) fn log_set_tagmethod(
         event_name: event.to_string(),
         handle: handle.clone(),
         values: values.clone(),
+        tag_alias: None,
         origin: origin.clone(),
     });
     log_event(LuaEvent::SetTagmethod {
@@ -317,6 +326,7 @@ pub(crate) fn log_set_tagmethod(
         event_name: event.to_string(),
         handle,
         values,
+        tag_alias: None,
         origin,
     });
 }
@@ -346,24 +356,28 @@ pub(crate) fn log_set_fallback(
     });
 }
 
-pub(crate) fn log_fetch_ref(
+pub(crate) fn log_load_ref(
     reference: i32,
     handle: Option<String>,
     label: Option<String>,
     note: Option<String>,
     origin: OriginFields,
 ) {
-    log_event(LuaSemanticEvent::SemanticFetchRef {
+    log_event(LuaSemanticEvent::SemanticLoadRef {
         reference,
         handle: handle.clone(),
         label: label.clone(),
+        alias: None,
+        value_kind: None,
         note: note.clone(),
         origin: origin.clone(),
     });
-    log_event(LuaEvent::FetchRef {
+    log_event(LuaEvent::LoadRef {
         reference,
         handle,
         label,
+        alias: None,
+        value_kind: None,
         note,
         origin,
     });
@@ -372,7 +386,10 @@ pub(crate) fn log_fetch_ref(
 pub(crate) fn log_unref(reference: i32, note: Option<String>) {
     log_event(LuaSemanticEvent::SemanticUnref {
         reference,
+        alias: None,
+        value_kind: None,
         note: note.clone(),
+        origin: OriginFields::default(),
     });
     log_event(LuaEvent::Unref { reference, note });
 }

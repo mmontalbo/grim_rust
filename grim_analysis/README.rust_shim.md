@@ -58,6 +58,10 @@ without modifying the game's assets.
   like `lua_createtable`, `lua_settable` / `lua_rawsettable` / `lua_rawsetglobal`, and
   tag plumbing (`lua_copytagmethods`) include caller origin fields.
 
+## Aliases
+
+Tags created via `lua_newtag` emit `semantic_tag_alias {tag, alias, origin}` once; the alias is reused for tag methods, `lua_settag`, and userdata pushes. Reference aliases are best-effort: globals/keys that consume the pushed value seed the alias, and a burst of consecutive refs will also emit `semantic_ref_batch {kind, count, start_ref}` (kind = alias prefix before `:` when present). Ref loads now carry `alias`/`value_kind`, and call events also include `ref_id`/`ref_alias`/`ref_value_kind` when the target came from a ref, so downstream consumers can label calls without cross-referencing lifecycle events.
+
 ## How It Works
 - Build a `cdylib` that exports the same symbols as libLua (`lua_pushCclosure`
   plus the main `lua_do*`/`lua_call*` entry points).

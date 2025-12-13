@@ -1,12 +1,12 @@
 use crate::{
-    logging::{log_event, log_line, LuaEvent, LuaSemanticEvent, ValueFields},
+    logging::{log_event, log_line, LuaEvent, LuaSemanticEvent, OriginFields, ValueFields},
     lua_api::{
         call_real_lua_copytagmethods, call_real_lua_getcfunction, call_real_lua_getparam,
         call_real_lua_newtag, call_real_lua_setfallback, call_real_lua_settag,
         call_real_lua_settagmethod, LuaCFunction, LuaObject,
     },
 };
-use grim_telemetry_common::trace_utils::cstr_opt;
+use grim_telemetry_common::trace_utils::{cstr_opt, register_tag_alias, tag_alias};
 use libc::{c_char, c_int};
 use std::ffi::c_void;
 
@@ -59,11 +59,20 @@ pub(crate) unsafe fn trace_lua_setfallback(
 /// Traces tag creation and records the assigned tag id.
 pub(crate) unsafe fn trace_lua_newtag() -> c_int {
     record_non_push_event();
+    let caller = caller_origin_fields();
     match call_real_lua_newtag() {
         Some(tag) => {
+            let alias = derive_tag_alias(tag, &caller);
+            register_tag_alias(tag, alias.clone());
+            super::log_semantic_event(LuaSemanticEvent::SemanticTagAlias {
+                tag,
+                alias: alias.clone(),
+                origin: caller.clone(),
+            });
             log_event(LuaEvent::SetTag {
                 tag,
                 note: Some("created_via_newtag".to_string()),
+                tag_alias: Some(alias),
             });
             tag
         }
@@ -104,7 +113,11 @@ pub(crate) unsafe fn trace_lua_settag(tag: c_int) {
     } else {
         Some("lua_settag_missing".to_string())
     };
-    log_event(LuaEvent::SetTag { tag, note });
+    log_event(LuaEvent::SetTag {
+        tag,
+        note,
+        tag_alias: tag_alias(tag),
+    });
 }
 
 /// Traces installing a tag method handler for a given event.
@@ -124,11 +137,13 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
         }
     }
     let origin_fields = origin_fields(origin.as_ref());
+    let tag_alias_value = tag_alias(tag);
     super::log_semantic_event(LuaSemanticEvent::SemanticSetTagmethod {
         tag,
         event_name: event_label.clone(),
         handle: handle_field.clone(),
         values: values.clone(),
+        tag_alias: tag_alias_value.clone(),
         origin: origin_fields.clone(),
     });
     if call_real_lua_settagmethod(tag, event) {
@@ -137,6 +152,7 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             event_name: event_label.clone(),
             handle: handle_field.clone(),
             values: values.clone(),
+            tag_alias: tag_alias_value.clone(),
             origin: origin_fields.clone(),
         });
     } else {
@@ -145,7 +161,44 @@ pub(crate) unsafe fn trace_lua_settagmethod(tag: c_int, event: *const c_char) {
             event_name: event_label.clone(),
             handle: handle_field,
             values,
+            tag_alias: tag_alias_value,
             origin: origin_fields,
         });
     }
+}
+
+fn derive_tag_alias(tag: i32, origin: &OriginFields) -> String {
+    if let Some(symbol) = origin.symbol.as_ref() {
+        let alias = clean_alias(symbol);
+        if !alias.is_empty() {
+            return alias;
+        }
+    }
+    if let Some(module) = origin.module.as_ref() {
+        if let Some(last) = module.rsplit(['/', '\\']).next() {
+            let alias = clean_alias(last);
+            if !alias.is_empty() {
+                return alias;
+            }
+        }
+    }
+    format!("tag_{tag}")
+}
+
+fn clean_alias(text: &str) -> String {
+    let head = text
+        .split(|c: char| c == '+' || c == '(')
+        .next()
+        .unwrap_or(text);
+    let normalized: String = head
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    normalized.trim_matches('_').to_ascii_lowercase()
 }
