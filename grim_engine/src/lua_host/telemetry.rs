@@ -9,8 +9,9 @@ use std::{
 
 pub(crate) use grim_telemetry_common::trace_utils::origin_fields_for_ptr;
 use grim_telemetry_common::trace_utils::{
-    caller_origin_fields as trace_caller_origin_fields, handle_hex, semantic_set_table_entry,
-    should_skip_caller_frame as common_should_skip_caller_frame,
+    caller_origin_fields as trace_caller_origin_fields, handle_hex, register_tag_alias,
+    semantic_set_table_entry, should_skip_caller_frame as common_should_skip_caller_frame,
+    tag_alias,
 };
 use grim_telemetry_common::{
     EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
@@ -273,19 +274,29 @@ pub(crate) fn log_set_table_entry(
     log_event(semantic_event);
 }
 
-pub(crate) fn log_set_tag(tag: i32, note: Option<String>) {
+pub(crate) fn log_set_tag(tag: i32, alias: Option<String>, note: Option<String>) {
     log_event(LuaEvent::SetTag {
         tag,
         note,
-        tag_alias: None,
+        tag_alias: alias,
     });
 }
 
-pub(crate) fn register_tag(tag: i32, note: Option<String>) {
+pub(crate) fn register_tag(tag: i32, alias: Option<&str>, note: Option<&str>) {
     let cache = KNOWN_TAGS.get_or_init(|| Mutex::new(HashSet::new()));
     if let Ok(mut tags) = cache.lock() {
         if tags.insert(tag) {
-            log_set_tag(tag, note.clone());
+            let alias_owned = alias.map(|text| text.to_string());
+            let note_owned = note.map(|text| text.to_string());
+            if let Some(alias_value) = alias_owned.as_ref() {
+                register_tag_alias(tag, alias_value.clone());
+                log_event(LuaSemanticEvent::SemanticTagAlias {
+                    tag,
+                    alias: alias_value.clone(),
+                    origin: caller_origin_fields(),
+                });
+            }
+            log_set_tag(tag, alias_owned, note_owned);
         }
     }
 }
@@ -329,12 +340,13 @@ pub(crate) fn log_set_tagmethod(
     values: ValueFields,
     origin: OriginFields,
 ) {
+    let tag_alias_value = tag_alias(tag as i32);
     log_event(LuaSemanticEvent::SemanticSetTagmethod {
         tag: tag as i32,
         event_name: event.to_string(),
         handle: handle.clone(),
         values: values.clone(),
-        tag_alias: None,
+        tag_alias: tag_alias_value.clone(),
         origin: origin.clone(),
     });
     log_event(LuaEvent::SetTagmethod {
@@ -342,7 +354,7 @@ pub(crate) fn log_set_tagmethod(
         event_name: event.to_string(),
         handle,
         values,
-        tag_alias: None,
+        tag_alias: tag_alias_value,
         origin,
     });
 }

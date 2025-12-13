@@ -147,7 +147,7 @@ fn stubs_step(
     _data_root: &Path,
     context: &Rc<RefCell<EngineContext>>,
 ) -> Result<()> {
-    install_stubbed_globals(lua, globals, context)
+    with_suppressed_registered_globals(|| install_stubbed_globals(lua, globals, context))
 }
 
 fn install_constants_and_legacy<'lua>(
@@ -330,7 +330,7 @@ fn install_basic_functions_pre_system(
         ],
     )?;
 
-    register_tag(COLOR_TAG, Some("color".to_string()));
+    register_tag(COLOR_TAG, None, Some("color"));
     let make_color = lua.create_function(|lua_ctx, args: Variadic<Value>| {
         let component = |index: usize| -> u8 {
             args.get(index)
@@ -899,9 +899,10 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
     // Legacy Lua 3 I/O shims expected by retail boot scripts.
     const IO_HANDLE_TAG: i32 = -16;
     const IO_FALLBACK_TAG: i32 = -17;
+    const IO_TAG_ALIAS: &str = "lua_iolibopen";
 
-    register_tag(IO_HANDLE_TAG, Some("io_handle".to_string()));
-    register_tag(IO_FALLBACK_TAG, Some("io_fallback".to_string()));
+    register_tag(IO_HANDLE_TAG, Some(IO_TAG_ALIAS), Some("io_handle"));
+    register_tag(IO_FALLBACK_TAG, Some(IO_TAG_ALIAS), Some("io_fallback"));
 
     let io_handle = Rc::new(RefCell::new(None::<String>));
     let current_input = io_handle.clone();
@@ -1104,7 +1105,7 @@ fn install_actor_stubs(
     globals: &Table,
     context: Rc<RefCell<EngineContext>>,
 ) -> LuaResult<()> {
-    register_tag(ACTOR_TAG, Some("actor".to_string()));
+    register_tag(ACTOR_TAG, None, Some("actor"));
     let load_actor_ctx = context.clone();
     let load_actor = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
         let name = args
