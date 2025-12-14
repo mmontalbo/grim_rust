@@ -180,7 +180,7 @@ pub struct ParityLogsArgs {
     /// Continuously stream log updates after the initial read.
     #[arg(long, short = 'f')]
     pub follow: bool,
-    /// Display the raw telemetry stream (default is semantic-only; see grim_telemetry_common/README.md).
+    /// Display the raw telemetry stream (default is semantic-only; see grim_telemetry_schema/README.md).
     #[arg(long)]
     pub raw: bool,
     /// Number of recent seqs to print before following (0 to skip).

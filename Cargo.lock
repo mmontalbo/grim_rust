@@ -348,7 +348,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
- "grim_telemetry_common",
+ "grim_telemetry_schema",
  "humantime",
  "nix",
  "ratatui",
@@ -363,8 +363,9 @@ dependencies = [
 name = "grim_analysis"
 version = "0.1.0"
 dependencies = [
- "grim_telemetry_common",
+ "grim_telemetry_schema",
  "libc",
+ "serde_json",
 ]
 
 [[package]]
@@ -374,7 +375,7 @@ dependencies = [
  "anyhow",
  "clap",
  "grim_formats",
- "grim_telemetry_common",
+ "grim_telemetry_schema",
  "libc",
  "mlua",
  "serde_json",
@@ -406,7 +407,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "grim_telemetry_common"
+name = "grim_telemetry_schema"
 version = "0.1.0"
 dependencies = [
  "libc",

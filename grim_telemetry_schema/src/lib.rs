@@ -8,8 +8,9 @@ use serde::{
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::{
     env, fmt,
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{self, BufWriter, Write},
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -21,6 +22,14 @@ pub mod trace_utils;
 
 pub const DEFAULT_FULLSCREEN_DURATION_MS: u128 = 4_200;
 pub const DEFAULT_POLL_STEP_MS: u128 = 80;
+
+pub trait TelemetryEventPayload: sealed::TelemetryEventPayload {
+    fn into_builder(self) -> EventBuilder;
+}
+
+mod sealed {
+    pub trait TelemetryEventPayload {}
+}
 
 #[derive(Clone)]
 pub struct TelemetryConfig {
@@ -66,34 +75,60 @@ impl TelemetryLogger {
         }
     }
 
-    pub fn log_event(&self, event: impl Into<EventBuilder>) {
+    pub fn log_event(&self, event: impl TelemetryEventPayload) {
         let _ = self.log_event_with_seq(event);
     }
 
-    pub fn log_event_with_seq(&self, event: impl Into<EventBuilder>) -> u64 {
-        let event = event.into();
-        let stream = event.stream_kind();
-        let seqs = self.next_sequences(stream);
-        let stream_seq = seqs.stream_seq;
-        self.log_event_inner(event, seqs);
+    pub fn log_event_with_seq(&self, event: impl TelemetryEventPayload) -> u64 {
+        let (stream_seq, object) = self.encode_event(event);
+        let sink = self
+            .sink
+            .get_or_init(|| LogSink::init(self.config.log_env_vars));
+        sink.write_json(object);
         stream_seq
     }
 
-    fn log_event_inner(&self, event: EventBuilder, seqs: SequenceNumbers) {
+    pub fn log_event_to_writer(
+        &self,
+        event: impl TelemetryEventPayload,
+        writer: &mut JsonlWriter,
+    ) -> io::Result<u64> {
+        let (seq, object) = self.encode_event(event);
+        writer.write_json(object)?;
+        Ok(seq)
+    }
+
+    pub fn encode_event(
+        &self,
+        event: impl TelemetryEventPayload,
+    ) -> (u64, JsonMap<String, JsonValue>) {
+        let event = event.into_builder();
+        let stream = event.stream_kind();
+        let seqs = self.next_sequences(stream);
+        let object = self.build_event_object(event, &seqs);
+        (seqs.stream_seq, object)
+    }
+
+    fn build_event_object(
+        &self,
+        event: EventBuilder,
+        seqs: &SequenceNumbers,
+    ) -> JsonMap<String, JsonValue> {
         let ts = elapsed_millis();
         let run_id = self
             .run_id
             .get_or_init(|| self.config.run_id_env.and_then(|name| env::var(name).ok()))
             .clone()
             .unwrap_or_default();
-        let SequenceNumbers {
-            log_seq_display,
-            stream_seq_display,
-            ..
-        } = seqs;
         let mut object = event.finish();
-        object.insert("seq".to_string(), JsonValue::String(stream_seq_display));
-        object.insert("log_seq".to_string(), JsonValue::String(log_seq_display));
+        object.insert(
+            "seq".to_string(),
+            JsonValue::String(seqs.stream_seq_display.clone()),
+        );
+        object.insert(
+            "log_seq".to_string(),
+            JsonValue::String(seqs.log_seq_display.clone()),
+        );
         object.insert("ts".to_string(), JsonValue::String(format!("{ts:08}")));
         object.insert(
             "engine".to_string(),
@@ -122,10 +157,7 @@ impl TelemetryLogger {
             JsonValue::Number(JsonNumber::from(current_tid() as u64)),
         );
 
-        let sink = self
-            .sink
-            .get_or_init(|| LogSink::init(self.config.log_env_vars));
-        sink.write_json(object);
+        object
     }
 
     fn next_sequences(&self, stream: StreamKind) -> SequenceNumbers {
@@ -274,7 +306,16 @@ fn stream_kind_from_object(obj: &JsonMap<String, JsonValue>) -> StreamKind {
         return StreamKind::from_field(stream);
     }
     if let Some(event) = obj.get("event").and_then(|v| v.as_str()) {
-        if event.starts_with("semantic_") || event == "engine_exit" {
+        if event.starts_with("semantic_")
+            || matches!(
+                event,
+                "engine_exit"
+                    | "engine_boot_phase"
+                    | "lua_index_recursion"
+                    | "lua_parent_cycle_scan"
+                    | "intro_timeline"
+            )
+        {
             return StreamKind::Semantic;
         }
     }
@@ -334,24 +375,19 @@ pub struct EventBuilder {
 }
 
 impl EventBuilder {
-    pub fn new(event: impl Into<String>) -> Self {
+    pub(crate) fn new(event: impl Into<String>) -> Self {
         let mut fields = JsonMap::new();
         fields.insert("event".to_string(), JsonValue::String(event.into()));
         Self { fields }
     }
 
-    pub fn kv(mut self, key: &str, value: impl Serialize) -> Self {
-        self.kv_mut(key, value);
-        self
-    }
-
-    pub fn kv_mut(&mut self, key: &str, value: impl Serialize) {
+    pub(crate) fn kv_mut(&mut self, key: &str, value: impl Serialize) {
         let json_value =
             serde_json::to_value(value).unwrap_or_else(|_| JsonValue::String("<?>".to_string()));
         self.fields.insert(key.to_string(), json_value);
     }
 
-    pub fn kv_json_mut(&mut self, key: &str, value: JsonValue) {
+    pub(crate) fn kv_json_mut(&mut self, key: &str, value: JsonValue) {
         self.fields.insert(key.to_string(), value);
     }
 
@@ -361,6 +397,34 @@ impl EventBuilder {
 
     fn stream_kind(&self) -> StreamKind {
         stream_kind_from_object(&self.fields)
+    }
+}
+
+pub struct JsonlWriter {
+    writer: BufWriter<std::fs::File>,
+}
+
+impl JsonlWriter {
+    /// Opens (or creates) a JSONL file for appending, creating parent directories as needed.
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
+    }
+
+    /// Writes a single JSON object as a line and flushes the file.
+    pub fn write_json(&mut self, object: JsonMap<String, JsonValue>) -> io::Result<()> {
+        let value = JsonValue::Object(object);
+        serde_json::to_writer(&mut self.writer, &value)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()
     }
 }
 
@@ -523,6 +587,26 @@ pub enum CutsceneResult {
     Replaced,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineBootPhaseStatus {
+    Start,
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LuaIndexRecursionReason {
+    Cycle,
+    DepthLimit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntroTimelineData {
+    pub event: String,
+}
+
 fn serialize_pointer_hex<S>(value: &i32, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -619,6 +703,63 @@ pub struct UpvaluePreview {
     pub preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum EngineEvent {
+    EngineExit {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signal: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        component: Option<String>,
+    },
+    EngineBootPhase {
+        phase: String,
+        status: EngineBootPhaseStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+    },
+    LuaIndexRecursion {
+        table: String,
+        key: String,
+        depth: u64,
+        reason: LuaIndexRecursionReason,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    LuaParentCycleScan {
+        table: String,
+        depth: u64,
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+}
+
+pub const INTRO_TIMELINE_LABEL: &str = "intro.timeline";
+
+fn intro_timeline_label() -> String {
+    INTRO_TIMELINE_LABEL.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum TimelineEvent {
+    IntroTimeline {
+        #[serde(default = "intro_timeline_label")]
+        label: String,
+        data: IntroTimelineData,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1108,6 +1249,51 @@ impl From<LuaEvent> for EventBuilder {
     }
 }
 
+impl TelemetryEventPayload for LuaEvent {
+    fn into_builder(self) -> EventBuilder {
+        EventBuilder::from(self)
+    }
+}
+impl sealed::TelemetryEventPayload for LuaEvent {}
+
+impl From<EngineEvent> for EventBuilder {
+    fn from(event: EngineEvent) -> Self {
+        let value = serde_json::to_value(event).expect("serialize EngineEvent");
+        let obj = value
+            .as_object()
+            .expect("EngineEvent should serialize to an object");
+        let mut builder = builder_from_object(obj);
+        builder.kv_mut("stream", "semantic");
+        builder
+    }
+}
+
+impl TelemetryEventPayload for EngineEvent {
+    fn into_builder(self) -> EventBuilder {
+        EventBuilder::from(self)
+    }
+}
+impl sealed::TelemetryEventPayload for EngineEvent {}
+
+impl From<TimelineEvent> for EventBuilder {
+    fn from(event: TimelineEvent) -> Self {
+        let value = serde_json::to_value(event).expect("serialize TimelineEvent");
+        let obj = value
+            .as_object()
+            .expect("TimelineEvent should serialize to an object");
+        let mut builder = builder_from_object(obj);
+        builder.kv_mut("stream", "semantic");
+        builder
+    }
+}
+
+impl TelemetryEventPayload for TimelineEvent {
+    fn into_builder(self) -> EventBuilder {
+        EventBuilder::from(self)
+    }
+}
+impl sealed::TelemetryEventPayload for TimelineEvent {}
+
 impl From<LuaSemanticEvent> for EventBuilder {
     fn from(event: LuaSemanticEvent) -> Self {
         let value = serde_json::to_value(event).expect("serialize LuaSemanticEvent");
@@ -1119,6 +1305,13 @@ impl From<LuaSemanticEvent> for EventBuilder {
         builder
     }
 }
+
+impl TelemetryEventPayload for LuaSemanticEvent {
+    fn into_builder(self) -> EventBuilder {
+        EventBuilder::from(self)
+    }
+}
+impl sealed::TelemetryEventPayload for LuaSemanticEvent {}
 
 fn builder_from_object(obj: &JsonMap<String, JsonValue>) -> EventBuilder {
     let Some(event_name) = obj.get("event").and_then(|v| v.as_str()) else {
@@ -1473,5 +1666,136 @@ mod tests {
             fields.get("label").and_then(|v| v.as_str()),
             Some("global:foo")
         );
+    }
+
+    #[test]
+    fn engine_exit_event_sets_semantic_stream() {
+        let fields = EventBuilder::from(EngineEvent::EngineExit {
+            status: "ok".to_string(),
+            note: Some("done".to_string()),
+            code: Some(0),
+            signal: None,
+            cause: None,
+            component: Some("grim_engine".to_string()),
+        })
+        .finish();
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("engine_exit")
+        );
+        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
+        assert_eq!(fields.get("status").and_then(|v| v.as_str()), Some("ok"));
+        assert_eq!(fields.get("note").and_then(|v| v.as_str()), Some("done"));
+        assert_eq!(
+            fields.get("component").and_then(|v| v.as_str()),
+            Some("grim_engine")
+        );
+    }
+
+    #[test]
+    fn engine_boot_phase_serializes_elapsed_ms() {
+        let fields = EventBuilder::from(EngineEvent::EngineBootPhase {
+            phase: "boot_call".to_string(),
+            status: EngineBootPhaseStatus::Start,
+            elapsed_ms: Some(12),
+        })
+        .finish();
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("engine_boot_phase")
+        );
+        assert_eq!(
+            fields.get("status").and_then(|v| v.as_str()),
+            Some("start")
+        );
+        assert_eq!(fields.get("elapsed_ms").and_then(|v| v.as_i64()), Some(12));
+        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
+    }
+
+    #[test]
+    fn lua_index_recursion_encodes_reason_and_label() {
+        let fields = EventBuilder::from(EngineEvent::LuaIndexRecursion {
+            table: "0x0000000a".to_string(),
+            key: "foo".to_string(),
+            depth: 3,
+            reason: LuaIndexRecursionReason::DepthLimit,
+            label: Some("global:_G.foo".to_string()),
+        })
+        .finish();
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("lua_index_recursion")
+        );
+        assert_eq!(
+            fields.get("reason").and_then(|v| v.as_str()),
+            Some("depth_limit")
+        );
+        assert_eq!(
+            fields.get("label").and_then(|v| v.as_str()),
+            Some("global:_G.foo")
+        );
+        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
+    }
+
+    #[test]
+    fn lua_parent_cycle_scan_sets_path_and_stream() {
+        let fields = EventBuilder::from(EngineEvent::LuaParentCycleScan {
+            table: "0x0000000a".to_string(),
+            depth: 4,
+            path: "global:_G -> foo -> bar".to_string(),
+            label: Some("global:_G".to_string()),
+        })
+        .finish();
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("lua_parent_cycle_scan")
+        );
+        assert_eq!(
+            fields.get("table").and_then(|v| v.as_str()),
+            Some("0x0000000a")
+        );
+        assert_eq!(fields.get("depth").and_then(|v| v.as_i64()), Some(4));
+        assert_eq!(
+            fields.get("path").and_then(|v| v.as_str()),
+            Some("global:_G -> foo -> bar")
+        );
+        assert_eq!(
+            fields.get("label").and_then(|v| v.as_str()),
+            Some("global:_G")
+        );
+        assert_eq!(
+            fields.get("stream").and_then(|v| v.as_str()),
+            Some("semantic")
+        );
+    }
+
+    #[test]
+    fn intro_timeline_defaults_label_and_stream() {
+        let fields = EventBuilder::from(TimelineEvent::IntroTimeline {
+            label: intro_timeline_label(),
+            data: IntroTimelineData {
+                event: "movie.intro.start".to_string(),
+            },
+            seq: Some(1),
+        })
+        .finish();
+        assert_eq!(
+            fields.get("event").and_then(|v| v.as_str()),
+            Some("intro_timeline")
+        );
+        assert_eq!(
+            fields.get("label").and_then(|v| v.as_str()),
+            Some("intro.timeline")
+        );
+        assert_eq!(fields.get("seq").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            fields
+                .get("data")
+                .and_then(|v| v.as_object())
+                .and_then(|obj| obj.get("event"))
+                .and_then(|v| v.as_str()),
+            Some("movie.intro.start")
+        );
+        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
     }
 }

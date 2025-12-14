@@ -6,8 +6,8 @@ use crate::{
     },
     telemetry,
 };
-use grim_telemetry_common::trace_utils::cstr_opt;
-use grim_telemetry_common::trace_utils::truncate_for_log;
+use grim_telemetry_schema::trace_utils::cstr_opt;
+use grim_telemetry_schema::trace_utils::truncate_for_log;
 use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 

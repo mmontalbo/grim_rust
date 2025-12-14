@@ -11,7 +11,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use grim_telemetry_common::StreamFilter;
+use grim_telemetry_schema::StreamFilter;
 use pane::{render_dual, render_single, DualApp, SingleApp};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
@@ -23,7 +23,7 @@ struct Args {
     /// Path to one or two telemetry log files (use - for stdin)
     #[arg(num_args = 1..=2)]
     paths: Vec<String>,
-    /// Which telemetry stream to show (semantic/raw/all). See grim_telemetry_common/README.md for stream details.
+    /// Which telemetry stream to show (semantic/raw/all). See grim_telemetry_schema/README.md for stream details.
     #[arg(long, value_enum, default_value_t = CliStreamFilter::Semantic)]
     stream: CliStreamFilter,
     /// Optional label for the first path (defaults to file stem)

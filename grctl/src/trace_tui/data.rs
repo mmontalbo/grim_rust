@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use grim_telemetry_common::{parse_seq_range, StreamKind};
+use grim_telemetry_schema::{parse_seq_range, StreamKind};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use grim_telemetry_common::{
+use grim_telemetry_schema::{
     normalize_seq_for_filter, parse_log_seq_field, parse_seq_field, stream_kind_from_line,
     SeqRange, StreamFilter, StreamKind,
 };

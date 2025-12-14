@@ -12,7 +12,7 @@ use crate::lua_host::telemetry::{
     log_create_table, log_dofile, log_event, log_push_cclosure, log_push_number, log_push_object,
     log_push_usertag, log_set_fallback, next_fabricated_handle, ptr_to_handle, register_tag,
 };
-use grim_telemetry_common::{LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType};
+use grim_telemetry_schema::{LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::{install_legacy_compat, install_legacy_math};

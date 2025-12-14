@@ -3,7 +3,7 @@
 This document tracks the native API we need to expose from the engine to the Lua VM while recreating the retail runtime. It treats the retail trace as ground truth and the `grim_engine` host as the implementation that must converge on that shape.
 
 ## Ground truth and signals
-- Retail instrumentation lives in `grim_analysis` (the `grim_analysis` `LD_PRELOAD` hook) and emits `grim_telemetry_common::LuaEvent` lines with `engine=retail vm_id=lua32`.
+- Retail instrumentation lives in `grim_analysis` (the `grim_analysis` `LD_PRELOAD` hook) and emits `grim_telemetry_schema::LuaEvent` lines with `engine=retail vm_id=lua32`.
 - The Rust host logs the same schema from `grim_engine::lua_host::telemetry` (`engine=grim_engine vm_id=lua`). A matching event stream means our exposed surface and sequencing align with retail.
 - The events that define the API surface are the registrations the engine makes into Lua: `registered_global`, `registered_constant`, `set_table_entry` (table population), `lua_setfallback` / `lua_settagmethod` (fallback and tag hook wiring), refs (`lua_ref`/`lua_getref`/`lua_unref`), and any helper pushes (`lua_push*`) that precede those registrations.
 - Telemetry streams should be split into **semantic (composite) events** and **raw VM events**. Semantic events describe what scripts observe (e.g. “set table entry `system.camChangeHandler` to closure X”, “bind global foo”, “store/ref/lookup”), and drive parity. Raw VM events capture stack mechanics (push ordering, call conventions, GC) for debugging and for deriving semantic events from retail traces; parity should not hinge on these implementation details.

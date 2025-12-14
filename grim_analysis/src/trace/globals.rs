@@ -5,7 +5,7 @@ use crate::{
         call_real_lua_rawsetglobal, call_real_lua_setglobal, LuaObject,
     },
 };
-use grim_telemetry_common::trace_utils::cstr_opt;
+use grim_telemetry_schema::trace_utils::cstr_opt;
 use libc::c_char;
 use std::ffi::c_void;
 

@@ -8,7 +8,7 @@ use crate::{
     },
     telemetry,
 };
-use grim_telemetry_common::trace_utils::{cstr_opt, tag_alias};
+use grim_telemetry_schema::trace_utils::{cstr_opt, tag_alias};
 use libc::{c_char, c_int, size_t};
 use std::ffi::c_void;
 
@@ -17,7 +17,7 @@ use super::{
     record_push_preview, remember_registered_global_candidate, upvalue_preview_from_details,
     value_fields_from_details, ClosureOrigin, LOG_PREVIEW_MAX_LEN,
 };
-use grim_telemetry_common::trace_utils::{format_number_for_log, truncate_for_log};
+use grim_telemetry_schema::trace_utils::{format_number_for_log, truncate_for_log};
 
 /// Traces pushing a C closure, capturing origin metadata and upvalue count.
 pub(crate) unsafe fn trace_lua_push_closure(label: &str, func: LuaCFunction, upvalues: c_int) {

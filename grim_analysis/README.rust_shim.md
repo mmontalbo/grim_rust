@@ -8,7 +8,7 @@ helper the engine installs into the Lua VM and track which scripts are loaded
 without modifying the game's assets.
 
 ## Trace schema (shared across retail + Rust engines)
-- Event names and fields live in `grim_telemetry_common::LuaEvent` (serde-tagged enum); add variants/fields there so both emitters stay in sync.
+- Event names and fields live in `grim_telemetry_schema::LuaEvent` (serde-tagged enum); add variants/fields there so both emitters stay in sync.
 - Every line is `engine=retail vm_id=lua32 seq=<counter> event=<name> ...` with
   key/value pairs; values containing whitespace are quoted and escaped. A
   monotonic `ts=<millis>` is included for temporal alignment.

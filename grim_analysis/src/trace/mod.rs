@@ -16,7 +16,7 @@ use crate::{
     },
     symbol_map::lookup_symbol_from_map,
 };
-use grim_telemetry_common::trace_utils::{
+use grim_telemetry_schema::trace_utils::{
     caller_origin_details, describe_closure_target, format_number_for_log,
     origin_fields_from_details, ref_alias, remember_ref_alias, semantic_set_table_entry,
     should_skip_caller_frame as common_should_skip_caller_frame, truncate_for_log,
@@ -29,7 +29,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-pub(crate) use grim_telemetry_common::trace_utils::{handle_hex, LOG_PREVIEW_MAX_LEN};
+pub(crate) use grim_telemetry_schema::trace_utils::{handle_hex, LOG_PREVIEW_MAX_LEN};
 
 mod calls;
 mod globals;
@@ -433,7 +433,7 @@ fn caller_origin_fields() -> OriginFields {
 
 /// Builds origin fields from a frame address and its resolved module/symbol details.
 fn origin_fields_with_map(
-    details: &grim_telemetry_common::trace_utils::ClosureDetails,
+    details: &grim_telemetry_schema::trace_utils::ClosureDetails,
 ) -> OriginFields {
     let mut fields = origin_fields_from_details(details);
     if fields.symbol.is_none() {

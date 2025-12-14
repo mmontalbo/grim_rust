@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use grim_telemetry_common::EventBuilder;
+use grim_telemetry_schema::{EngineBootPhaseStatus, EngineEvent};
 use mlua::{Lua, LuaOptions, StdLib, Table, Value};
 
 pub fn log_engine_exit(
@@ -25,19 +25,22 @@ pub fn log_engine_exit(
 
 fn run_phase<T>(name: &str, phase: impl FnOnce() -> Result<T>) -> Result<T> {
     let start = Instant::now();
-    telemetry::log_event(
-        EventBuilder::new("engine_boot_phase")
-            .kv("phase", name)
-            .kv("status", "start"),
-    );
+    telemetry::log_event(EngineEvent::EngineBootPhase {
+        phase: name.to_string(),
+        status: EngineBootPhaseStatus::Start,
+        elapsed_ms: None,
+    });
     let result = phase();
-    let status = if result.is_ok() { "ok" } else { "error" };
-    telemetry::log_event(
-        EventBuilder::new("engine_boot_phase")
-            .kv("phase", name)
-            .kv("status", status)
-            .kv("elapsed_ms", start.elapsed().as_millis() as i64),
-    );
+    let status = if result.is_ok() {
+        EngineBootPhaseStatus::Ok
+    } else {
+        EngineBootPhaseStatus::Error
+    };
+    telemetry::log_event(EngineEvent::EngineBootPhase {
+        phase: name.to_string(),
+        status,
+        elapsed_ms: Some(start.elapsed().as_millis() as u64),
+    });
     result
 }
 
@@ -308,16 +311,15 @@ fn log_parent_cycle(chain: Vec<(usize, String, Option<String>)>) {
     if chain.is_empty() {
         return;
     }
-    let mut path = Vec::new();
-    for (_, handle, label) in &chain {
-        path.push(label.clone().unwrap_or_else(|| handle.clone()));
-    }
-    let mut event = EventBuilder::new("lua_parent_cycle_scan")
-        .kv("table", chain[0].1.clone())
-        .kv("depth", chain.len() as i64)
-        .kv("path", path.join(" -> "));
-    if let Some(label) = chain[0].2.as_ref() {
-        event = event.kv("label", label.clone());
-    }
-    telemetry::log_event(event);
+    let path = chain
+        .iter()
+        .map(|(_, handle, label)| label.clone().unwrap_or_else(|| handle.clone()))
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    telemetry::log_event(EngineEvent::LuaParentCycleScan {
+        table: chain[0].1.clone(),
+        depth: chain.len() as u64,
+        path,
+        label: chain[0].2.clone(),
+    });
 }

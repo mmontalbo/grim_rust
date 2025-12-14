@@ -7,19 +7,19 @@ use std::{
     },
 };
 
-pub(crate) use grim_telemetry_common::trace_utils::origin_fields_for_ptr;
-use grim_telemetry_common::trace_utils::{
+pub(crate) use grim_telemetry_schema::trace_utils::origin_fields_for_ptr;
+use grim_telemetry_schema::trace_utils::{
     caller_origin_fields as trace_caller_origin_fields, handle_hex, register_tag_alias,
     semantic_set_table_entry, should_skip_caller_frame as common_should_skip_caller_frame,
     tag_alias,
 };
-use grim_telemetry_common::{
-    EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
+use grim_telemetry_schema::{
+    EngineEvent, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
     UpvaluePreview, ValueFields, ValueType,
 };
 
 // Re-export common helpers so callers keep using the telemetry module surface.
-pub(crate) use grim_telemetry_common::trace_utils::{
+pub(crate) use grim_telemetry_schema::trace_utils::{
     ptr_to_handle, register_table_label, table_label,
 };
 
@@ -38,7 +38,7 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     run_id_env: Some("GRCTL_RUN_ID"),
 });
 
-pub(crate) fn log_event(event: impl Into<EventBuilder>) {
+pub(crate) fn log_event(event: impl grim_telemetry_schema::TelemetryEventPayload) {
     LOGGER.log_event(event);
 }
 
@@ -65,23 +65,14 @@ pub(crate) fn log_engine_exit(
     signal: Option<i32>,
     cause: Option<&str>,
 ) {
-    let mut builder = EventBuilder::new("engine_exit")
-        .kv("status", status)
-        .kv("stream", "semantic")
-        .kv("component", ENGINE_ID);
-    if let Some(text) = note {
-        builder = builder.kv("note", text);
-    }
-    if let Some(code) = code {
-        builder = builder.kv("code", code);
-    }
-    if let Some(signal) = signal {
-        builder = builder.kv("signal", signal);
-    }
-    if let Some(text) = cause {
-        builder = builder.kv("cause", text);
-    }
-    log_event(builder);
+    log_event(EngineEvent::EngineExit {
+        status: status.to_string(),
+        note: note.map(str::to_string),
+        code,
+        signal,
+        cause: cause.map(str::to_string),
+        component: Some(ENGINE_ID.to_string()),
+    });
 }
 
 pub(crate) fn log_push_cclosure(

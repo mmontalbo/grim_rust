@@ -8,7 +8,7 @@ pub(super) use bindings::{
 };
 
 use bindings::RefRegistry;
-use grim_telemetry_common::OriginFields;
+use grim_telemetry_schema::OriginFields;
 use mlua::{FromLua, Lua, Result as LuaResult, Value};
 use scripts::{ScriptRuntime, ScriptRuntimeAdapter};
 

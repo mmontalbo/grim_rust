@@ -6,7 +6,7 @@ use crate::{
         call_real_lua_settagmethod, LuaCFunction, LuaObject,
     },
 };
-use grim_telemetry_common::trace_utils::{cstr_opt, register_tag_alias, tag_alias};
+use grim_telemetry_schema::trace_utils::{cstr_opt, register_tag_alias, tag_alias};
 use libc::{c_char, c_int};
 use std::ffi::c_void;
 

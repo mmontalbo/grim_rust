@@ -1,11 +1,11 @@
-//! Minimal logging facade that forwards events to `grim_telemetry_common`.
+//! Minimal logging facade that forwards events to `grim_telemetry_schema`.
 //!
 //! The shim uses this to emit structured Lua events with consistent engine/VM
 //! identifiers while printing line-based diagnostics to stderr.
-pub(crate) use grim_telemetry_common::{
-    EventBuilder, LuaEvent, LuaSemanticEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
+pub(crate) use grim_telemetry_schema::{
+    LuaEvent, LuaSemanticEvent, OriginFields, UpvaluePreview, ValueFields, ValueType,
 };
-use grim_telemetry_common::{TelemetryConfig, TelemetryLogger};
+use grim_telemetry_schema::{JsonlWriter, TelemetryConfig, TelemetryLogger};
 
 pub(crate) const ENGINE_ID: &str = "retail";
 pub(crate) const VM_ID: &str = "lua32";
@@ -24,11 +24,19 @@ pub(crate) fn log_line(message: &str) {
 }
 
 /// Sends a structured telemetry event without exposing the logger.
-pub(crate) fn log_event(event: impl Into<EventBuilder>) {
+pub(crate) fn log_event(event: impl grim_telemetry_schema::TelemetryEventPayload) {
     LOGGER.log_event(event);
 }
 
 /// Sends a structured telemetry event and returns its sequence number for correlation.
-pub(crate) fn log_event_with_seq(event: impl Into<EventBuilder>) -> u64 {
+pub(crate) fn log_event_with_seq(event: impl grim_telemetry_schema::TelemetryEventPayload) -> u64 {
     LOGGER.log_event_with_seq(event)
+}
+
+/// Serializes and writes a structured telemetry event to an external JSONL sink.
+pub(crate) fn log_event_to_writer(
+    event: impl grim_telemetry_schema::TelemetryEventPayload,
+    writer: &mut JsonlWriter,
+) -> std::io::Result<u64> {
+    LOGGER.log_event_to_writer(event, writer)
 }

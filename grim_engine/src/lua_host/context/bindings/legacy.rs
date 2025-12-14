@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use grim_telemetry_common::trace_utils::handle_hex;
-use grim_telemetry_common::{EventBuilder, OriginFields};
+use grim_telemetry_schema::trace_utils::handle_hex;
+use grim_telemetry_schema::{EngineEvent, LuaIndexRecursionReason, OriginFields};
 use mlua::{
     Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Value,
     Variadic,
@@ -282,15 +282,13 @@ fn install_index_hook(
                 let ptr = t.to_pointer() as usize;
                 let entry = (ptr, key_label.clone());
                 if guard.seen.contains(&entry) {
-                    let mut event = EventBuilder::new("lua_index_recursion")
-                        .kv("table", ptr_to_handle(t.to_pointer()))
-                        .kv("key", key_label.clone())
-                        .kv("depth", depth as i64)
-                        .kv("reason", "cycle");
-                    if let Some(label) = table_label(t.to_pointer()) {
-                        event = event.kv("label", label);
-                    }
-                    log_event(event);
+                    log_event(EngineEvent::LuaIndexRecursion {
+                        table: ptr_to_handle(t.to_pointer()),
+                        key: key_label.clone(),
+                        depth: depth as u64,
+                        reason: LuaIndexRecursionReason::Cycle,
+                        label: table_label(t.to_pointer()),
+                    });
                     guard.depth -= 1;
                     return Err(LuaError::RuntimeError(
                         "index fallback parent cycle detected".to_string(),
@@ -304,15 +302,13 @@ fn install_index_hook(
                     Value::Table(t) => (ptr_to_handle(t.to_pointer()), table_label(t.to_pointer())),
                     other => (describe_value(other), None),
                 };
-                let mut event = EventBuilder::new("lua_index_recursion")
-                    .kv("table", table_handle)
-                    .kv("key", key_label.clone())
-                    .kv("depth", depth as i64)
-                    .kv("reason", "depth_limit");
-                if let Some(label) = label {
-                    event = event.kv("label", label);
-                }
-                log_event(event);
+                log_event(EngineEvent::LuaIndexRecursion {
+                    table: table_handle,
+                    key: key_label.clone(),
+                    depth: depth as u64,
+                    reason: LuaIndexRecursionReason::DepthLimit,
+                    label,
+                });
                 guard.depth -= 1;
                 if let Some(entry) = inserted_entry {
                     guard.seen.remove(&entry);

@@ -5,7 +5,7 @@
 //! through a cutscene state machine and is fanned out to sinks so parity tweaks
 //! stay isolated from hook wiring and file IO.
 use crate::{
-    logging::{log_event, log_line, LuaEvent},
+    logging::{log_event, log_event_to_writer, log_line, LuaEvent},
     lua_api::{
         call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getnumber,
         call_real_lua_getparam, call_real_lua_getstring, call_real_lua_isnumber,
@@ -13,15 +13,14 @@ use crate::{
         LuaCFunction,
     },
 };
-use grim_telemetry_common::{
+use grim_telemetry_schema::{
     normalized_movie_label, CutscenePhase, CutscenePlaying, CutsceneResult, CutsceneSkipPhase,
+    JsonlWriter, INTRO_TIMELINE_LABEL, IntroTimelineData, TimelineEvent,
 };
 use std::{
     cell::Cell,
     collections::HashSet,
     ffi::CString,
-    fs::{self, OpenOptions},
-    io::{BufWriter, Write},
     sync::{Mutex, OnceLock},
     time::Instant,
 };
@@ -176,12 +175,12 @@ impl TelemetryHooks {
 
 enum TelemetryEvent {
     Structured(LuaEvent),
-    IntroTimeline { seq: u64, event: String },
+    IntroTimeline(TimelineEvent),
 }
 
 #[derive(Default)]
 struct TelemetrySinks {
-    writer: Option<TelemetryWriter>,
+    writer: Option<JsonlWriter>,
 }
 
 impl TelemetrySinks {
@@ -189,8 +188,8 @@ impl TelemetrySinks {
         for event in events {
             match event {
                 TelemetryEvent::Structured(event) => log_event(event),
-                TelemetryEvent::IntroTimeline { seq, event } => {
-                    if let Err(err) = self.emit_intro_timeline(seq, &event) {
+                TelemetryEvent::IntroTimeline(event) => {
+                    if let Err(err) = self.emit_intro_timeline(&event) {
                         log_line(&format!(
                             "failed to write intro.timeline event to {TELEMETRY_PATH}: {err}"
                         ));
@@ -201,42 +200,16 @@ impl TelemetrySinks {
         }
     }
 
-    fn emit_intro_timeline(&mut self, seq: u64, event: &str) -> std::io::Result<()> {
-        let line = format!(
-            r#"{{"seq":{},"label":"intro.timeline","data":{{"event":"{}"}}}}"#,
-            seq, event
-        );
+    fn emit_intro_timeline(&mut self, event: &TimelineEvent) -> std::io::Result<()> {
         let writer = self.ensure_writer()?;
-        writer.write_line(&line)
+        log_event_to_writer(event.clone(), writer).map(|_| ())
     }
 
-    fn ensure_writer(&mut self) -> std::io::Result<&mut TelemetryWriter> {
+    fn ensure_writer(&mut self) -> std::io::Result<&mut JsonlWriter> {
         if self.writer.is_none() {
-            fs::create_dir_all("mods")?;
-            self.writer = Some(TelemetryWriter::open(TELEMETRY_PATH)?);
+            self.writer = Some(JsonlWriter::open(TELEMETRY_PATH)?);
         }
         Ok(self.writer.as_mut().expect("writer missing after init"))
-    }
-}
-
-struct TelemetryWriter {
-    inner: BufWriter<std::fs::File>,
-}
-
-impl TelemetryWriter {
-    /// Opens (or creates) the JSONL telemetry file for appending.
-    fn open(path: &str) -> std::io::Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self {
-            inner: BufWriter::new(file),
-        })
-    }
-
-    /// Writes a single line to the telemetry file and flushes it.
-    fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.inner.write_all(line.as_bytes())?;
-        self.inner.write_all(b"\n")?;
-        self.inner.flush()
     }
 }
 
@@ -727,7 +700,11 @@ impl CutsceneStateMachine {
     fn intro_timeline_event(&mut self, event: String) -> TelemetryEvent {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
-        TelemetryEvent::IntroTimeline { seq, event }
+        TelemetryEvent::IntroTimeline(TimelineEvent::IntroTimeline {
+            label: INTRO_TIMELINE_LABEL.to_string(),
+            data: IntroTimelineData { event },
+            seq: Some(seq),
+        })
     }
 
     fn cutscene_event(
@@ -837,7 +814,11 @@ mod tests {
         assert_eq!(start_events.len(), 2);
         assert!(matches!(
             start_events[0],
-            TelemetryEvent::IntroTimeline { seq: 1, ref event } if event == "movie.intro.start"
+            TelemetryEvent::IntroTimeline(TimelineEvent::IntroTimeline {
+                seq: Some(1),
+                ref data,
+                ..
+            }) if data.event == "movie.intro.start"
         ));
         assert!(matches!(
             start_events[1],
@@ -857,7 +838,8 @@ mod tests {
         ));
         assert!(end_events.iter().any(|event| matches!(
             event,
-            TelemetryEvent::IntroTimeline { ref event, .. } if event == "movie.intro.end"
+            TelemetryEvent::IntroTimeline(TimelineEvent::IntroTimeline { ref data, .. })
+                if data.event == "movie.intro.end"
         )));
         assert!(end_events.iter().any(|event| matches!(
             event,

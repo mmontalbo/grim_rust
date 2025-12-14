@@ -1,4 +1,4 @@
-use grim_telemetry_common::OriginFields;
+use grim_telemetry_schema::OriginFields;
 use mlua::{FromLua, Lua, RegistryKey, Result as LuaResult, Value};
 use std::collections::HashMap;
 

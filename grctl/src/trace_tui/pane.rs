@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::trace_tui::data::{compute_parity, LogEntry, ParityStatus};
-use grim_telemetry_common::StreamFilter;
+use grim_telemetry_schema::StreamFilter;
 
 const LIST_LEGEND: &str = "[= match ! diff ? missing] ";
 
@@ -415,15 +415,15 @@ fn parity_marker(parity: Option<&ParityStatus>) -> Span<'static> {
     }
 }
 
-fn stream_marker(stream: grim_telemetry_common::StreamKind) -> Span<'static> {
+fn stream_marker(stream: grim_telemetry_schema::StreamKind) -> Span<'static> {
     match stream {
-        grim_telemetry_common::StreamKind::Semantic => {
+        grim_telemetry_schema::StreamKind::Semantic => {
             Span::styled("[S]", Style::default().fg(Color::Cyan))
         }
-        grim_telemetry_common::StreamKind::Raw => {
+        grim_telemetry_schema::StreamKind::Raw => {
             Span::styled("[R]", Style::default().fg(Color::Gray))
         }
-        grim_telemetry_common::StreamKind::Other => {
+        grim_telemetry_schema::StreamKind::Other => {
             Span::styled("[?]", Style::default().fg(Color::Gray))
         }
     }

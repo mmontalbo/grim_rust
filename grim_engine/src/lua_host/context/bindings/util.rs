@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use grim_telemetry_common::{
+use grim_telemetry_schema::{
     trace_utils::{
         format_number_for_log, handle_hex, truncate_for_log, upvalue_preview_from_meta,
         value_fields_from_meta, ValueMeta, LOG_PREVIEW_MAX_LEN,
