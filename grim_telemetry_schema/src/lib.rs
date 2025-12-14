@@ -1798,4 +1798,49 @@ mod tests {
         );
         assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
     }
+
+    #[test]
+    fn log_event_to_writer_includes_metadata() {
+        let config = TelemetryConfig {
+            engine_id: "engine_test",
+            vm_id: "vm_test",
+            log_env_vars: &[],
+            line_prefix: "test_logger",
+            run_id_env: None,
+        };
+        let logger = TelemetryLogger::new(config);
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        let mut writer = JsonlWriter::open(temp.path()).expect("open JsonlWriter");
+
+        let seq = logger
+            .log_event_to_writer(
+                EngineEvent::EngineExit {
+                    status: "ok".to_string(),
+                    note: None,
+                    code: Some(0),
+                    signal: None,
+                    cause: None,
+                    component: Some("grim_engine".to_string()),
+                },
+                &mut writer,
+            )
+            .expect("write event");
+        assert_eq!(seq, 1);
+
+        let text = std::fs::read_to_string(temp.path()).expect("read temp file");
+        let line = text.trim_end();
+        let value: serde_json::Value = serde_json::from_str(line).expect("parse json");
+        assert_eq!(value.get("event").and_then(|v| v.as_str()), Some("engine_exit"));
+        assert_eq!(value.get("seq").and_then(|v| v.as_str()), Some("000001"));
+        assert_eq!(value.get("log_seq").and_then(|v| v.as_str()), Some("000001"));
+        assert_eq!(
+            value.get("engine").and_then(|v| v.as_str()),
+            Some("engine_test")
+        );
+        assert_eq!(value.get("vm_id").and_then(|v| v.as_str()), Some("vm_test"));
+        assert_eq!(
+            value.get("logger").and_then(|v| v.as_str()),
+            Some("test_logger")
+        );
+    }
 }
