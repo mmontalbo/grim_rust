@@ -492,52 +492,80 @@ fn exit_style(entry: &LogEntry) -> Option<Style> {
     Some(style)
 }
 
+fn should_skip_detail_field(key: &str) -> bool {
+    matches!(
+        key,
+        "seq"
+            | "log_seq"
+            | "event"
+            | "stream"
+            | "engine"
+            | "component"
+            | "vm_id"
+            | "origin"
+            | "module"
+            | "symbol"
+            | "symbol_source"
+            | "logger"
+            | "run_id"
+            | "wall_ts"
+            | "pid"
+            | "tid"
+            | "ts"
+            | "source"
+    )
+}
+
 fn detail_text(entry: &LogEntry, parity: Option<&ParityStatus>) -> Text<'static> {
-    let mut first_line = String::new();
-    first_line.push_str(&format!("seq={} ", entry.seq_display));
-    if entry.seq_display != entry.orig_seq_display {
-        first_line.push_str(&format!("log_seq={} ", entry.orig_seq_display));
-    }
-    first_line.push_str(&format!("event={} ", entry.display_event()));
+    let mut fields: Vec<(String, String)> = Vec::new();
+    fields.push(("seq".to_string(), entry.seq_display.clone()));
+    fields.push(("event".to_string(), entry.display_event().to_string()));
     if let Some(note) = parity_label(parity) {
-        first_line.push_str(&format!("parity={} ", note));
+        fields.push(("parity".to_string(), note));
     }
     if entry.seq_min != entry.seq_max {
-        first_line.push_str(&format!("range={:06}-{:06} ", entry.seq_min, entry.seq_max));
-    } else if entry.seq_display != entry.orig_seq_display
-        && entry.orig_seq_min != entry.orig_seq_max
-    {
-        first_line.push_str(&format!(
-            "log_range={:06}-{:06} ",
-            entry.orig_seq_min, entry.orig_seq_max
+        fields.push((
+            "range".to_string(),
+            format!("{:06}-{:06}", entry.seq_min, entry.seq_max),
         ));
     }
 
-    let mut lines: Vec<Line> = Vec::new();
     for field in entry.fields.iter() {
-        if field.key == "seq" || field.key == "log_seq" || field.key == "event" {
+        if should_skip_detail_field(&field.key) {
             continue;
         }
         if field.key == "cause" {
-            if !first_line.is_empty() {
-                lines.push(Line::from(std::mem::take(&mut first_line)));
-            }
             for (idx, segment) in field.value.split(" | ").enumerate() {
-                let prefix = if idx == 0 { "cause=" } else { "      " };
-                lines.push(Line::from(format!("{prefix}{segment}")));
+                let key = if idx == 0 {
+                    field.key.clone()
+                } else {
+                    String::new()
+                };
+                fields.push((key, segment.to_string()));
             }
             continue;
         }
-        first_line.push_str(&format!("{}={} ", field.key, field.value));
+        fields.push((field.key.clone(), field.value.clone()));
     }
 
-    if !first_line.is_empty() {
-        lines.insert(0, Line::from(std::mem::take(&mut first_line)));
+    if fields.is_empty() {
+        return Text::raw("no fields");
     }
 
-    if lines.is_empty() {
-        lines.push(Line::raw("no fields"));
-    }
+    let key_width = fields
+        .iter()
+        .map(|(key, _)| key.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let lines: Vec<Line> = fields
+        .into_iter()
+        .map(|(key, value)| {
+            let line = format!("{key:<key_width$} = {value}");
+            Line::from(line)
+        })
+        .collect();
 
     Text::from(lines)
 }
