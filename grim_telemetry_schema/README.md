@@ -15,6 +15,9 @@ stream; use their `--raw` / `--stream raw` switches to opt in to the raw view.
 For the wider Lua API goals and telemetry background, see
 `docs/lua_native_api.md`.
 
+Set `GRIM_RAW_TELEMETRY=0|false` to drop raw-stream events (`lua_*`, `cutscene*`)
+while keeping semantic telemetry.
+
 ## Sequence numbers
 
 Each telemetry line carries two counters:
@@ -29,9 +32,8 @@ independent.
 
 Semantic stream
 
-- `engine_boot_phase`: phase name, `status` (start|ok|error), `elapsed_ms` (completion only).
+- `boot_sequence`: `stage` (start|complete), optional `elapsed_ms` (ready only), optional `note`.
 - `engine_exit`: `status` (ok|exit_code|signal|unknown), optional `note`/`code`/`signal`/`cause`, `component`.
-- `lua_parent_cycle_scan`: `table` handle, optional `label`, `depth`, `path` of the detected parent chain.
 - `intro_timeline`: `label`=`intro.timeline`, `data.event` (e.g., `movie.intro.start/end`), optional `seq` for local ordering.
 - `semantic_bind_global_{closure,constant}`: `name`, `handle`, optional `label`/`values`/`upvalues`, `origin`.
 - `semantic_set_table_entry` / `semantic_set_fallback` / `semantic_set_tagmethod`: table/tag handles + value previews, `caller`, optional notes.
@@ -40,7 +42,7 @@ Semantic stream
 Raw stream
 
 - `lua_*` pushes/calls/registry ops from `LuaEvent` (handles, value previews, caller metadata) used for parity debugging.
-- `cutscene` / `cutscene_skip` / `post_intro_room`: movie playback state, skip requests, and post-intro transitions.
+- `cutscene` / `cutscene_skip`: movie playback state and skip requests for intro/logos.
 - `register_native` / `register_constant` / `register_global` plus low-level get/set/push events; see `LuaEvent` in `src/lib.rs` for full field sets.
 
 ## Crate layout

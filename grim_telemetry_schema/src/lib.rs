@@ -12,7 +12,7 @@ use std::{
     io::{self, BufWriter, Write},
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex, OnceLock,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -38,6 +38,7 @@ pub struct TelemetryConfig {
     pub log_env_vars: &'static [&'static str],
     pub line_prefix: &'static str,
     pub run_id_env: Option<&'static str>,
+    pub raw_stream_env: Option<&'static str>,
 }
 
 pub struct TelemetryLogger {
@@ -47,6 +48,7 @@ pub struct TelemetryLogger {
     raw_seq: AtomicU64,
     semantic_seq: AtomicU64,
     run_id: OnceLock<Option<String>>,
+    raw_stream_allowed: OnceLock<bool>,
 }
 
 struct SequenceNumbers {
@@ -64,7 +66,23 @@ impl TelemetryLogger {
             raw_seq: AtomicU64::new(0),
             semantic_seq: AtomicU64::new(0),
             run_id: OnceLock::new(),
+            raw_stream_allowed: OnceLock::new(),
         }
+    }
+
+    fn raw_stream_allowed(&self) -> bool {
+        *self.raw_stream_allowed.get_or_init(|| {
+            let Some(var) = self.config.raw_stream_env else {
+                return true;
+            };
+            match env::var(var) {
+                Ok(val) => {
+                    let normalized = val.trim().to_ascii_lowercase();
+                    !(normalized == "0" || normalized == "false" || normalized == "off")
+                }
+                Err(_) => true,
+            }
+        })
     }
 
     pub fn log_line(&self, message: &str) {
@@ -80,12 +98,17 @@ impl TelemetryLogger {
     }
 
     pub fn log_event_with_seq(&self, event: impl TelemetryEventPayload) -> u64 {
-        let (stream_seq, object) = self.encode_event(event);
-        let sink = self
-            .sink
-            .get_or_init(|| LogSink::init(self.config.log_env_vars));
-        sink.write_json(object);
-        stream_seq
+        let builder = event.into_builder();
+        match self.emit_event(builder) {
+            Some((stream_seq, object)) => {
+                let sink = self
+                    .sink
+                    .get_or_init(|| LogSink::init(self.config.log_env_vars));
+                sink.write_json(object);
+                stream_seq
+            }
+            None => 0,
+        }
     }
 
     pub fn log_event_to_writer(
@@ -93,20 +116,31 @@ impl TelemetryLogger {
         event: impl TelemetryEventPayload,
         writer: &mut JsonlWriter,
     ) -> io::Result<u64> {
-        let (seq, object) = self.encode_event(event);
-        writer.write_json(object)?;
-        Ok(seq)
+        let builder = event.into_builder();
+        if let Some((seq, object)) = self.emit_event(builder) {
+            writer.write_json(object)?;
+            Ok(seq)
+        } else {
+            Ok(0)
+        }
     }
 
     pub fn encode_event(
         &self,
         event: impl TelemetryEventPayload,
-    ) -> (u64, JsonMap<String, JsonValue>) {
-        let event = event.into_builder();
+    ) -> Option<(u64, JsonMap<String, JsonValue>)> {
+        let builder = event.into_builder();
+        self.emit_event(builder)
+    }
+
+    fn emit_event(&self, event: EventBuilder) -> Option<(u64, JsonMap<String, JsonValue>)> {
         let stream = event.stream_kind();
+        if matches!(stream, StreamKind::Raw) && !self.raw_stream_allowed() {
+            return None;
+        }
         let seqs = self.next_sequences(stream);
         let object = self.build_event_object(event, &seqs);
-        (seqs.stream_seq, object)
+        Some((seqs.stream_seq, object))
     }
 
     fn build_event_object(
@@ -309,11 +343,7 @@ fn stream_kind_from_object(obj: &JsonMap<String, JsonValue>) -> StreamKind {
         if event.starts_with("semantic_")
             || matches!(
                 event,
-                "engine_exit"
-                    | "engine_boot_phase"
-                    | "lua_index_recursion"
-                    | "lua_parent_cycle_scan"
-                    | "intro_timeline"
+                "boot_sequence" | "engine_exit" | "lua_index_recursion" | "intro_timeline"
             )
         {
             return StreamKind::Semantic;
@@ -535,11 +565,11 @@ pub fn default_fullscreen_duration_ms(movie: &str) -> u128 {
 pub struct OriginFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub module: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub symbol: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub symbol_source: Option<String>,
 }
 
@@ -560,7 +590,6 @@ pub enum ValueType {
 #[serde(rename_all = "snake_case")]
 pub enum CutscenePhase {
     Start,
-    Poll,
     End,
 }
 
@@ -587,19 +616,62 @@ pub enum CutsceneResult {
     Replaced,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum EngineBootPhaseStatus {
+pub enum BootStage {
     Start,
-    Ok,
-    Error,
+    Complete,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LuaIndexRecursionReason {
-    Cycle,
-    DepthLimit,
+#[derive(Debug)]
+pub struct BootSequenceTracker {
+    started_at: OnceLock<Instant>,
+    started_emitted: AtomicBool,
+    complete_emitted: AtomicBool,
+}
+
+impl BootSequenceTracker {
+    pub const fn new() -> Self {
+        Self {
+            started_at: OnceLock::new(),
+            started_emitted: AtomicBool::new(false),
+            complete_emitted: AtomicBool::new(false),
+        }
+    }
+
+    pub fn boot_started(&self) -> Option<EngineEvent> {
+        self.started_at.get_or_init(Instant::now);
+        if self.started_emitted.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        Some(EngineEvent::BootSequence {
+            stage: BootStage::Start,
+            elapsed_ms: None,
+            note: None,
+        })
+    }
+
+    pub fn boot_complete(&self, note: Option<String>) -> Option<EngineEvent> {
+        let elapsed_ms = self
+            .started_at
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_millis() as u64;
+        if self.complete_emitted.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        Some(EngineEvent::BootSequence {
+            stage: BootStage::Complete,
+            elapsed_ms: Some(elapsed_ms),
+            note,
+        })
+    }
+}
+
+impl Default for BootSequenceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -708,6 +780,13 @@ pub struct UpvaluePreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EngineEvent {
+    BootSequence {
+        stage: BootStage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     EngineExit {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -720,27 +799,6 @@ pub enum EngineEvent {
         cause: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         component: Option<String>,
-    },
-    EngineBootPhase {
-        phase: String,
-        status: EngineBootPhaseStatus,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        elapsed_ms: Option<u64>,
-    },
-    LuaIndexRecursion {
-        table: String,
-        key: String,
-        depth: u64,
-        reason: LuaIndexRecursionReason,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
-    LuaParentCycleScan {
-        table: String,
-        depth: u64,
-        path: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
     },
 }
 
@@ -993,8 +1051,6 @@ pub enum LuaEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         elapsed_ms: Option<u128>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        polls: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<CutsceneResult>,
     },
     #[serde(rename = "cutscene_skip")]
@@ -1006,8 +1062,6 @@ pub enum LuaEvent {
         movie_label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         elapsed_ms: Option<u128>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        polls: Option<u64>,
     },
     #[serde(rename = "lua_getref")]
     LoadRef {
@@ -1194,16 +1248,6 @@ pub enum LuaEvent {
         #[serde(flatten)]
         origin: OriginFields,
     },
-    #[serde(rename = "post_intro_room")]
-    PostIntroRoom {
-        source: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        set: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        setup: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        after_movie: Option<String>,
-    },
     #[serde(rename = "lua_ref")]
     StoreRef {
         lock: i32,
@@ -1366,6 +1410,7 @@ mod tests {
             log_env_vars: &["GRIM_TELEMETRY_TEST_LOG"],
             line_prefix: "test",
             run_id_env: None,
+            raw_stream_env: None,
         });
 
         let raw_seq1 = logger.log_event_with_seq(LuaEvent::CollectGarbage {});
@@ -1422,7 +1467,6 @@ mod tests {
             phase: CutscenePhase::Start,
             playing: CutscenePlaying::Playing,
             elapsed_ms: Some(0),
-            polls: Some(0),
             result: None,
         };
         let fields = EventBuilder::from(event).finish();
@@ -1444,7 +1488,6 @@ mod tests {
             Some("playing")
         );
         assert_eq!(fields.get("elapsed_ms").and_then(|v| v.as_i64()), Some(0));
-        assert_eq!(fields.get("polls").and_then(|v| v.as_i64()), Some(0));
     }
 
     #[test]
@@ -1454,7 +1497,6 @@ mod tests {
             movie: None,
             movie_label: Some("movie.intro".to_string()),
             elapsed_ms: Some(123),
-            polls: None,
         };
         let fields = EventBuilder::from(event).finish();
         assert_eq!(
@@ -1470,7 +1512,6 @@ mod tests {
             Some("movie.intro")
         );
         assert_eq!(fields.get("elapsed_ms").and_then(|v| v.as_i64()), Some(123));
-        assert!(!fields.contains_key("polls"));
     }
 
     #[test]
@@ -1683,7 +1724,10 @@ mod tests {
             fields.get("event").and_then(|v| v.as_str()),
             Some("engine_exit")
         );
-        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
+        assert_eq!(
+            fields.get("stream").and_then(|v| v.as_str()),
+            Some("semantic")
+        );
         assert_eq!(fields.get("status").and_then(|v| v.as_str()), Some("ok"));
         assert_eq!(fields.get("note").and_then(|v| v.as_str()), Some("done"));
         assert_eq!(
@@ -1693,80 +1737,33 @@ mod tests {
     }
 
     #[test]
-    fn engine_boot_phase_serializes_elapsed_ms() {
-        let fields = EventBuilder::from(EngineEvent::EngineBootPhase {
-            phase: "boot_call".to_string(),
-            status: EngineBootPhaseStatus::Start,
-            elapsed_ms: Some(12),
-        })
-        .finish();
+    fn boot_sequence_tracker_emits_and_dedups() {
+        let tracker = BootSequenceTracker::new();
+
+        let start = tracker.boot_started().expect("boot start");
+        let start_fields = EventBuilder::from(start).finish();
         assert_eq!(
-            fields.get("event").and_then(|v| v.as_str()),
-            Some("engine_boot_phase")
+            start_fields.get("event").and_then(|v| v.as_str()),
+            Some("boot_sequence")
         );
         assert_eq!(
-            fields.get("status").and_then(|v| v.as_str()),
+            start_fields.get("stage").and_then(|v| v.as_str()),
             Some("start")
         );
-        assert_eq!(fields.get("elapsed_ms").and_then(|v| v.as_i64()), Some(12));
-        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
-    }
-
-    #[test]
-    fn lua_index_recursion_encodes_reason_and_label() {
-        let fields = EventBuilder::from(EngineEvent::LuaIndexRecursion {
-            table: "0x0000000a".to_string(),
-            key: "foo".to_string(),
-            depth: 3,
-            reason: LuaIndexRecursionReason::DepthLimit,
-            label: Some("global:_G.foo".to_string()),
-        })
-        .finish();
         assert_eq!(
-            fields.get("event").and_then(|v| v.as_str()),
-            Some("lua_index_recursion")
-        );
-        assert_eq!(
-            fields.get("reason").and_then(|v| v.as_str()),
-            Some("depth_limit")
-        );
-        assert_eq!(
-            fields.get("label").and_then(|v| v.as_str()),
-            Some("global:_G.foo")
-        );
-        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
-    }
-
-    #[test]
-    fn lua_parent_cycle_scan_sets_path_and_stream() {
-        let fields = EventBuilder::from(EngineEvent::LuaParentCycleScan {
-            table: "0x0000000a".to_string(),
-            depth: 4,
-            path: "global:_G -> foo -> bar".to_string(),
-            label: Some("global:_G".to_string()),
-        })
-        .finish();
-        assert_eq!(
-            fields.get("event").and_then(|v| v.as_str()),
-            Some("lua_parent_cycle_scan")
-        );
-        assert_eq!(
-            fields.get("table").and_then(|v| v.as_str()),
-            Some("0x0000000a")
-        );
-        assert_eq!(fields.get("depth").and_then(|v| v.as_i64()), Some(4));
-        assert_eq!(
-            fields.get("path").and_then(|v| v.as_str()),
-            Some("global:_G -> foo -> bar")
-        );
-        assert_eq!(
-            fields.get("label").and_then(|v| v.as_str()),
-            Some("global:_G")
-        );
-        assert_eq!(
-            fields.get("stream").and_then(|v| v.as_str()),
+            start_fields.get("stream").and_then(|v| v.as_str()),
             Some("semantic")
         );
+        assert!(tracker.boot_started().is_none());
+
+        let ready = tracker.boot_complete(None).expect("boot ready");
+        let ready_fields = EventBuilder::from(ready).finish();
+        assert_eq!(
+            ready_fields.get("stage").and_then(|v| v.as_str()),
+            Some("complete")
+        );
+        assert!(ready_fields.get("elapsed_ms").is_some());
+        assert!(tracker.boot_complete(None).is_none());
     }
 
     #[test]
@@ -1796,7 +1793,10 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("movie.intro.start")
         );
-        assert_eq!(fields.get("stream").and_then(|v| v.as_str()), Some("semantic"));
+        assert_eq!(
+            fields.get("stream").and_then(|v| v.as_str()),
+            Some("semantic")
+        );
     }
 
     #[test]
@@ -1807,6 +1807,7 @@ mod tests {
             log_env_vars: &[],
             line_prefix: "test_logger",
             run_id_env: None,
+            raw_stream_env: None,
         };
         let logger = TelemetryLogger::new(config);
         let temp = tempfile::NamedTempFile::new().expect("temp file");
@@ -1830,9 +1831,15 @@ mod tests {
         let text = std::fs::read_to_string(temp.path()).expect("read temp file");
         let line = text.trim_end();
         let value: serde_json::Value = serde_json::from_str(line).expect("parse json");
-        assert_eq!(value.get("event").and_then(|v| v.as_str()), Some("engine_exit"));
+        assert_eq!(
+            value.get("event").and_then(|v| v.as_str()),
+            Some("engine_exit")
+        );
         assert_eq!(value.get("seq").and_then(|v| v.as_str()), Some("000001"));
-        assert_eq!(value.get("log_seq").and_then(|v| v.as_str()), Some("000001"));
+        assert_eq!(
+            value.get("log_seq").and_then(|v| v.as_str()),
+            Some("000001")
+        );
         assert_eq!(
             value.get("engine").and_then(|v| v.as_str()),
             Some("engine_test")
