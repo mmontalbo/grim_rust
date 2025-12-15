@@ -21,7 +21,7 @@ pub fn log_engine_exit(
 pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Result<()> {
     telemetry::log_boot_sequence_start();
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
-        .context("initialising Lua runtime with standard libraries")?;
+        .context("initializing Lua runtime with standard libraries")?;
     let context = Rc::new(RefCell::new(context::EngineContext::new(verbose, headless)));
 
     context::install_package_path(&lua, data_root)?;
@@ -34,5 +34,3 @@ pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Res
 
     Ok(())
 }
-
-// Parent-cycle scan removed; boot telemetry now covers the boot window only.

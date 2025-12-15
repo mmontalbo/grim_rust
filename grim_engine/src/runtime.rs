@@ -10,9 +10,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
         verbose,
     } = args;
 
-    let result = (|| -> Result<()> {
-        run_boot_sequence(&data_root, verbose, headless)
-    })();
+    let result = (|| -> Result<()> { run_boot_sequence(&data_root, verbose, headless) })();
 
     match result {
         Ok(()) => {
