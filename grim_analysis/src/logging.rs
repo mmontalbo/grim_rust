@@ -14,10 +14,9 @@ static BOOT_SEQUENCE: BootSequenceTracker = BootSequenceTracker::new();
 static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     engine_id: ENGINE_ID,
     vm_id: VM_ID,
-    log_env_vars: &["GRIM_SHIM_LOG"],
+    log_env_vars: &["GRCTL_LOG_PATH"],
     line_prefix: "grim-rust-shim",
-    run_id_env: None,
-    raw_stream_env: Some("GRIM_RAW_TELEMETRY"),
+    raw_stream_enabled: true,
 });
 
 /// Emits a single line-based diagnostic to the configured telemetry sink.

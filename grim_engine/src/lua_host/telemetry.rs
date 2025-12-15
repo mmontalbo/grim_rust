@@ -32,10 +32,9 @@ static BOOT_SEQUENCE: BootSequenceTracker = BootSequenceTracker::new();
 static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     engine_id: ENGINE_ID,
     vm_id: VM_ID,
-    log_env_vars: &["GRIM_ENGINE_LOG"],
+    log_env_vars: &["GRCTL_LOG_PATH"],
     line_prefix: "grim_engine",
-    run_id_env: Some("GRCTL_RUN_ID"),
-    raw_stream_env: Some("GRIM_RAW_TELEMETRY"),
+    raw_stream_enabled: true,
 });
 
 pub(crate) fn log_event(event: impl grim_telemetry_schema::TelemetryEventPayload) {

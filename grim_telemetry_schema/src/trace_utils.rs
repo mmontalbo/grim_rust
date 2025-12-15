@@ -60,9 +60,7 @@ fn normalize_script_path(source: &str, data_root: &Path) -> PathBuf {
 }
 
 fn path_within_root(path: &Path, root: &Path) -> bool {
-    let normalized_root = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf());
+    let normalized_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     match path.canonicalize() {
         Ok(actual) => actual.starts_with(&normalized_root),
         Err(_) => path.starts_with(&normalized_root),

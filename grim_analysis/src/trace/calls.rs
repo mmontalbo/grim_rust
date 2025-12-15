@@ -9,7 +9,10 @@ use crate::{
 use grim_telemetry_schema::trace_utils::cstr_opt;
 use grim_telemetry_schema::trace_utils::truncate_for_log;
 use libc::{c_char, c_int, size_t};
-use std::{ffi::c_void, sync::{Mutex, OnceLock}};
+use std::{
+    ffi::c_void,
+    sync::{Mutex, OnceLock},
+};
 
 use super::{
     callfunction_tracker, handle_hex, origin_fields, record_non_push_event,
@@ -19,10 +22,7 @@ use super::{
 static BOOT_SOURCE_NOTE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn remember_boot_source(note: String) {
-    if let Ok(mut slot) = BOOT_SOURCE_NOTE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-    {
+    if let Ok(mut slot) = BOOT_SOURCE_NOTE.get_or_init(|| Mutex::new(None)).lock() {
         *slot = Some(note);
     }
 }
@@ -99,7 +99,9 @@ pub(crate) unsafe fn trace_lua_dobuffer(
 pub(crate) unsafe fn trace_lua_call(name: *const c_char) -> c_int {
     record_non_push_event();
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
-    log_event(LuaEvent::Call { name: label.clone() });
+    log_event(LuaEvent::Call {
+        name: label.clone(),
+    });
     let result = call_real_lua_call(name);
     if result.is_some() && is_boot_label(&label) {
         let note = boot_source_note();

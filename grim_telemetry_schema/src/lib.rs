@@ -38,8 +38,8 @@ pub struct TelemetryConfig {
     pub vm_id: &'static str,
     pub log_env_vars: &'static [&'static str],
     pub line_prefix: &'static str,
-    pub run_id_env: Option<&'static str>,
-    pub raw_stream_env: Option<&'static str>,
+    /// Always emit the raw stream; viewers can filter as needed.
+    pub raw_stream_enabled: bool,
 }
 
 pub struct TelemetryLogger {
@@ -49,7 +49,6 @@ pub struct TelemetryLogger {
     raw_seq: AtomicU64,
     semantic_seq: AtomicU64,
     run_id: OnceLock<Option<String>>,
-    raw_stream_allowed: OnceLock<bool>,
 }
 
 struct SequenceNumbers {
@@ -67,23 +66,11 @@ impl TelemetryLogger {
             raw_seq: AtomicU64::new(0),
             semantic_seq: AtomicU64::new(0),
             run_id: OnceLock::new(),
-            raw_stream_allowed: OnceLock::new(),
         }
     }
 
     fn raw_stream_allowed(&self) -> bool {
-        *self.raw_stream_allowed.get_or_init(|| {
-            let Some(var) = self.config.raw_stream_env else {
-                return true;
-            };
-            match env::var(var) {
-                Ok(val) => {
-                    let normalized = val.trim().to_ascii_lowercase();
-                    !(normalized == "0" || normalized == "false" || normalized == "off")
-                }
-                Err(_) => true,
-            }
-        })
+        self.config.raw_stream_enabled
     }
 
     pub fn log_line(&self, message: &str) {
@@ -92,6 +79,11 @@ impl TelemetryLogger {
         } else {
             eprintln!("[{}] {message}", self.config.line_prefix);
         }
+    }
+
+    /// Optionally set a fixed run_id (e.g., when passing it from a CLI flag instead of env).
+    pub fn set_run_id(&self, run_id: Option<String>) {
+        let _ = self.run_id.set(run_id);
     }
 
     pub fn log_event(&self, event: impl TelemetryEventPayload) {
@@ -164,7 +156,7 @@ impl TelemetryLogger {
         let ts = elapsed_millis();
         let run_id = self
             .run_id
-            .get_or_init(|| self.config.run_id_env.and_then(|name| env::var(name).ok()))
+            .get_or_init(|| env::var("GRCTL_RUN_ID").ok())
             .clone()
             .unwrap_or_default();
         let mut object = event.finish();
@@ -1438,8 +1430,7 @@ mod tests {
             vm_id: "test_vm",
             log_env_vars: &["GRIM_TELEMETRY_TEST_LOG"],
             line_prefix: "test",
-            run_id_env: None,
-            raw_stream_env: None,
+            raw_stream_enabled: true,
         });
 
         let raw_seq1 = logger.log_event_with_seq(LuaEvent::CollectGarbage {});
@@ -1835,8 +1826,7 @@ mod tests {
             vm_id: "vm_test",
             log_env_vars: &[],
             line_prefix: "test_logger",
-            run_id_env: None,
-            raw_stream_env: None,
+            raw_stream_enabled: true,
         };
         let logger = TelemetryLogger::new(config);
         let temp = tempfile::NamedTempFile::new().expect("temp file");
@@ -1881,17 +1871,17 @@ mod tests {
     }
 
     #[test]
-    fn raw_stream_respects_env_gate() {
-        const RAW_ENV: &str = "GRIM_TELEMETRY_RAW_TEST";
-        env::set_var(RAW_ENV, "0");
+    fn raw_stream_is_always_enabled() {
+        // Raw stream emission no longer depends on env; keep this env set to
+        // prove it is ignored.
+        env::set_var("GRIM_TELEMETRY_RAW_TEST", "0");
 
         let config = TelemetryConfig {
             engine_id: "engine_test",
             vm_id: "vm_test",
             log_env_vars: &[],
             line_prefix: "test_logger",
-            run_id_env: None,
-            raw_stream_env: Some(RAW_ENV),
+            raw_stream_enabled: true,
         };
         let logger = TelemetryLogger::new(config);
         let temp = tempfile::NamedTempFile::new().expect("temp file");
@@ -1900,10 +1890,10 @@ mod tests {
         let seq = logger
             .log_event_to_writer(LuaEvent::CollectGarbage {}, &mut writer)
             .expect("write event");
-        assert_eq!(seq, 0);
+        assert_eq!(seq, 1);
         let text = std::fs::read_to_string(temp.path()).expect("read temp file");
-        assert!(text.is_empty());
+        assert!(!text.is_empty());
 
-        env::remove_var(RAW_ENV);
+        env::remove_var("GRIM_TELEMETRY_RAW_TEST");
     }
 }

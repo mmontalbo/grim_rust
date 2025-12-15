@@ -80,10 +80,7 @@ fn registered_global_telemetry_suppressed() -> bool {
     REGISTERED_GLOBAL_SUPPRESSION.with(|cell| *cell.borrow())
 }
 
-pub(crate) fn function_provenance(
-    func: &Function,
-    data_root: &Path,
-) -> LuaFunctionProvenance {
+pub(crate) fn function_provenance(func: &Function, data_root: &Path) -> LuaFunctionProvenance {
     let info = func.info();
     classify_lua_function_provenance(info.source.as_deref(), Some(info.what), data_root)
 }
@@ -193,14 +190,7 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     );
 
     if matches!(value, Value::Function(_)) {
-        log_registered_global(
-            name,
-            handle,
-            Some(handle_label),
-            0,
-            value_fields,
-            origin,
-        );
+        log_registered_global(name, handle, Some(handle_label), 0, value_fields, origin);
     } else {
         log_registered_constant(name, handle, Some(handle_label), value_fields, origin);
     }

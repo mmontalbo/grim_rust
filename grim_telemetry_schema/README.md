@@ -13,10 +13,7 @@ are defined here so both emitters stay aligned. Events flow into two streams:
 Tools such as `grctl parity logs` and `trace_tui` default to the semantic
 stream; use their `--raw` / `--stream raw` switches to opt in to the raw view.
 For the wider Lua API goals and telemetry background, see
-`docs/lua_native_api.md`.
-
-Set `GRIM_RAW_TELEMETRY=0|false` to drop raw-stream events (`lua_*`, `cutscene*`)
-while keeping semantic telemetry.
+`docs/lua_native_api.md`. 
 
 ## Sequence numbers
 

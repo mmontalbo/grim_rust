@@ -19,7 +19,8 @@ without modifying the game's assets.
   Rust engine side to emit `engine=rust` and reuse the same field names so
   traces align 1:1.
 - `lua_getglobal` and `lua_callfunction` logs are always per-call and include
-  the running count. `GRIM_SHIM_LOG=/path` redirects output to a file.
+  the running count. Logs go to `GRCTL_LOG_PATH` when launched via `grctl`; set
+  that env var yourself if you run the shim outside the launcher.
 ## Event reference (raw Lua VM surface)
 - Common envelope on every line: `seq`, `ts`, `event=<name>`, followed by event
   fields, then `engine=retail vm_id=lua32` (and optional `run_id` if set).
@@ -77,8 +78,8 @@ Tags created via `lua_newtag` emit `semantic_tag_alias {tag, alias, origin}` onc
 - All shim lines use a consistent `event=` schema (e.g.
   `event=lua_setglobal name=X handle=0x...` with `label`/`origin` when available),
   keeping `handle=0x...` stable so later calls/refetches match.
-- Logs include pid/tid/timestamps. Set `GRIM_SHIM_LOG=/path/to/file` to capture
-  them to disk; otherwise they emit to stderr.
+- Logs include pid/tid/timestamps. They are written to `GRCTL_LOG_PATH` (set by
+  `grctl`); set that manually when running outside the launcher.
 
 ### Symbol map fallback for stripped binaries
 
@@ -117,7 +118,7 @@ LD_PRELOAD=/path/to/libgrim_analysis.so ./GrimFandango.exe
 
 ## New contributor quickstart
 - Build and point `LD_PRELOAD` at `libgrim_analysis.so` using the command above (workspace or crate-local paths both work).
-- Sanity-check that hooks loaded: launch retail with `GRIM_SHIM_LOG=/tmp/grim_shim.log` set and confirm early log lines like `event=lua_pushcclosure`/`event=lua_setglobal` appear. If you see `required Lua C function missing`, the shim couldn't find the retail symbol (common when a wrapper is requested before the engine registers it).
+- Sanity-check that hooks loaded: launch retail via `grctl retail start --attach` (logs land in `target/grctl/logs/retail/<run>.log`) and confirm early log lines like `event=lua_pushcclosure`/`event=lua_setglobal` appear. If you see `required Lua C function missing`, the shim couldn't find the retail symbol (common when a wrapper is requested before the engine registers it).
 - Know where to look: VM tracing is split under `grim_analysis/src/trace/`:
   - `state.rs` (open/newstate/newthread)
   - `push.rs` (push* helpers and upvalue previews)
