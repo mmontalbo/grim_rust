@@ -3,7 +3,7 @@ mod scripts;
 
 pub(super) use bindings::{
     call_boot, install_globals_post_system, install_globals_pre_system, install_package_path,
-    load_system_script, override_boot_stubs,
+    load_system_script, override_boot_stubs, wrap_boot,
 };
 
 use bindings::RefRegistry;

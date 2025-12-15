@@ -1,13 +1,14 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, path::Path};
 
 use grim_telemetry_schema::{
     trace_utils::{
-        format_number_for_log, handle_hex, truncate_for_log, upvalue_preview_from_meta,
-        value_fields_from_meta, ValueMeta, LOG_PREVIEW_MAX_LEN,
+        classify_lua_function_provenance, format_number_for_log, handle_hex, truncate_for_log,
+        upvalue_preview_from_meta, value_fields_from_meta, LuaFunctionProvenance, ValueMeta,
+        LOG_PREVIEW_MAX_LEN,
     },
     OriginFields, UpvaluePreview, ValueFields, ValueType,
 };
-use mlua::{IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
+use mlua::{Function, IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 
 use crate::lua_host::telemetry::{
     log_lua_setglobal, log_push_cclosure, log_push_nil, log_push_number, log_push_object,
@@ -28,11 +29,6 @@ impl TaggedHandle {
 }
 
 impl UserData for TaggedHandle {}
-
-#[derive(Clone, Default)]
-pub(crate) struct RegisteredGlobalMeta {
-    pub upvalues: i32,
-}
 
 pub(crate) const COLOR_TAG: i32 = 0x434f4c52;
 
@@ -55,24 +51,7 @@ impl ColorHandle {
 impl UserData for ColorHandle {}
 
 thread_local! {
-    static REGISTERED_GLOBAL_HINT: RefCell<Option<RegisteredGlobalMeta>> = RefCell::new(None);
     static REGISTERED_GLOBAL_SUPPRESSION: RefCell<bool> = RefCell::new(false);
-}
-
-pub(crate) fn with_registered_global_hint<R>(
-    meta: RegisteredGlobalMeta,
-    f: impl FnOnce() -> R,
-) -> R {
-    REGISTERED_GLOBAL_HINT.with(|cell| {
-        let previous = cell.replace(Some(meta));
-        let result = f();
-        cell.replace(previous);
-        result
-    })
-}
-
-fn take_registered_global_hint() -> Option<RegisteredGlobalMeta> {
-    REGISTERED_GLOBAL_HINT.with(|cell| cell.replace(None))
 }
 
 pub(crate) struct RegisteredGlobalTelemetryGuard {
@@ -99,6 +78,18 @@ pub(crate) fn with_suppressed_registered_globals<R>(f: impl FnOnce() -> R) -> R 
 
 fn registered_global_telemetry_suppressed() -> bool {
     REGISTERED_GLOBAL_SUPPRESSION.with(|cell| *cell.borrow())
+}
+
+pub(crate) fn function_provenance(
+    func: &Function,
+    data_root: &Path,
+) -> LuaFunctionProvenance {
+    let info = func.info();
+    classify_lua_function_provenance(info.source.as_deref(), Some(info.what), data_root)
+}
+
+pub(crate) fn function_source_hint(func: &Function, data_root: &Path) -> Option<String> {
+    function_provenance(func, data_root).source_hint()
 }
 
 pub(super) fn handle_from_value(value: &Value) -> Option<String> {
@@ -146,14 +137,12 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     value: T,
 ) -> LuaResult<()> {
     let value = value.into_lua(lua)?;
-    let hint = take_registered_global_hint();
 
     if registered_global_telemetry_suppressed() {
         return globals.set(name, value);
     }
 
     let value_fields = value_fields_from_lua(&value);
-    let upvalues = hint.as_ref().map(|meta| meta.upvalues).unwrap_or(0);
 
     let handle_label = format!("global:{name}");
     let handle = normalize_handle(&handle_label, handle_from_value(&value));
@@ -166,7 +155,7 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     match &value {
         Value::Function(func) => {
             origin = origin_fields_for_ptr(func.to_pointer());
-            log_push_cclosure("lua_pushCclosure", func.to_pointer(), upvalues, None);
+            log_push_cclosure("lua_pushCclosure", func.to_pointer(), 0, None);
         }
         Value::Nil => {
             log_push_nil();
@@ -208,7 +197,7 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
             name,
             handle,
             Some(handle_label),
-            upvalues,
+            0,
             value_fields,
             origin,
         );

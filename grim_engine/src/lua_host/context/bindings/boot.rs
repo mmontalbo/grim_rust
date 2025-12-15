@@ -3,12 +3,15 @@ use std::path::Path;
 use std::rc::Rc;
 
 use anyhow::{ensure, Context, Result};
-use mlua::{Function, Lua, Value, Variadic};
+use mlua::{Function, Lua, MultiValue, RegistryKey, Value, Variadic};
 
 use super::dofile::execute_script;
-use super::util::{describe_callable_label, describe_value, set_global};
+use super::util::{
+    describe_callable_label, describe_value, function_provenance, function_source_hint, set_global,
+};
 use crate::lua_host::context::EngineContext;
-use crate::lua_host::telemetry::log_dofile;
+use crate::lua_host::telemetry::{log_boot_sequence_complete, log_dofile};
+use grim_telemetry_schema::trace_utils::LuaFunctionProvenance;
 
 pub(crate) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
     let compiled = data_root.join("_system.lua");
@@ -30,6 +33,30 @@ pub(crate) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
     let executed =
         execute_script(lua, &path).with_context(|| format!("executing {}", path.display()))?;
     ensure!(executed.is_some(), "failed to execute {}", path.display());
+    Ok(())
+}
+
+pub(crate) fn wrap_boot(lua: &Lua, data_root: &Path) -> Result<()> {
+    let globals = lua.globals();
+    let boot: Function = globals
+        .get("BOOT")
+        .context("BOOT function missing after loading _system")?;
+
+    let provenance = function_provenance(&boot, data_root);
+    if !matches!(provenance, LuaFunctionProvenance::GameScript(_)) {
+        return Ok(());
+    }
+
+    let note = function_source_hint(&boot, data_root);
+    let boot_key: RegistryKey = lua.create_registry_value(boot.clone())?;
+    let wrapped_boot = lua.create_function(move |lua_ctx, args: Variadic<Value>| {
+        let boot_fn: Function = lua_ctx.registry_value(&boot_key)?;
+        let results: MultiValue = boot_fn.call(args)?;
+        log_boot_sequence_complete(note.as_deref());
+        Ok(results)
+    })?;
+
+    globals.set("BOOT", wrapped_boot)?;
     Ok(())
 }
 
@@ -128,5 +155,6 @@ pub(crate) fn call_boot(lua: &Lua, _context: Rc<RefCell<EngineContext>>) -> Resu
         .context("BOOT function missing after loading _system")?;
     boot.call::<_, ()>((false, Value::Nil))
         .context("executing BOOT(false)")?;
+    log_boot_sequence_complete(None);
     Ok(())
 }

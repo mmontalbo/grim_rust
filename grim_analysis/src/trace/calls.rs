@@ -9,12 +9,40 @@ use crate::{
 use grim_telemetry_schema::trace_utils::cstr_opt;
 use grim_telemetry_schema::trace_utils::truncate_for_log;
 use libc::{c_char, c_int, size_t};
-use std::ffi::c_void;
+use std::{ffi::c_void, sync::{Mutex, OnceLock}};
 
 use super::{
     callfunction_tracker, handle_hex, origin_fields, record_non_push_event,
     remember_handle_label_if_missing, resolve_lua_function_label, LOG_PREVIEW_MAX_LEN,
 };
+
+static BOOT_SOURCE_NOTE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn remember_boot_source(note: String) {
+    if let Ok(mut slot) = BOOT_SOURCE_NOTE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *slot = Some(note);
+    }
+}
+
+fn boot_source_note() -> Option<String> {
+    BOOT_SOURCE_NOTE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|note| note.clone())
+}
+
+fn is_boot_label(label: &str) -> bool {
+    let normalized = label.trim();
+    normalized.eq_ignore_ascii_case("BOOT")
+        || normalized.eq_ignore_ascii_case("global:BOOT")
+        || normalized
+            .to_ascii_lowercase()
+            .ends_with(&":boot".to_string())
+}
 
 /// Normalizes optional integer returns, logging when symbols are missing.
 fn forward_int_result(label: &str, result: Option<c_int>) -> c_int {
@@ -39,7 +67,7 @@ pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
         path: label.clone(),
     });
     if is_system_boot_script(&label) {
-        log_boot_sequence_complete(None);
+        remember_boot_source(label.clone());
     }
     forward_int_result("lua_dofile", call_real_lua_dofile(path))
 }
@@ -71,8 +99,13 @@ pub(crate) unsafe fn trace_lua_dobuffer(
 pub(crate) unsafe fn trace_lua_call(name: *const c_char) -> c_int {
     record_non_push_event();
     let label = cstr_opt(name).unwrap_or_else(|| "<null>".to_string());
-    log_event(LuaEvent::Call { name: label });
-    forward_int_result("lua_call", call_real_lua_call(name))
+    log_event(LuaEvent::Call { name: label.clone() });
+    let result = call_real_lua_call(name);
+    if result.is_some() && is_boot_label(&label) {
+        let note = boot_source_note();
+        log_boot_sequence_complete(note.as_deref());
+    }
+    forward_int_result("lua_call", result)
 }
 
 /// Traces a `lua_callfunction` invocation by handle, recording metadata and call counts.
@@ -111,7 +144,12 @@ pub(crate) unsafe fn trace_lua_callfunction(func: *mut c_void) -> c_int {
         });
     }
 
-    forward_int_result("lua_callfunction", call_real_lua_callfunction(handle))
+    let result = call_real_lua_callfunction(handle);
+    if result.is_some() && is_boot_label(&label) {
+        let note = boot_source_note();
+        log_boot_sequence_complete(note.as_deref());
+    }
+    forward_int_result("lua_callfunction", result)
 }
 
 /// Traces an explicit GC invocation.

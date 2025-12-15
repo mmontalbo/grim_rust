@@ -134,7 +134,6 @@ def _is_deleted_in_git(root: Path, path: str) -> bool:
 
 def format_message(component: str, summary: str, why: list[str], what: list[str]) -> str:
     root = Path(__file__).resolve().parent.parent
-
     summary = summary.strip()
     if summary and summary[0].isalpha():
         summary = summary[0].lower() + summary[1:]

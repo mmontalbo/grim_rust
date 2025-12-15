@@ -1,5 +1,6 @@
 use crate::{LuaSemanticEvent, OriginFields, UpvaluePreview, ValueFields, ValueType};
 use libc::{c_char, c_int, c_void, Dl_info};
+use std::path::{Path, PathBuf};
 use std::{
     collections::HashMap,
     ffi::CStr,
@@ -28,6 +29,69 @@ pub fn ptr_to_handle(ptr: *const c_void) -> String {
 /// Formats an address/handle into the canonical hex string representation.
 pub fn handle_hex(handle: usize) -> String {
     format!("0x{handle:08x}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LuaFunctionProvenance {
+    GameScript(PathBuf),
+    Native(String),
+    Other(String),
+    Unknown,
+}
+
+impl LuaFunctionProvenance {
+    pub fn source_hint(&self) -> Option<String> {
+        match self {
+            LuaFunctionProvenance::GameScript(path) => Some(path.display().to_string()),
+            LuaFunctionProvenance::Native(kind) => Some(kind.clone()),
+            LuaFunctionProvenance::Other(source) => Some(source.clone()),
+            LuaFunctionProvenance::Unknown => None,
+        }
+    }
+}
+
+fn normalize_script_path(source: &str, data_root: &Path) -> PathBuf {
+    let path = Path::new(source);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        data_root.join(path)
+    }
+}
+
+fn path_within_root(path: &Path, root: &Path) -> bool {
+    let normalized_root = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf());
+    match path.canonicalize() {
+        Ok(actual) => actual.starts_with(&normalized_root),
+        Err(_) => path.starts_with(&normalized_root),
+    }
+}
+
+pub fn classify_lua_function_provenance(
+    source: Option<&str>,
+    what: Option<&str>,
+    data_root: &Path,
+) -> LuaFunctionProvenance {
+    if let Some(kind) = what {
+        if matches!(kind, "C" | "Rust") {
+            return LuaFunctionProvenance::Native(kind.to_string());
+        }
+    }
+
+    if let Some(raw_source) = source {
+        if let Some(path) = raw_source.strip_prefix('@') {
+            let normalized = normalize_script_path(path, data_root);
+            if path_within_root(&normalized, data_root) {
+                return LuaFunctionProvenance::GameScript(normalized);
+            }
+            return LuaFunctionProvenance::Other(normalized.display().to_string());
+        }
+        return LuaFunctionProvenance::Other(raw_source.to_string());
+    }
+
+    LuaFunctionProvenance::Unknown
 }
 
 /// Converts a potentially null C string into an owned `String`.

@@ -70,19 +70,16 @@ pub(super) fn execute_script<'lua>(lua: &'lua Lua, path: &Path) -> LuaResult<Opt
         return Ok(None);
     }
     let bytes = fs::read(path).map_err(mlua::Error::external)?;
-    let chunk_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("script");
+    let chunk_name = format!("@{}", path.display());
     let eval_result = if path.to_string_lossy().ends_with(".decompiled.lua") {
         let source = String::from_utf8_lossy(&bytes);
         let script = normalize_legacy_lua(&source);
-        lua.load(&script).set_name(chunk_name).eval::<MultiValue>()
+        lua.load(&script).set_name(&chunk_name).eval::<MultiValue>()
     } else if is_precompiled_chunk(&bytes) {
-        lua.load(&bytes).set_name(chunk_name).eval::<MultiValue>()
+        lua.load(&bytes).set_name(&chunk_name).eval::<MultiValue>()
     } else {
         let source = String::from_utf8_lossy(&bytes).into_owned();
-        lua.load(&source).set_name(chunk_name).eval::<MultiValue>()
+        lua.load(&source).set_name(&chunk_name).eval::<MultiValue>()
     };
 
     match eval_result {

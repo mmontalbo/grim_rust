@@ -18,8 +18,7 @@ use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::{install_legacy_compat, install_legacy_math};
 use super::util::{
     set_global, set_table_entry_with_telemetry, value_fields_from_lua, value_to_string,
-    with_registered_global_hint, with_suppressed_registered_globals, ColorHandle,
-    RegisteredGlobalMeta, TaggedHandle, COLOR_TAG,
+    with_suppressed_registered_globals, ColorHandle, TaggedHandle, COLOR_TAG,
 };
 use super::{store_registry_value, PinnedRegistryKeys};
 use crate::lua_host::context::EngineContext;

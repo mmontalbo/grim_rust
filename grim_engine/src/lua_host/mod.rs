@@ -27,10 +27,10 @@ pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Res
     context::install_package_path(&lua, data_root)?;
     context::install_globals_pre_system(&lua, data_root, context.clone())?;
     context::load_system_script(&lua, data_root)?;
+    context::wrap_boot(&lua, data_root)?;
     context::install_globals_post_system(&lua, context.clone())?;
     context::override_boot_stubs(&lua, context.clone())?;
     context::call_boot(&lua, context)?;
-    telemetry::log_boot_sequence_complete(None);
 
     Ok(())
 }
