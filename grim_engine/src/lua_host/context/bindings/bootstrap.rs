@@ -30,33 +30,6 @@ enum GlobalConst {
     Int(i32),
 }
 
-type PreSystemStep = fn(&Lua, &Table<'_>, &Path, &Rc<RefCell<EngineContext>>) -> Result<()>;
-
-struct BootstrapStep {
-    name: &'static str,
-    apply: PreSystemStep,
-}
-
-// Keep bootstrap ordering explicit so parity diffs point at the first divergent step.
-const PRE_SYSTEM_STEPS: &[BootstrapStep] = &[
-    BootstrapStep {
-        name: "constants_and_legacy",
-        apply: constants_and_legacy_step,
-    },
-    BootstrapStep {
-        name: "system_table_and_controls",
-        apply: system_table_step,
-    },
-    BootstrapStep {
-        name: "runtime_bindings",
-        apply: runtime_bindings_step,
-    },
-    BootstrapStep {
-        name: "stubs",
-        apply: stubs_step,
-    },
-];
-
 const ACTOR_TAG: i32 = 0x52544341; // 'ACTR'
 
 fn bind_const_globals<'lua>(
@@ -105,49 +78,15 @@ pub(crate) fn install_globals_pre_system(
 ) -> Result<()> {
     let globals = lua.globals();
 
-    for step in PRE_SYSTEM_STEPS {
-        (step.apply)(lua, &globals, data_root, &context)
-            .with_context(|| format!("pre-system step {} failed", step.name))?;
-    }
+    install_constants_and_legacy(lua, &globals, &context)
+        .context("pre-system: constants_and_legacy")?;
+    install_system_table(lua, &globals).context("pre-system: system_table_and_controls")?;
+    install_runtime_bindings(lua, &globals, data_root, &context)
+        .context("pre-system: runtime_bindings")?;
+    with_suppressed_registered_globals(|| install_stubbed_globals(lua, &globals, &context))
+        .context("pre-system: stubs")?;
 
     Ok(())
-}
-
-fn constants_and_legacy_step(
-    lua: &Lua,
-    globals: &Table<'_>,
-    _data_root: &Path,
-    context: &Rc<RefCell<EngineContext>>,
-) -> Result<()> {
-    install_constants_and_legacy(lua, globals, context)
-}
-
-fn system_table_step(
-    lua: &Lua,
-    globals: &Table<'_>,
-    _data_root: &Path,
-    _context: &Rc<RefCell<EngineContext>>,
-) -> Result<()> {
-    install_system_table(lua, globals)?;
-    Ok(())
-}
-
-fn runtime_bindings_step(
-    lua: &Lua,
-    globals: &Table<'_>,
-    data_root: &Path,
-    context: &Rc<RefCell<EngineContext>>,
-) -> Result<()> {
-    install_runtime_bindings(lua, globals, data_root, context)
-}
-
-fn stubs_step(
-    lua: &Lua,
-    globals: &Table<'_>,
-    _data_root: &Path,
-    context: &Rc<RefCell<EngineContext>>,
-) -> Result<()> {
-    with_suppressed_registered_globals(|| install_stubbed_globals(lua, globals, context))
 }
 
 fn install_constants_and_legacy<'lua>(
@@ -230,25 +169,6 @@ pub(crate) fn install_globals(
     install_globals_pre_system(lua, data_root, context.clone())?;
     install_globals_post_system(lua, context)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pre_system_steps_are_ordered_for_parity() {
-        let names: Vec<&str> = PRE_SYSTEM_STEPS.iter().map(|step| step.name).collect();
-        assert_eq!(
-            names,
-            vec![
-                "constants_and_legacy",
-                "system_table_and_controls",
-                "runtime_bindings",
-                "stubs"
-            ]
-        );
-    }
 }
 
 fn install_basic_functions_pre_system(
@@ -895,13 +815,39 @@ fn apply_control_manifest(
     Ok(())
 }
 
+/// Installs stubbed Lua 3.1-style `io` helpers expected by retail boot scripts.
+///
+/// Lua 3.1 used a stateful I/O API: `readfrom("file.txt")` opened that file and
+/// stored a handle (userdata tagged with an I/O tag) in `_INPUT`; `writeto` and
+/// `appendto` similarly set `_OUTPUT`. Plain `read()`/`write()` then operate on
+/// the current `_INPUT`/`_OUTPUT` handle instead of returning/accepting file
+/// objects.
+///
+/// This shim (no real file I/O):
+/// - registers legacy I/O tags (handle plus retail's unused "fallback" tag) so
+///   fabricated handles match retail telemetry;
+/// - treats handles as tagged userdata placeholders for the current "open file";
+/// - keeps a shared current-handle slot updated by `readfrom`/`writeto`/`appendto`;
+/// - provides minimal `read` (nil) and `write` (stderr log) shims for parity;
+/// - publishes placeholder `_INPUT`/`_OUTPUT`/`_STDIN`/`_STDOUT`/`_STDERR` globals.
+/// Retail also registers a secondary I/O tag labeled "io_fallback"; the stub
+/// registers it too to keep tag numbering/labels aligned even though it never
+/// produces fallback userdata.
+///
+/// See also: <https://www.lua.org/manual/3.1/manual.html#2.6> and
+/// <https://www.lua.org/ftp/lua-3.1.tar.gz> (iolib.c).
 fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
-    // Legacy Lua 3 I/O shims expected by retail boot scripts.
+    // These tags (-16/-17) mirror retail's legacy Lua 3 I/O tagging: one for
+    // active handles and one ("fallback") the retail iolib also registers.
+    // Keeping both preserves tag ids/labels seen in telemetry even though the
+    // stub never fabricates a fallback userdata.
     const IO_HANDLE_TAG: i32 = -16;
     const IO_FALLBACK_TAG: i32 = -17;
     const IO_TAG_ALIAS: &str = "lua_iolibopen";
 
     register_tag(IO_HANDLE_TAG, Some(IO_TAG_ALIAS), Some("io_handle"));
+    // Retail also registers a fallback I/O tag; keep it so tag ids/labels match even
+    // though the stubbed I/O never fabricates a fallback userdata.
     register_tag(IO_FALLBACK_TAG, Some(IO_TAG_ALIAS), Some("io_fallback"));
 
     let io_handle = Rc::new(RefCell::new(None::<String>));
@@ -964,37 +910,18 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
         Ok(())
     })?;
 
-    const IO_UPVALUES: i32 = 2;
-
-    bind_io_function(lua, globals, "readfrom", readfrom, IO_UPVALUES)?;
-    bind_io_function(lua, globals, "writeto", writeto, IO_UPVALUES)?;
-    bind_io_function(lua, globals, "appendto", appendto, IO_UPVALUES)?;
-    bind_io_function(lua, globals, "read", read, IO_UPVALUES)?;
-    bind_io_function(lua, globals, "write", write, IO_UPVALUES)?;
+    set_global(lua, globals, "readfrom", readfrom)?;
+    set_global(lua, globals, "writeto", writeto)?;
+    set_global(lua, globals, "appendto", appendto)?;
+    set_global(lua, globals, "read", read)?;
+    set_global(lua, globals, "write", write)?;
 
     for name in ["_INPUT", "_OUTPUT", "_STDIN", "_STDOUT", "_STDERR"] {
-        let fabricated = next_fabricated_handle();
         let userdata = lua.create_userdata(TaggedHandle::new(IO_HANDLE_TAG))?;
-        let handle = ptr_to_handle(userdata.to_pointer());
-        let meta = RegisteredGlobalMeta {
-            ..Default::default()
-        };
-        log_push_usertag(fabricated.raw, IO_HANDLE_TAG, handle);
-        with_registered_global_hint(meta, || set_global(lua, globals, name, userdata))?;
+        set_global(lua, globals, name, userdata)?;
     }
 
     Ok(())
-}
-
-fn bind_io_function<'lua>(
-    lua: &'lua Lua,
-    globals: &Table<'lua>,
-    name: &str,
-    func: Function<'lua>,
-    upvalues: i32,
-) -> LuaResult<()> {
-    let meta = RegisteredGlobalMeta { upvalues };
-    with_registered_global_hint(meta, || set_global(lua, globals, name, func))
 }
 
 fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {
