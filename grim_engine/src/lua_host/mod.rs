@@ -3,15 +3,13 @@ mod legacy_lua;
 mod telemetry;
 
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use grim_telemetry_schema::{EngineBootPhaseStatus, EngineEvent};
-use mlua::{Lua, LuaOptions, StdLib, Table, Value};
+use mlua::{Lua, LuaOptions, StdLib};
 
 pub fn log_engine_exit(
     status: &str,
@@ -24,27 +22,12 @@ pub fn log_engine_exit(
 }
 
 fn run_phase<T>(name: &str, phase: impl FnOnce() -> Result<T>) -> Result<T> {
-    let start = Instant::now();
-    telemetry::log_event(EngineEvent::EngineBootPhase {
-        phase: name.to_string(),
-        status: EngineBootPhaseStatus::Start,
-        elapsed_ms: None,
-    });
-    let result = phase();
-    let status = if result.is_ok() {
-        EngineBootPhaseStatus::Ok
-    } else {
-        EngineBootPhaseStatus::Error
-    };
-    telemetry::log_event(EngineEvent::EngineBootPhase {
-        phase: name.to_string(),
-        status,
-        elapsed_ms: Some(start.elapsed().as_millis() as u64),
-    });
-    result
+    let _ = name;
+    phase()
 }
 
 pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Result<EngineRuntime> {
+    telemetry::log_boot_sequence_start();
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
         .context("initialising Lua runtime with standard libraries")?;
     let context = Rc::new(RefCell::new(context::EngineContext::new(verbose, headless)));
@@ -78,12 +61,8 @@ pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Res
         })?;
         Ok(())
     })();
-    if verbose {
-        if let Err(err) = scan_parent_cycles(&lua) {
-            eprintln!("[grim_engine][scan_parent_cycles] {err}");
-        }
-    }
     setup_result?;
+    telemetry::log_boot_sequence_complete(None);
 
     let snapshot = context.borrow();
     context::dump_runtime_summary(&snapshot);
@@ -210,116 +189,4 @@ impl EngineRuntime {
     }
 }
 
-const PARENT_SCAN_TABLE_LIMIT: usize = 4096;
-const PARENT_SCAN_CHAIN_LIMIT: usize = 128;
-
-fn scan_parent_cycles(lua: &Lua) -> mlua::Result<()> {
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new();
-    let mut reported = HashSet::new();
-    let globals = lua.globals();
-    telemetry::register_table_label(globals.to_pointer(), "global:_G");
-    queue.push_back((globals, Some("global:_G".to_string())));
-
-    while let Some((table, label)) = queue.pop_front() {
-        if visited.len() >= PARENT_SCAN_TABLE_LIMIT {
-            break;
-        }
-        let ptr = table.to_pointer() as usize;
-        if !visited.insert(ptr) {
-            continue;
-        }
-        if let Some(ref name) = label {
-            telemetry::register_table_label(table.to_pointer(), name.clone());
-        }
-        if let Some(chain) = find_parent_cycle(&table, label.as_deref(), &mut reported)? {
-            log_parent_cycle(chain);
-        }
-
-        for pair in table.clone().pairs::<Value, Value>() {
-            let Ok((key, value)) = pair else { continue };
-            if let Value::Table(child) = value {
-                let child_label = derive_child_label(label.as_deref(), &key);
-                if let Some(ref name) = child_label {
-                    telemetry::register_table_label(child.to_pointer(), name.clone());
-                }
-                queue.push_back((child, child_label.or_else(|| label.clone())));
-            }
-            if visited.len() >= PARENT_SCAN_TABLE_LIMIT {
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn find_parent_cycle(
-    table: &Table,
-    label: Option<&str>,
-    reported: &mut HashSet<usize>,
-) -> mlua::Result<Option<Vec<(usize, String, Option<String>)>>> {
-    let mut chain: Vec<(usize, String, Option<String>)> = Vec::new();
-    let mut seen = HashSet::new();
-    let mut current = table.clone();
-    let mut current_label = label.map(str::to_string);
-
-    for _ in 0..PARENT_SCAN_CHAIN_LIMIT {
-        let info = describe_table(&current, current_label.as_deref());
-        if !seen.insert(info.0) {
-            if reported.contains(&info.0) {
-                return Ok(None);
-            }
-            for entry in &chain {
-                reported.insert(entry.0);
-            }
-            reported.insert(info.0);
-            chain.push(info);
-            return Ok(Some(chain));
-        }
-        current_label = info.2.clone();
-        chain.push(info);
-        match current.raw_get::<_, Value>("parent") {
-            Ok(Value::Table(parent)) => {
-                current = parent;
-            }
-            _ => break,
-        }
-    }
-
-    Ok(None)
-}
-
-fn describe_table(table: &Table, fallback_label: Option<&str>) -> (usize, String, Option<String>) {
-    let ptr = table.to_pointer();
-    let handle = telemetry::ptr_to_handle(ptr);
-    let label = telemetry::table_label(ptr).or_else(|| fallback_label.map(str::to_string));
-    (ptr as usize, handle, label)
-}
-
-fn derive_child_label(parent: Option<&str>, key: &Value) -> Option<String> {
-    let parent = parent?;
-    let suffix = match key {
-        Value::String(text) => text.to_str().ok().map(|s| s.to_string()),
-        Value::Integer(num) => Some(num.to_string()),
-        Value::Number(num) => Some(num.to_string()),
-        _ => None,
-    }?;
-    Some(format!("{parent}.{suffix}"))
-}
-
-fn log_parent_cycle(chain: Vec<(usize, String, Option<String>)>) {
-    if chain.is_empty() {
-        return;
-    }
-    let path = chain
-        .iter()
-        .map(|(_, handle, label)| label.clone().unwrap_or_else(|| handle.clone()))
-        .collect::<Vec<_>>()
-        .join(" -> ");
-    telemetry::log_event(EngineEvent::LuaParentCycleScan {
-        table: chain[0].1.clone(),
-        depth: chain.len() as u64,
-        path,
-        label: chain[0].2.clone(),
-    });
-}
+// Parent-cycle scan removed; boot telemetry now covers the boot window only.

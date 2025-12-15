@@ -5,17 +5,16 @@
 //! through a cutscene state machine and is fanned out to sinks so parity tweaks
 //! stay isolated from hook wiring and file IO.
 use crate::{
-    logging::{log_event, log_event_to_writer, log_line, LuaEvent},
+    logging::{log_boot_sequence_complete, log_event, log_event_to_writer, log_line, LuaEvent},
     lua_api::{
-        call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getnumber,
-        call_real_lua_getparam, call_real_lua_getstring, call_real_lua_isnumber,
-        call_real_lua_isstring, call_real_lua_push_c_closure, call_real_lua_setglobal,
-        LuaCFunction,
+        call_real_lua_getcfunction, call_real_lua_getglobal, call_real_lua_getparam,
+        call_real_lua_getstring, call_real_lua_isstring, call_real_lua_push_c_closure,
+        call_real_lua_setglobal, LuaCFunction,
     },
 };
 use grim_telemetry_schema::{
     normalized_movie_label, CutscenePhase, CutscenePlaying, CutsceneResult, CutsceneSkipPhase,
-    JsonlWriter, INTRO_TIMELINE_LABEL, IntroTimelineData, TimelineEvent,
+    IntroTimelineData, JsonlWriter, TimelineEvent, INTRO_TIMELINE_LABEL,
 };
 use std::{
     cell::Cell,
@@ -35,8 +34,6 @@ struct TelemetryHooks {
     fullscreen_poll_original: Option<LuaCFunction>,
     movie_poll_original: Option<LuaCFunction>,
     stop_movie_original: Option<LuaCFunction>,
-    make_current_set_original: Option<LuaCFunction>,
-    make_current_setup_original: Option<LuaCFunction>,
     installed: bool,
     install_logged_failure: bool,
     state: CutsceneStateMachine,
@@ -53,8 +50,6 @@ impl TelemetryHooks {
                 fullscreen_poll_original: None,
                 movie_poll_original: None,
                 stop_movie_original: None,
-                make_current_set_original: None,
-                make_current_setup_original: None,
                 installed: false,
                 install_logged_failure: false,
                 state: CutsceneStateMachine::default(),
@@ -63,12 +58,12 @@ impl TelemetryHooks {
         })
     }
 
-    /// Installs Lua wrappers for movies and rooms once; defers to later ticks on failure.
+    /// Installs Lua wrappers once; defers to later ticks on failure.
     fn maybe_install_hooks(&mut self) {
         if self.installed {
             return;
         }
-        let installed_any = self.install_movie_wrappers() | self.install_room_wrappers();
+        let installed_any = self.install_movie_wrappers();
         if installed_any {
             self.installed = true;
             self.install_logged_failure = false;
@@ -119,28 +114,6 @@ impl TelemetryHooks {
             || stop_movie_wrapped
     }
 
-    /// Hooks room transition functions so the intro follow-up room can be recorded.
-    fn install_room_wrappers(&mut self) -> bool {
-        let make_set = resolve_cfunction("MakeCurrentSet");
-        let make_setup = resolve_cfunction("MakeCurrentSetup");
-
-        self.make_current_set_original = make_set;
-        self.make_current_setup_original = make_setup;
-
-        let set_wrapped = wrap_if_present(
-            "MakeCurrentSet",
-            self.make_current_set_original,
-            make_current_set_wrapper,
-        );
-        let setup_wrapped = wrap_if_present(
-            "MakeCurrentSetup",
-            self.make_current_setup_original,
-            make_current_setup_wrapper,
-        );
-
-        set_wrapped || setup_wrapped
-    }
-
     fn record_fullscreen_start(&mut self, movie_name: &str) {
         let events = self.state.record_fullscreen_start(movie_name);
         self.sinks.emit(events);
@@ -159,17 +132,6 @@ impl TelemetryHooks {
     fn record_cutscene_skip_request(&mut self) {
         let events = self.state.record_cutscene_skip_request();
         self.sinks.emit(events);
-    }
-
-    fn record_post_intro_room_event(
-        &mut self,
-        source: &str,
-        set: Option<String>,
-        setup: Option<String>,
-    ) {
-        if let Some(event) = self.state.record_post_intro_room_event(source, set, setup) {
-            self.sinks.emit(vec![event]);
-        }
     }
 }
 
@@ -329,48 +291,6 @@ unsafe extern "C" fn stop_movie_wrapper() {
     }
 }
 
-/// Wraps `MakeCurrentSet`, capturing the first post-intro set transition.
-unsafe extern "C" fn make_current_set_wrapper() {
-    let set = read_string_arg(1);
-    let original = {
-        let hooks = TelemetryHooks::shared()
-            .lock()
-            .expect("telemetry mutex poisoned");
-        hooks.make_current_set_original
-    };
-    if let Some(func) = original {
-        func();
-    } else {
-        log_line("MakeCurrentSet wrapper missing original target");
-        return;
-    }
-
-    if let Ok(mut hooks) = TelemetryHooks::shared().lock() {
-        hooks.record_post_intro_room_event("MakeCurrentSet", set, None);
-    }
-}
-
-/// Wraps `MakeCurrentSetup`, capturing the first post-intro setup transition.
-unsafe extern "C" fn make_current_setup_wrapper() {
-    let setup = read_string_arg(1).or_else(|| read_number_arg(1).map(format_number_arg));
-    let original = {
-        let hooks = TelemetryHooks::shared()
-            .lock()
-            .expect("telemetry mutex poisoned");
-        hooks.make_current_setup_original
-    };
-    if let Some(func) = original {
-        func();
-    } else {
-        log_line("MakeCurrentSetup wrapper missing original target");
-        return;
-    }
-
-    if let Ok(mut hooks) = TelemetryHooks::shared().lock() {
-        hooks.record_post_intro_room_event("MakeCurrentSetup", None, setup);
-    }
-}
-
 /// Replaces a Lua global with a wrapper closure, returning success.
 fn replace_global(name: &str, wrapper: LuaCFunction) -> bool {
     let Ok(cstr) = CString::new(name) else {
@@ -440,24 +360,6 @@ fn read_string_arg(index: i32) -> Option<String> {
     call_real_lua_getstring(first)
 }
 
-/// Reads the argument at `index` as a number if present.
-fn read_number_arg(index: i32) -> Option<f64> {
-    let first = call_real_lua_getparam(index)?;
-    if !call_real_lua_isnumber(first) {
-        return None;
-    }
-    call_real_lua_getnumber(first)
-}
-
-/// Formats a numeric Lua argument as a compact string (drops trailing .0).
-fn format_number_arg(value: f64) -> String {
-    if (value.fract() - 0.0).abs() < f64::EPSILON {
-        format!("{value:.0}")
-    } else {
-        format!("{value}")
-    }
-}
-
 /// Captures a boolean-ish result pushed by poll wrappers while restoring prior state.
 fn capture_playing_from_poll<F: FnOnce() -> Option<()>>(call_original: F) -> PlayingState {
     // Poll wrappers mark capture active, let the original call run (which may push
@@ -517,12 +419,7 @@ struct CutsceneStateMachine {
     active_movie_name: Option<String>,
     last_finished_movie_label: Option<String>,
     start_instant: Option<Instant>,
-    poll_count: u64,
     skip_requested: bool,
-    post_intro_room_pending: bool,
-    post_intro_room_reported: bool,
-    post_intro_pending_set: Option<String>,
-    post_intro_pending_setup: Option<String>,
     next_seq: u64,
 }
 
@@ -533,12 +430,7 @@ impl Default for CutsceneStateMachine {
             active_movie_name: None,
             last_finished_movie_label: None,
             start_instant: None,
-            poll_count: 0,
             skip_requested: false,
-            post_intro_room_pending: false,
-            post_intro_room_reported: false,
-            post_intro_pending_set: None,
-            post_intro_pending_setup: None,
             next_seq: 1,
         }
     }
@@ -558,17 +450,16 @@ impl CutsceneStateMachine {
         self.active_movie_name = Some(movie_name.to_string());
         self.last_finished_movie_label = None;
         self.start_instant = Some(Instant::now());
-        self.poll_count = 0;
         self.skip_requested = false;
         if let Some(label) = label {
             events.push(self.intro_timeline_event(format!("{label}.start")));
         }
+        log_boot_sequence_complete(None);
         events.push(self.cutscene_event(
             CutscenePhase::Start,
             PlayingState::Known(true),
             CutsceneMeta {
                 elapsed_ms: Some(0),
-                poll_count: Some(0),
                 result: None,
             },
         ));
@@ -576,17 +467,10 @@ impl CutsceneStateMachine {
     }
 
     fn record_fullscreen_poll(&mut self, playing: PlayingState) -> Vec<TelemetryEvent> {
-        self.poll_count = self.poll_count.saturating_add(1);
+        if self.active_movie_label.is_none() && self.active_movie_name.is_none() {
+            return Vec::new();
+        }
         let mut events = Vec::new();
-        events.push(self.cutscene_event(
-            CutscenePhase::Poll,
-            playing,
-            CutsceneMeta {
-                elapsed_ms: self.elapsed_ms(),
-                poll_count: Some(self.poll_count),
-                result: None,
-            },
-        ));
         if let PlayingState::Known(false) = playing {
             let reason = if self.skip_requested {
                 EndReason::StopCalled
@@ -599,6 +483,9 @@ impl CutsceneStateMachine {
     }
 
     fn record_cutscene_skip_request(&mut self) -> Vec<TelemetryEvent> {
+        if self.active_movie_label.is_none() && self.active_movie_name.is_none() {
+            return Vec::new();
+        }
         self.skip_requested = true;
         vec![self.cutscene_skip_event(
             CutsceneSkipPhase::Request,
@@ -607,7 +494,6 @@ impl CutsceneStateMachine {
                 .or(self.active_movie_label.as_deref()),
             self.active_movie_label.as_deref(),
             self.elapsed_ms(),
-            Some(self.poll_count),
         )]
     }
 
@@ -616,6 +502,9 @@ impl CutsceneStateMachine {
         playing: PlayingState,
         reason: Option<EndReason>,
     ) -> Vec<TelemetryEvent> {
+        if self.active_movie_label.is_none() && self.active_movie_name.is_none() {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         let active_label = self.active_movie_label.clone();
         let active_name = self.active_movie_name.clone();
@@ -632,23 +521,15 @@ impl CutsceneStateMachine {
                 movie,
                 label,
                 self.elapsed_ms(),
-                Some(self.poll_count),
             ));
         }
 
         if let Some(label) = active_label.as_deref() {
             events.push(self.intro_timeline_event(format!("{label}.end")));
-            if label == "movie.intro" {
-                self.post_intro_room_pending = true;
-                self.post_intro_room_reported = false;
-                self.post_intro_pending_set = None;
-                self.post_intro_pending_setup = None;
-            }
         }
 
         let meta = CutsceneMeta {
             elapsed_ms: self.elapsed_ms(),
-            poll_count: Some(self.poll_count),
             result: reason,
         };
         events.push(self.cutscene_event(CutscenePhase::End, playing, meta));
@@ -659,38 +540,9 @@ impl CutsceneStateMachine {
         self.active_movie_name = None;
         self.active_movie_label = None;
         self.start_instant = None;
-        self.poll_count = 0;
         self.skip_requested = false;
 
         events
-    }
-
-    fn record_post_intro_room_event(
-        &mut self,
-        source: &str,
-        set: Option<String>,
-        setup: Option<String>,
-    ) -> Option<TelemetryEvent> {
-        if !self.post_intro_room_pending || self.post_intro_room_reported {
-            return None;
-        }
-
-        if let Some(value) = set {
-            self.post_intro_pending_set.get_or_insert(value);
-        }
-        if let Some(value) = setup {
-            self.post_intro_pending_setup.get_or_insert(value);
-        }
-
-        let event = LuaEvent::PostIntroRoom {
-            source: source.to_string(),
-            set: self.post_intro_pending_set.as_deref().map(str::to_string),
-            setup: self.post_intro_pending_setup.as_deref().map(str::to_string),
-            after_movie: self.last_finished_movie_label.clone(),
-        };
-        self.post_intro_room_reported = true;
-        self.post_intro_room_pending = false;
-        Some(TelemetryEvent::Structured(event))
     }
 
     fn elapsed_ms(&self) -> Option<u128> {
@@ -736,7 +588,6 @@ impl CutsceneStateMachine {
             phase,
             playing,
             elapsed_ms: meta.elapsed_ms,
-            polls: meta.poll_count,
             result,
         })
     }
@@ -747,14 +598,12 @@ impl CutsceneStateMachine {
         movie: Option<&str>,
         movie_label: Option<&str>,
         elapsed_ms: Option<u128>,
-        polls: Option<u64>,
     ) -> TelemetryEvent {
         TelemetryEvent::Structured(LuaEvent::CutsceneSkip {
             phase,
             movie: movie.map(str::to_string),
             movie_label: movie_label.map(str::to_string),
             elapsed_ms,
-            polls,
         })
     }
 }
@@ -762,7 +611,6 @@ impl CutsceneStateMachine {
 #[derive(Default)]
 struct CutsceneMeta {
     elapsed_ms: Option<u128>,
-    poll_count: Option<u64>,
     result: Option<EndReason>,
 }
 
@@ -829,13 +677,6 @@ mod tests {
         ));
 
         let end_events = state.record_fullscreen_poll(PlayingState::Known(false));
-        assert!(matches!(
-            end_events[0],
-            TelemetryEvent::Structured(LuaEvent::Cutscene {
-                phase: CutscenePhase::Poll,
-                ..
-            })
-        ));
         assert!(end_events.iter().any(|event| matches!(
             event,
             TelemetryEvent::IntroTimeline(TimelineEvent::IntroTimeline { ref data, .. })
@@ -872,27 +713,5 @@ mod tests {
                 ..
             })
         )));
-    }
-
-    #[test]
-    fn post_intro_room_emits_once() {
-        let mut state = CutsceneStateMachine::default();
-        intro_start_events(&mut state);
-        let _ = state.record_fullscreen_poll(PlayingState::Known(false));
-
-        let first =
-            state.record_post_intro_room_event("MakeCurrentSet", Some("set_co".into()), None);
-        assert!(matches!(
-            first,
-            Some(TelemetryEvent::Structured(LuaEvent::PostIntroRoom {
-                ref source,
-                ref set,
-                setup: None,
-                ..
-            })) if source == "MakeCurrentSet" && set.as_deref() == Some("set_co")
-        ));
-
-        let second = state.record_post_intro_room_event("MakeCurrentSetup", None, Some("0".into()));
-        assert!(second.is_none());
     }
 }

@@ -14,14 +14,12 @@ use grim_telemetry_schema::trace_utils::{
     tag_alias,
 };
 use grim_telemetry_schema::{
-    EngineEvent, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig, TelemetryLogger,
-    UpvaluePreview, ValueFields, ValueType,
+    BootSequenceTracker, EngineEvent, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig,
+    TelemetryLogger, UpvaluePreview, ValueFields, ValueType,
 };
 
 // Re-export common helpers so callers keep using the telemetry module surface.
-pub(crate) use grim_telemetry_schema::trace_utils::{
-    ptr_to_handle, register_table_label, table_label,
-};
+pub(crate) use grim_telemetry_schema::trace_utils::{ptr_to_handle, register_table_label};
 
 const ENGINE_ID: &str = "grim_engine";
 const VM_ID: &str = "lua";
@@ -29,6 +27,7 @@ const VM_ID: &str = "lua";
 static FABRICATED_HANDLE: AtomicU32 = AtomicU32::new(1);
 static KNOWN_TAGS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
 static FABRICATED_BY_LABEL: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static BOOT_SEQUENCE: BootSequenceTracker = BootSequenceTracker::new();
 
 static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     engine_id: ENGINE_ID,
@@ -36,10 +35,24 @@ static LOGGER: TelemetryLogger = TelemetryLogger::new(TelemetryConfig {
     log_env_vars: &["GRIM_ENGINE_LOG"],
     line_prefix: "grim_engine",
     run_id_env: Some("GRCTL_RUN_ID"),
+    raw_stream_env: Some("GRIM_RAW_TELEMETRY"),
 });
 
 pub(crate) fn log_event(event: impl grim_telemetry_schema::TelemetryEventPayload) {
     LOGGER.log_event(event);
+}
+
+pub(crate) fn log_boot_sequence_start() {
+    if let Some(event) = BOOT_SEQUENCE.boot_started() {
+        log_event(event);
+    }
+}
+
+pub(crate) fn log_boot_sequence_complete(note: Option<&str>) {
+    let note_owned = note.map(str::to_string);
+    if let Some(event) = BOOT_SEQUENCE.boot_complete(note_owned) {
+        log_event(event);
+    }
 }
 
 #[derive(Clone, Debug)]

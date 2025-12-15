@@ -1,22 +1,22 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use grim_telemetry_schema::trace_utils::handle_hex;
-use grim_telemetry_schema::{EngineEvent, LuaIndexRecursionReason, OriginFields};
+use grim_telemetry_schema::OriginFields;
 use mlua::{
     Error as LuaError, Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Value,
     Variadic,
 };
 
 use crate::lua_host::telemetry::{
-    log_event, log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle,
-    normalize_handle, origin_fields_for_ptr, ptr_to_handle, register_table_label, table_label,
+    log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle, normalize_handle,
+    origin_fields_for_ptr, ptr_to_handle, register_table_label,
 };
 
 use super::util::{
-    describe_value, handle_from_value, set_global, value_fields_from_lua,
-    with_suppressed_registered_globals, TaggedHandle,
+    handle_from_value, set_global, value_fields_from_lua, with_suppressed_registered_globals,
+    TaggedHandle,
 };
 use crate::lua_host::context::EngineContext;
 
@@ -257,68 +257,15 @@ fn install_index_hook(
     lua: &Lua,
     globals: &Table,
     fallbacks: Rc<RefCell<LegacyFallbacks>>,
-    verbose: bool,
+    _verbose: bool,
 ) -> LuaResult<()> {
     let table_meta = lua.create_table()?;
     let table_meta_key = lua.create_registry_value(table_meta.clone())?;
     let globals_ptr = globals.to_pointer();
     register_table_label(globals_ptr, "global:_G");
-    // Prevent the global reentrancy flag from triggering the index fallback when unset.
     globals.set("indexFB_disabled", false)?;
     let index_state = fallbacks.clone();
-    let guard_state = if verbose {
-        Some(Rc::new(RefCell::new(IndexGuard::default())))
-    } else {
-        None
-    };
     let index_fb = lua.create_function(move |lua_ctx, (table, key): (Value, Value)| {
-        let key_label = describe_value(&key);
-        let mut inserted_entry: Option<(usize, String)> = None;
-        if let Some(state) = guard_state.as_ref() {
-            let mut guard = state.borrow_mut();
-            guard.depth += 1;
-            let depth = guard.depth;
-            if let Value::Table(t) = &table {
-                let ptr = t.to_pointer() as usize;
-                let entry = (ptr, key_label.clone());
-                if guard.seen.contains(&entry) {
-                    log_event(EngineEvent::LuaIndexRecursion {
-                        table: ptr_to_handle(t.to_pointer()),
-                        key: key_label.clone(),
-                        depth: depth as u64,
-                        reason: LuaIndexRecursionReason::Cycle,
-                        label: table_label(t.to_pointer()),
-                    });
-                    guard.depth -= 1;
-                    return Err(LuaError::RuntimeError(
-                        "index fallback parent cycle detected".to_string(),
-                    ));
-                }
-                guard.seen.insert(entry.clone());
-                inserted_entry = Some(entry);
-            }
-            if depth > INDEX_RECURSION_LIMIT {
-                let (table_handle, label) = match &table {
-                    Value::Table(t) => (ptr_to_handle(t.to_pointer()), table_label(t.to_pointer())),
-                    other => (describe_value(other), None),
-                };
-                log_event(EngineEvent::LuaIndexRecursion {
-                    table: table_handle,
-                    key: key_label.clone(),
-                    depth: depth as u64,
-                    reason: LuaIndexRecursionReason::DepthLimit,
-                    label,
-                });
-                guard.depth -= 1;
-                if let Some(entry) = inserted_entry {
-                    guard.seen.remove(&entry);
-                }
-                return Err(LuaError::RuntimeError(format!(
-                    "index fallback recursion depth exceeded ({INDEX_RECURSION_LIMIT})"
-                )));
-            }
-        }
-
         // Avoid routing globals through the index fallback to prevent recursion
         // when scripts probe table.parent, but fall back to the index handler
         // when no getglobal override is present.
@@ -332,22 +279,11 @@ fn install_index_hook(
             };
             state.handler_for_event(lua_ctx, event)?
         };
-        let result = if let Some(func) = handler {
+        if let Some(func) = handler {
             func.call::<_, Value>((table, key))
         } else {
             Ok(Value::Nil)
-        };
-
-        if let Some(state) = guard_state.as_ref() {
-            let mut guard = state.borrow_mut();
-            if let Some(entry) = inserted_entry {
-                guard.seen.remove(&entry);
-            }
-            if guard.depth > 0 {
-                guard.depth -= 1;
-            }
         }
-        result
     })?;
 
     let newindex_fb =
@@ -401,14 +337,6 @@ struct LegacyFallbacks {
     fallbacks: HashMap<String, RegistryKey>,
     tag_methods: HashMap<i64, HashMap<String, RegistryKey>>,
 }
-
-#[derive(Default)]
-struct IndexGuard {
-    depth: usize,
-    seen: HashSet<(usize, String)>,
-}
-
-const INDEX_RECURSION_LIMIT: usize = 64;
 
 impl LegacyFallbacks {
     const TAG_NIL: i64 = -7;

@@ -12,8 +12,7 @@ without modifying the game's assets.
 - Every line is `engine=retail vm_id=lua32 seq=<counter> event=<name> ...` with
   key/value pairs; values containing whitespace are quoted and escaped. A
   monotonic `ts=<millis>` is included for temporal alignment.
-- Output now always includes provenance details like `label`, `origin`, `module`,
-  `symbol`, `demangled`, `symbol_source=map`, and per-event extras
+- Output now always includes provenance details like `label` and `origin`, plus per-event extras
   (`upvalues`, `calls`, `ref`, `lock`) to match the Rust engine
   trace.
 - The retail shim always emits `engine=retail` and `vm_id=lua32`; instrument the
@@ -24,8 +23,7 @@ without modifying the game's assets.
 ## Event reference (raw Lua VM surface)
 - Common envelope on every line: `seq`, `ts`, `event=<name>`, followed by event
   fields, then `engine=retail vm_id=lua32` (and optional `run_id` if set).
-- Origin fields appear when available: `origin`, `module`, `symbol`,
-  `symbol_source`.
+- Origin fields appear when available: `origin`.
 - Value fields (when a value is inspected): `value_type`, `value`, `value_len`,
   `value_preview`, `tag`, `func`
   (pointers are emitted as hex; decimal payload is omitted for userdata pushes).
@@ -49,10 +47,9 @@ without modifying the game's assets.
 - Tag plumbing: `lua_settag`, `lua_copytagmethods` (to/from/result), `lua_settagmethod`
   (tag, event_name), `lua_setfallback` (event, handle + value fields). The shared schema still
   includes `tag_state`, but the retail shim no longer emits it.
-- Cutscenes (retail shim only): `cutscene` (movie/movie_label/phase/playing/elapsed_ms/polls/result),
-  `cutscene_skip` (phase/movie/movie_label/elapsed_ms/polls), and `post_intro_room`
-  (source/set/setup/after_movie) are typed in the shared schema and emitted
-  only by the retail shim.
+- Cutscenes (retail shim only): `cutscene` (movie/movie_label/phase/playing/elapsed_ms/result)
+  and `cutscene_skip` (phase/movie/movie_label/elapsed_ms) are typed in the shared schema and emitted
+  only by the retail shim for intro/logos playback.
 - Other: `lua_collectgarbage`, `lua_error` (message), `lua_setglobal`/`lua_rawsetglobal`/`lua_rawgetglobal`
   variants, userdata/table/number string inspection via value fields. Mutators
   like `lua_createtable`, `lua_settable` / `lua_rawsettable` / `lua_rawsetglobal`, and

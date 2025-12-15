@@ -1,11 +1,12 @@
 use crate::{
-    logging::log_line,
+    logging::{log_boot_sequence_start, log_line},
     lua_api::{call_real_lua_newstate, call_real_lua_newthread, call_real_lua_open, LuaState},
 };
 use std::ptr;
 
 /// Opens a new Lua state via the retail VM, returning null if the symbol is missing.
 pub(crate) unsafe fn trace_lua_open() -> LuaState {
+    log_boot_sequence_start();
     match call_real_lua_open() {
         Some(state) => state,
         None => {
@@ -17,6 +18,7 @@ pub(crate) unsafe fn trace_lua_open() -> LuaState {
 
 /// Creates a new Lua state via the retail VM, returning null if the symbol is missing.
 pub(crate) unsafe fn trace_lua_newstate() -> LuaState {
+    log_boot_sequence_start();
     match call_real_lua_newstate() {
         Some(state) => state,
         None => {
