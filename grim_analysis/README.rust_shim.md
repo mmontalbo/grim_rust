@@ -47,9 +47,6 @@ without modifying the game's assets.
 - Tag plumbing: `lua_settag`, `lua_copytagmethods` (to/from/result), `lua_settagmethod`
   (tag, event_name), `lua_setfallback` (event, handle + value fields). The shared schema still
   includes `tag_state`, but the retail shim no longer emits it.
-- Cutscenes (retail shim only): `cutscene` (movie/movie_label/phase/playing/elapsed_ms/result)
-  and `cutscene_skip` (phase/movie/movie_label/elapsed_ms) are typed in the shared schema and emitted
-  only by the retail shim for intro/logos playback.
 - Other: `lua_collectgarbage`, `lua_error` (message), `lua_setglobal`/`lua_rawsetglobal`/`lua_rawgetglobal`
   variants, userdata/table/number string inspection via value fields. Mutators
   like `lua_createtable`, `lua_settable` / `lua_rawsettable` / `lua_rawsetglobal`, and
@@ -129,9 +126,8 @@ LD_PRELOAD=/path/to/libgrim_analysis.so ./GrimFandango.exe
   - `refs.rs` (lua_ref/getref/unref)
   - `calls.rs` (do* buffers/calls, collectgarbage, lua_error)
   - `tags.rs` (setfallback/tag/tagmethod plumbing)
-  Shared helpers live in `trace/mod.rs`. Cutscene/movie wrappers and post-intro room tracking live in `grim_analysis/src/telemetry.rs`.
-- Movie/room telemetry also writes newline-delimited JSON to `mods/telemetry_events.jsonl` (created on first movie event). Delete the file between runs if you want a clean capture; there is no rotation.
-- Quick smoke loop: `grctl retail start --attach` will LD_PRELOAD the shim from the workspace target; tail the shim log or `mods/telemetry_events.jsonl` to confirm wrappers are firing before making changes.
+  Shared helpers live in `trace/mod.rs`. Retail-only movie wrappers are currently disabled for boot parity.
+- Quick smoke loop: `grctl retail start --attach` will LD_PRELOAD the shim from the workspace target; tail the shim log to confirm wrappers are firing before making changes.
 
 On startup you should see log lines that look like
 `[grim-rust-shim] engine=retail vm_id=lua32 seq=123 ts=456 event=lua_pushcclosure name=lua_pushCclosure func=0xf7e31234`

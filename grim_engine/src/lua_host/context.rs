@@ -2,8 +2,7 @@ mod bindings;
 mod scripts;
 
 pub(super) use bindings::{
-    call_boot, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene,
-    install_globals_post_system, install_globals_pre_system, install_package_path,
+    call_boot, install_globals_post_system, install_globals_pre_system, install_package_path,
     load_system_script, override_boot_stubs,
 };
 
@@ -17,19 +16,7 @@ pub(super) struct EngineContext {
     headless: bool,
     scripts: ScriptRuntime,
     events: Vec<String>,
-    active_movie: Option<ActiveMovie>,
     ref_registry: RefRegistry,
-}
-
-struct ActiveMovie {
-    name: String,
-    remaining_polls: u32,
-}
-
-pub(super) enum MovieStep {
-    Idle,
-    Active(String),
-    Finished(String),
 }
 
 impl EngineContext {
@@ -39,7 +26,6 @@ impl EngineContext {
             headless,
             scripts: ScriptRuntime::new(),
             events: Vec::new(),
-            active_movie: None,
             ref_registry: RefRegistry::new(),
         }
     }
@@ -66,10 +52,6 @@ impl EngineContext {
 
     pub(super) fn complete_script(&mut self, handle: u32) {
         self.script_runtime().complete_script(handle);
-    }
-
-    pub(super) fn events(&self) -> &[String] {
-        &self.events
     }
 
     pub(super) fn alloc_ref(
@@ -103,55 +85,5 @@ impl EngineContext {
 
     pub(super) fn remove_ref(&mut self, reference: i32) -> bool {
         self.ref_registry.remove(reference)
-    }
-
-    pub(super) fn start_fullscreen_movie(&mut self, movie: String, yields: Option<u32>) -> bool {
-        let remaining = yields.unwrap_or(3).max(1);
-        self.active_movie = Some(ActiveMovie {
-            name: movie.clone(),
-            remaining_polls: remaining,
-        });
-        self.log_event(format!("movie.start {movie}"));
-        true
-    }
-
-    pub(super) fn poll_fullscreen_movie(&mut self) -> bool {
-        matches!(
-            self.step_fullscreen_movie(),
-            MovieStep::Active(_) | MovieStep::Finished(_)
-        )
-    }
-
-    pub(super) fn request_cutscene_skip(&mut self) {
-        self.log_event("movie.skip_requested");
-    }
-
-    pub(super) fn stop_fullscreen_movie(&mut self) {
-        if let Some(active) = self.active_movie.take() {
-            self.log_event(format!("movie.stop {}", active.name));
-        }
-    }
-
-    pub(super) fn active_fullscreen_movie(&self) -> Option<String> {
-        self.active_movie.as_ref().map(|movie| movie.name.clone())
-    }
-
-    pub(super) fn step_fullscreen_movie(&mut self) -> MovieStep {
-        match self.active_movie.take() {
-            None => MovieStep::Idle,
-            Some(mut movie) => {
-                if movie.remaining_polls > 0 {
-                    movie.remaining_polls = movie.remaining_polls.saturating_sub(1);
-                }
-                if movie.remaining_polls == 0 {
-                    let name = movie.name;
-                    MovieStep::Finished(name)
-                } else {
-                    let name = movie.name.clone();
-                    self.active_movie = Some(movie);
-                    MovieStep::Active(name)
-                }
-            }
-        }
     }
 }

@@ -5,10 +5,7 @@ mod legacy;
 mod registry;
 mod util;
 
-pub(crate) use boot::{
-    call_boot, drive_active_scripts, dump_runtime_summary, ensure_intro_cutscene,
-    load_system_script, override_boot_stubs,
-};
+pub(crate) use boot::{call_boot, load_system_script, override_boot_stubs};
 #[cfg(test)]
 pub(crate) use bootstrap::install_globals;
 pub(crate) use bootstrap::{

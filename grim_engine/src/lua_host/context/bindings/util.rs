@@ -212,15 +212,6 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
     globals.set(name, value)
 }
 
-pub(super) fn value_to_u32(value: &Value) -> Option<u32> {
-    match value {
-        Value::Integer(i) if *i >= 0 => Some(*i as u32),
-        Value::Number(n) if *n >= 0.0 => Some(n.trunc() as u32),
-        Value::String(text) => text.to_str().ok()?.trim().parse().ok(),
-        _ => None,
-    }
-}
-
 pub(crate) fn describe_callable_label(value: &Value) -> String {
     match value {
         Value::String(text) => text.to_str().unwrap_or("<string>").to_string(),

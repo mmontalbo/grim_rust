@@ -6,6 +6,7 @@ Guidance for contributors working on retail/engine parity. The goal is to **recr
 - Retail telemetry is the source of truth. Do not suppress retail events or invent engine events to make traces line up.
 - `grctl` parity logs default to the semantic stream; use `--raw` only when you need VM details to debug stack mechanics.
 - Divergences are meaningful signals. If the engine emits an extra event, assumes a ref order, or omits a call, treat it as a real behavioural gap to fix.
+- The boot window ends once `_system.lua`/`BOOT(false)` completes. Engine runs now stop there; post-boot script driving and cutscene plumbing are stripped for parity captures.
 
 ## Workflow (per bug/feature)
 - Start with a short run to find the first break: `./grctl.sh parity start --timeout 3` then `./grctl.sh parity logs` (or `--from-start`) to spot the earliest divergence.
@@ -17,6 +18,7 @@ Guidance for contributors working on retail/engine parity. The goal is to **recr
 ## Do / Don’t
 - Do implement the missing behaviour (e.g. register the real binding, call the real fallback, create/populate tables in the observed order).
 - Do add targeted telemetry if you need more detail, but keep the semantic/raw split intact.
+- Do keep the engine focused on the boot window for parity work; defer runtime loops, movie playback, or stubbed script drivers to later passes.
 - Don’t mask or reorder events just to silence the diff; if retail sets a tag method, the engine must set the same hook for the same reason.
 - Don’t gate retail-consistent code paths behind debug flags to “pass parity”; parity should fall out of correct behaviour.
 

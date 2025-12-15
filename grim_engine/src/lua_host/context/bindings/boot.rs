@@ -3,12 +3,10 @@ use std::path::Path;
 use std::rc::Rc;
 
 use anyhow::{ensure, Context, Result};
-use mlua::{Function, Lua, Result as LuaResult, Value, Variadic};
+use mlua::{Function, Lua, Value, Variadic};
 
 use super::dofile::execute_script;
-use super::util::{
-    describe_callable_label, describe_value, set_global, value_to_string, value_to_u32,
-};
+use super::util::{describe_callable_label, describe_value, set_global};
 use crate::lua_host::context::EngineContext;
 use crate::lua_host::telemetry::log_dofile;
 
@@ -120,105 +118,6 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
         lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
     )?;
 
-    let start_movie_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "StartFullscreenMovie",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let movie = args
-                .first()
-                .and_then(value_to_string)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let yields = args.get(1).and_then(value_to_u32);
-            Ok(start_movie_ctx
-                .borrow_mut()
-                .start_fullscreen_movie(movie, yields))
-        })?,
-    )?;
-
-    let run_movie_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "RunFullscreenMovie",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let movie = args
-                .first()
-                .and_then(value_to_string)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let yields = args.get(1).and_then(value_to_u32);
-            Ok(run_movie_ctx
-                .borrow_mut()
-                .start_fullscreen_movie(movie, yields))
-        })?,
-    )?;
-
-    let legacy_movie_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "StartMovie",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            let movie = args
-                .first()
-                .and_then(value_to_string)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            Ok(legacy_movie_ctx
-                .borrow_mut()
-                .start_fullscreen_movie(movie, None))
-        })?,
-    )?;
-
-    let stop_movie_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "StopMovie",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            let mut ctx = stop_movie_ctx.borrow_mut();
-            ctx.request_cutscene_skip();
-            ctx.stop_fullscreen_movie();
-            Ok(())
-        })?,
-    )?;
-
-    let poll_movie_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "IsFullscreenMoviePlaying",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            let mut ctx = poll_movie_ctx.borrow_mut();
-            Ok(ctx.poll_fullscreen_movie())
-        })?,
-    )?;
-
-    let poll_movie_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "IsMoviePlaying",
-        lua.create_function(move |_, _: Variadic<Value>| {
-            let mut ctx = poll_movie_ctx.borrow_mut();
-            Ok(ctx.poll_fullscreen_movie())
-        })?,
-    )?;
-
-    set_global(
-        lua,
-        &globals,
-        "hideSkipButton",
-        lua.create_function(|_, _: Variadic<Value>| Ok(()))?,
-    )?;
-
-    set_global(
-        lua,
-        &globals,
-        "showSkipButton",
-        lua.create_function(|_, _: Variadic<Value>| Ok(()))?,
-    )?;
-
     Ok(())
 }
 
@@ -230,36 +129,4 @@ pub(crate) fn call_boot(lua: &Lua, _context: Rc<RefCell<EngineContext>>) -> Resu
     boot.call::<_, ()>((false, Value::Nil))
         .context("executing BOOT(false)")?;
     Ok(())
-}
-
-pub(crate) fn drive_active_scripts(
-    _lua: &Lua,
-    _context: Rc<RefCell<EngineContext>>,
-    _max_passes: usize,
-    _max_yields_per_script: u32,
-) -> LuaResult<()> {
-    Ok(())
-}
-
-pub(crate) fn ensure_intro_cutscene(
-    _lua: &Lua,
-    _context: Rc<RefCell<EngineContext>>,
-    _defer_playback: bool,
-) -> Result<bool> {
-    Ok(false)
-}
-
-pub(crate) fn dump_runtime_summary(state: &EngineContext) {
-    println!("Lua runtime summary:");
-    if let Some(name) = state.active_fullscreen_movie() {
-        println!("  Active movie: {name}");
-    } else {
-        println!("  Active movie: <none>");
-    }
-    if !state.events().is_empty() {
-        println!("  Event log:");
-        for event in state.events() {
-            println!("    - {event}");
-        }
-    }
 }

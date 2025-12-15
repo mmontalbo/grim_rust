@@ -1,5 +1,5 @@
 use crate::{
-    logging::{log_event, log_line, LuaEvent, OriginFields},
+    logging::{log_boot_sequence_complete, log_event, log_line, LuaEvent, OriginFields},
     lua_api::{
         call_real_lua_call, call_real_lua_callfunction, call_real_lua_collectgarbage,
         call_real_lua_dobuffer, call_real_lua_dofile, call_real_lua_dostring, call_real_lua_error,
@@ -35,7 +35,12 @@ pub(crate) unsafe fn trace_lua_dofile(path: *const c_char) -> c_int {
     record_non_push_event();
     let label = cstr_opt(path).unwrap_or_else(|| "<null>".to_string());
     telemetry::observe_lua_activity();
-    log_event(LuaEvent::Dofile { path: label });
+    log_event(LuaEvent::Dofile {
+        path: label.clone(),
+    });
+    if is_system_boot_script(&label) {
+        log_boot_sequence_complete(None);
+    }
     forward_int_result("lua_dofile", call_real_lua_dofile(path))
 }
 
@@ -127,4 +132,9 @@ pub(crate) unsafe fn trace_lua_error(message: *const c_char) {
     if !call_real_lua_error(message) {
         log_line("lua_error symbol missing; unable to propagate error to Lua VM");
     }
+}
+
+fn is_system_boot_script(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    normalized.ends_with("_system.lua") || normalized.ends_with("_system.decompiled.lua")
 }

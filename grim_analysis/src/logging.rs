@@ -35,6 +35,7 @@ pub(crate) fn log_event_with_seq(event: impl grim_telemetry_schema::TelemetryEve
     LOGGER.log_event_with_seq(event)
 }
 
+#[allow(dead_code)]
 /// Serializes and writes a structured telemetry event to an external JSONL sink.
 pub(crate) fn log_event_to_writer(
     event: impl grim_telemetry_schema::TelemetryEventPayload,

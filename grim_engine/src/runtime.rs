@@ -11,9 +11,7 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
     } = args;
 
     let result = (|| -> Result<()> {
-        let runtime = run_boot_sequence(&data_root, verbose, headless)?;
-        runtime.run()?;
-        Ok(())
+        run_boot_sequence(&data_root, verbose, headless)
     })();
 
     match result {
