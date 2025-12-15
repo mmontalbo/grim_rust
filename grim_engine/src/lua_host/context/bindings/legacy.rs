@@ -27,8 +27,7 @@ pub(super) fn install_legacy_compat<'lua>(
 ) -> LuaResult<()> {
     let fallbacks = Rc::new(RefCell::new(LegacyFallbacks::new(lua)?));
     install_fallback_globals(lua, globals, fallbacks.clone(), context.clone())?;
-    let verbose = context.borrow().verbose();
-    install_index_hook(lua, globals, fallbacks.clone(), verbose)?;
+    install_index_hook(lua, globals, fallbacks.clone())?;
     install_error_wrapper(lua, globals, fallbacks)?;
 
     // Legacy Lua exposes `call` for invoking a function with a parameter table.
@@ -257,13 +256,11 @@ fn install_index_hook(
     lua: &Lua,
     globals: &Table,
     fallbacks: Rc<RefCell<LegacyFallbacks>>,
-    _verbose: bool,
 ) -> LuaResult<()> {
     let table_meta = lua.create_table()?;
     let table_meta_key = lua.create_registry_value(table_meta.clone())?;
     let globals_ptr = globals.to_pointer();
     register_table_label(globals_ptr, "global:_G");
-    globals.set("indexFB_disabled", false)?;
     let index_state = fallbacks.clone();
     let index_fb = lua.create_function(move |lua_ctx, (table, key): (Value, Value)| {
         // Avoid routing globals through the index fallback to prevent recursion

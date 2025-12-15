@@ -6,9 +6,11 @@ use std::ptr;
 
 /// Opens a new Lua state via the retail VM, returning null if the symbol is missing.
 pub(crate) unsafe fn trace_lua_open() -> LuaState {
-    log_boot_sequence_start();
     match call_real_lua_open() {
-        Some(state) => state,
+        Some(state) => {
+            log_boot_sequence_start();
+            state
+        }
         None => {
             log_line("lua_open symbol missing; returning null");
             ptr::null_mut()
@@ -18,9 +20,11 @@ pub(crate) unsafe fn trace_lua_open() -> LuaState {
 
 /// Creates a new Lua state via the retail VM, returning null if the symbol is missing.
 pub(crate) unsafe fn trace_lua_newstate() -> LuaState {
-    log_boot_sequence_start();
     match call_real_lua_newstate() {
-        Some(state) => state,
+        Some(state) => {
+            log_boot_sequence_start();
+            state
+        }
         None => {
             log_line("lua_newstate symbol missing; returning null");
             ptr::null_mut()

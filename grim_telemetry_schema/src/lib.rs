@@ -24,6 +24,7 @@ pub const DEFAULT_FULLSCREEN_DURATION_MS: u128 = 4_200;
 pub const DEFAULT_POLL_STEP_MS: u128 = 80;
 
 pub trait TelemetryEventPayload: sealed::TelemetryEventPayload {
+    fn stream_kind(&self) -> StreamKind;
     fn into_builder(self) -> EventBuilder;
 }
 
@@ -98,6 +99,10 @@ impl TelemetryLogger {
     }
 
     pub fn log_event_with_seq(&self, event: impl TelemetryEventPayload) -> u64 {
+        let stream = event.stream_kind();
+        if matches!(stream, StreamKind::Raw) && !self.raw_stream_allowed() {
+            return 0;
+        }
         let builder = event.into_builder();
         match self.emit_event(builder) {
             Some((stream_seq, object)) => {
@@ -116,6 +121,10 @@ impl TelemetryLogger {
         event: impl TelemetryEventPayload,
         writer: &mut JsonlWriter,
     ) -> io::Result<u64> {
+        let stream = event.stream_kind();
+        if matches!(stream, StreamKind::Raw) && !self.raw_stream_allowed() {
+            return Ok(0);
+        }
         let builder = event.into_builder();
         if let Some((seq, object)) = self.emit_event(builder) {
             writer.write_json(object)?;
@@ -129,6 +138,10 @@ impl TelemetryLogger {
         &self,
         event: impl TelemetryEventPayload,
     ) -> Option<(u64, JsonMap<String, JsonValue>)> {
+        let stream = event.stream_kind();
+        if matches!(stream, StreamKind::Raw) && !self.raw_stream_allowed() {
+            return None;
+        }
         let builder = event.into_builder();
         self.emit_event(builder)
     }
@@ -1294,6 +1307,10 @@ impl From<LuaEvent> for EventBuilder {
 }
 
 impl TelemetryEventPayload for LuaEvent {
+    fn stream_kind(&self) -> StreamKind {
+        StreamKind::Raw
+    }
+
     fn into_builder(self) -> EventBuilder {
         EventBuilder::from(self)
     }
@@ -1313,6 +1330,10 @@ impl From<EngineEvent> for EventBuilder {
 }
 
 impl TelemetryEventPayload for EngineEvent {
+    fn stream_kind(&self) -> StreamKind {
+        StreamKind::Semantic
+    }
+
     fn into_builder(self) -> EventBuilder {
         EventBuilder::from(self)
     }
@@ -1332,6 +1353,10 @@ impl From<TimelineEvent> for EventBuilder {
 }
 
 impl TelemetryEventPayload for TimelineEvent {
+    fn stream_kind(&self) -> StreamKind {
+        StreamKind::Semantic
+    }
+
     fn into_builder(self) -> EventBuilder {
         EventBuilder::from(self)
     }
@@ -1351,6 +1376,10 @@ impl From<LuaSemanticEvent> for EventBuilder {
 }
 
 impl TelemetryEventPayload for LuaSemanticEvent {
+    fn stream_kind(&self) -> StreamKind {
+        StreamKind::Semantic
+    }
+
     fn into_builder(self) -> EventBuilder {
         EventBuilder::from(self)
     }
@@ -1849,5 +1878,32 @@ mod tests {
             value.get("logger").and_then(|v| v.as_str()),
             Some("test_logger")
         );
+    }
+
+    #[test]
+    fn raw_stream_respects_env_gate() {
+        const RAW_ENV: &str = "GRIM_TELEMETRY_RAW_TEST";
+        env::set_var(RAW_ENV, "0");
+
+        let config = TelemetryConfig {
+            engine_id: "engine_test",
+            vm_id: "vm_test",
+            log_env_vars: &[],
+            line_prefix: "test_logger",
+            run_id_env: None,
+            raw_stream_env: Some(RAW_ENV),
+        };
+        let logger = TelemetryLogger::new(config);
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        let mut writer = JsonlWriter::open(temp.path()).expect("open JsonlWriter");
+
+        let seq = logger
+            .log_event_to_writer(LuaEvent::CollectGarbage {}, &mut writer)
+            .expect("write event");
+        assert_eq!(seq, 0);
+        let text = std::fs::read_to_string(temp.path()).expect("read temp file");
+        assert!(text.is_empty());
+
+        env::remove_var(RAW_ENV);
     }
 }

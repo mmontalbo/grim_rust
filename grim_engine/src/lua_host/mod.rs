@@ -21,11 +21,6 @@ pub fn log_engine_exit(
     telemetry::log_engine_exit(status, note, code, signal, cause);
 }
 
-fn run_phase<T>(name: &str, phase: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _ = name;
-    phase()
-}
-
 pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Result<EngineRuntime> {
     telemetry::log_boot_sequence_start();
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())
@@ -33,32 +28,16 @@ pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Res
     let context = Rc::new(RefCell::new(context::EngineContext::new(verbose, headless)));
 
     let setup_result: Result<()> = (|| {
-        run_phase("package_path", || {
-            context::install_package_path(&lua, data_root)
-        })?;
-        run_phase("globals_pre_system", || {
-            context::install_globals_pre_system(&lua, data_root, context.clone())
-        })?;
-        run_phase("load_system_script", || {
-            context::load_system_script(&lua, data_root)
-        })?;
-        run_phase("globals_post_system", || {
-            context::install_globals_post_system(&lua, context.clone())
-        })?;
-        run_phase("boot_overrides", || {
-            context::override_boot_stubs(&lua, context.clone())
-        })?;
-        run_phase("boot_call", || context::call_boot(&lua, context.clone()))?;
-        run_phase("drive_active_scripts_initial", || {
-            context::drive_active_scripts(&lua, context.clone(), 8, 128)?;
-            Ok(())
-        })?;
-        run_phase("ensure_intro_cutscene", || {
-            if context::ensure_intro_cutscene(&lua, context.clone(), false)? {
-                context::drive_active_scripts(&lua, context.clone(), 16, 128)?;
-            }
-            Ok(())
-        })?;
+        context::install_package_path(&lua, data_root)?;
+        context::install_globals_pre_system(&lua, data_root, context.clone())?;
+        context::load_system_script(&lua, data_root)?;
+        context::install_globals_post_system(&lua, context.clone())?;
+        context::override_boot_stubs(&lua, context.clone())?;
+        context::call_boot(&lua, context.clone())?;
+        context::drive_active_scripts(&lua, context.clone(), 8, 128)?;
+        if context::ensure_intro_cutscene(&lua, context.clone(), false)? {
+            context::drive_active_scripts(&lua, context.clone(), 16, 128)?;
+        }
         Ok(())
     })();
     setup_result?;
