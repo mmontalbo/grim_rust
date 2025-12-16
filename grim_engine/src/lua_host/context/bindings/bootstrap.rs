@@ -8,10 +8,7 @@ use mlua::{
     Variadic,
 };
 
-use crate::lua_host::telemetry::{
-    log_create_table, log_dofile, log_set_fallback, next_fabricated_handle, ptr_to_handle,
-    register_tag,
-};
+use crate::lua_host::telemetry::{log_dofile, log_set_fallback, ptr_to_handle, register_tag};
 use grim_telemetry_schema::{OriginFields, UpvaluePreview, ValueFields, ValueType};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
@@ -23,38 +20,7 @@ use super::util::{
 use super::{store_registry_value, PinnedRegistryKeys};
 use crate::lua_host::context::EngineContext;
 
-#[derive(Copy, Clone)]
-enum GlobalConst {
-    Str(&'static str),
-    Int(i32),
-}
-
 const ACTOR_TAG: i32 = 0x52544341; // 'ACTR'
-
-fn bind_const_globals<'lua>(
-    lua: &'lua Lua,
-    globals: &Table<'lua>,
-    bindings: &[(&str, GlobalConst)],
-) -> LuaResult<()> {
-    for (name, value) in bindings {
-        match value {
-            GlobalConst::Str(text) => set_global(lua, globals, name, *text)?,
-            GlobalConst::Int(num) => set_global(lua, globals, name, *num)?,
-        }
-    }
-    Ok(())
-}
-
-fn bind_fn_globals<'lua>(
-    lua: &'lua Lua,
-    globals: &Table<'lua>,
-    bindings: &[(&str, &Function<'lua>)],
-) -> LuaResult<()> {
-    for (name, func) in bindings {
-        set_global(lua, globals, name, (*func).clone())?;
-    }
-    Ok(())
-}
 
 pub(crate) fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
     let globals = lua.globals();
@@ -93,17 +59,9 @@ fn install_constants_and_legacy<'lua>(
     globals: &Table<'lua>,
     context: &Rc<RefCell<EngineContext>>,
 ) -> Result<()> {
-    bind_const_globals(
-        lua,
-        globals,
-        &[("_VERSION", GlobalConst::Str("Lua 3.1 (alpha)"))],
-    )?;
-
+    set_global(lua, globals, "_VERSION", "Lua 3.1 (alpha)")?;
     install_legacy_io(lua, globals)?;
-    let errorfb: Function = globals
-        .get("error")
-        .context("error handler missing from Lua state")?;
-    bind_const_globals(lua, globals, &[("_TRIGMODE", GlobalConst::Str("deg"))])?;
+    set_global(lua, globals, "_TRIGMODE", "deg")?;
     install_legacy_compat(lua, globals, context.clone())?;
     if let (Ok(settagmethod), Some(pow_fn)) = (
         globals.get::<_, Function>("settagmethod"),
@@ -119,7 +77,7 @@ fn install_constants_and_legacy<'lua>(
         let _ = settagmethod.call::<_, Value>((-1, "pow", pow_fn));
     }
     install_legacy_math(lua, globals)?;
-    install_pi_constant(lua, globals)?;
+    set_global(lua, globals, "PI", std::f32::consts::PI as f64)?;
     // Run GC via Lua to mirror runtime behavior; no direct telemetry emission here.
     if let Ok(collectgarbage) = globals.get::<_, Function>("collectgarbage") {
         let _: Value = collectgarbage.call(())?;
@@ -221,17 +179,15 @@ fn install_basic_functions_pre_system(
     }
 
     // Sector type / mode constants used during boot before any scripts run.
-    bind_const_globals(
-        lua,
-        globals,
-        &[
-            ("NONE", GlobalConst::Int(0)),
-            ("WALK", GlobalConst::Int(4096)),
-            ("CAMERA", GlobalConst::Int(8192)),
-            ("SPECIAL", GlobalConst::Int(16384)),
-            ("HOT", GlobalConst::Int(32768)),
-        ],
-    )?;
+    for (name, value) in [
+        ("NONE", 0),
+        ("WALK", 4096),
+        ("CAMERA", 8192),
+        ("SPECIAL", 16384),
+        ("HOT", 32768),
+    ] {
+        set_global(lua, globals, name, value)?;
+    }
 
     register_tag(COLOR_TAG, None, Some("color"));
     let make_color = lua.create_function(|lua_ctx, args: Variadic<Value>| {
@@ -367,11 +323,9 @@ fn install_basic_functions_post_system(
         "LockCursor",
         lua.create_function(|_, name: String| Ok(format!("cursor::{name}")))?,
     )?;
-    bind_fn_globals(
-        lua,
-        globals,
-        &[("SetSayLineDefaults", &noop), ("WriteRegistryValue", &noop)],
-    )?;
+    for name in ["SetSayLineDefaults", "WriteRegistryValue"] {
+        set_global(lua, globals, name, noop.clone())?;
+    }
     set_global(
         lua,
         globals,
@@ -382,24 +336,17 @@ fn install_basic_functions_post_system(
         set_global(lua, globals, "ReadRegistryValue", nil_return.clone())?;
         set_global(lua, globals, "ReadRegistryIntValue", nil_return.clone())
     })?;
-    bind_fn_globals(
-        lua,
-        globals,
-        &[
-            ("enable_basic_remappable_key_set", &noop),
-            ("enable_joystick_controls", &noop),
-            ("enable_mouse_controls", &noop),
-        ],
-    )?;
-    bind_fn_globals(
-        lua,
-        globals,
-        &[
-            ("GetControlState", &bool_false),
-            ("get_generic_control_state", &bool_false),
-        ],
-    )?;
-    bind_fn_globals(lua, globals, &[("ResetMarioControls", &noop)])?;
+    for name in [
+        "enable_basic_remappable_key_set",
+        "enable_joystick_controls",
+        "enable_mouse_controls",
+    ] {
+        set_global(lua, globals, name, noop.clone())?;
+    }
+    for name in ["GetControlState", "get_generic_control_state"] {
+        set_global(lua, globals, name, bool_false.clone())?;
+    }
+    set_global(lua, globals, "ResetMarioControls", noop.clone())?;
     set_global(
         lua,
         globals,
@@ -424,20 +371,18 @@ fn install_basic_functions_post_system(
         "CheckForCD",
         lua.create_function(|_, _: Variadic<Value>| Ok((false, false)))?,
     )?;
-    bind_fn_globals(
-        lua,
-        globals,
-        &[
-            ("NukeResources", &noop),
-            ("GetSystemFonts", &noop),
-            ("PreloadCursors", &noop),
-            ("HideVerbSkull", &noop),
-            ("HideMouseCursor", &noop),
-            ("ShowCursor", &noop),
-            ("SetActiveCommentary", &noop),
-            ("SetAmbientLight", &noop),
-        ],
-    )?;
+    for name in [
+        "NukeResources",
+        "GetSystemFonts",
+        "PreloadCursors",
+        "HideVerbSkull",
+        "HideMouseCursor",
+        "ShowCursor",
+        "SetActiveCommentary",
+        "SetAmbientLight",
+    ] {
+        set_global(lua, globals, name, noop.clone())?;
+    }
 
     let break_here = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
     set_global(lua, globals, "break_here", break_here)?;
@@ -500,7 +445,6 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
     let system_fields = value_fields_from_lua(&Value::Table(system.clone()));
     // Keep bootstrap registry refs pinned for the lifetime of the process to mirror retail.
     let mut pinned_refs = PinnedRegistryKeys::default();
-    log_create_table(system_handle.clone(), system_fields.clone());
     set_global(lua, globals, "system", system.clone())?;
 
     // Mirror retail bootstrap: stash system in the registry, then set controls via lua_getref flow.
@@ -518,7 +462,6 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
     let controls = lua.create_table()?;
     let controls_handle = ptr_to_handle(controls.to_pointer());
     let controls_fields = value_fields_from_lua(&Value::Table(controls.clone()));
-    log_create_table(controls_handle.clone(), controls_fields.clone());
 
     set_table_entry_with_telemetry(
         &system,
@@ -894,11 +837,6 @@ fn install_legacy_io(lua: &Lua, globals: &Table) -> LuaResult<()> {
     Ok(())
 }
 
-fn install_pi_constant(lua: &Lua, globals: &Table) -> LuaResult<()> {
-    set_global(lua, globals, "PI", std::f32::consts::PI as f64)?;
-    Ok(())
-}
-
 fn register_value_stub<'lua, R>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -1009,7 +947,6 @@ fn install_actor_stubs(
             .first()
             .and_then(value_to_string)
             .unwrap_or_else(|| "<unnamed>".to_string());
-        let fabricated = next_fabricated_handle();
         let userdata = lua_ctx.create_userdata(TaggedHandle::new(ACTOR_TAG))?;
         let handle = ptr_to_handle(userdata.to_pointer());
         load_actor_ctx

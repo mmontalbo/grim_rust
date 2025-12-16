@@ -86,6 +86,7 @@ pub(crate) fn log_engine_exit(
     });
 }
 
+#[allow(dead_code)]
 pub(crate) fn log_push_cclosure(
     label: &str,
     func: *const c_void,
@@ -106,12 +107,14 @@ pub(crate) fn log_push_cclosure(
     });
 }
 
+#[allow(dead_code)]
 pub(crate) fn log_push_number(value: &str) {
     log_event(LuaEvent::PushNumber {
         value: value.to_string(),
     });
 }
 
+#[allow(dead_code)]
 pub(crate) fn log_push_object(handle: String, values: ValueFields) {
     log_event(LuaEvent::PushObject { handle, values });
 }
@@ -150,6 +153,7 @@ pub(crate) fn log_registered_constant(
     });
 }
 
+#[allow(dead_code)]
 pub(crate) fn log_push_usertag(id: i32, tag: i32, payload_hex: String) {
     let mut values = ValueFields::default();
     values.value_type = Some(ValueType::Userdata);
@@ -162,6 +166,7 @@ pub(crate) fn log_push_usertag(id: i32, tag: i32, payload_hex: String) {
     });
 }
 
+#[allow(dead_code)]
 pub(crate) fn log_create_table(handle: String, mut values: ValueFields) {
     if values.value_type.is_none() {
         values.value_type = Some(ValueType::Table);
