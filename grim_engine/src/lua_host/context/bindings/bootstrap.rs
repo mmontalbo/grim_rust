@@ -9,10 +9,10 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_create_table, log_dofile, log_event, log_push_cclosure, log_push_number, log_push_object,
+    log_create_table, log_dofile, log_push_cclosure, log_push_number, log_push_object,
     log_push_usertag, log_set_fallback, next_fabricated_handle, ptr_to_handle, register_tag,
 };
-use grim_telemetry_schema::{LuaEvent, OriginFields, UpvaluePreview, ValueFields, ValueType};
+use grim_telemetry_schema::{OriginFields, UpvaluePreview, ValueFields, ValueType};
 
 use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
 use super::legacy::{install_legacy_compat, install_legacy_math};
@@ -123,8 +123,12 @@ fn install_constants_and_legacy<'lua>(
     }
     install_legacy_math(lua, globals)?;
     install_pi_constant(lua, globals)?;
-    lua.gc_collect()?;
-    log_event(LuaEvent::CollectGarbage {});
+    // Run GC via Lua to mirror runtime behavior; no direct telemetry emission here.
+    if let Ok(collectgarbage) = globals.get::<_, Function>("collectgarbage") {
+        let _: Value = collectgarbage.call(())?;
+    } else {
+        lua.gc_collect()?;
+    }
     Ok(())
 }
 
@@ -156,17 +160,6 @@ pub(crate) fn install_globals_post_system(
     let globals = lua.globals();
     install_basic_functions_post_system(lua, &globals, context.clone())?;
     install_stubbed_tables(lua, &globals, context)?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn install_globals(
-    lua: &Lua,
-    data_root: &Path,
-    context: Rc<RefCell<EngineContext>>,
-) -> Result<()> {
-    install_globals_pre_system(lua, data_root, context.clone())?;
-    install_globals_post_system(lua, context)?;
     Ok(())
 }
 
@@ -205,12 +198,6 @@ fn install_basic_functions_pre_system(
     if let Ok(type_fn) = globals.get::<_, Function>("type") {
         let type_ptr = type_fn.to_pointer();
         let type_handle = ptr_to_handle(type_ptr);
-        log_event(LuaEvent::GetGlobal {
-            name: "type".to_string(),
-            handle: type_handle.clone(),
-            label: "global:type".to_string(),
-            count: 1,
-        });
         let type_ref = context.borrow_mut().alloc_ref(
             lua,
             Value::Function(type_fn.clone()),

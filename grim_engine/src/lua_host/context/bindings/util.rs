@@ -11,10 +11,8 @@ use grim_telemetry_schema::{
 use mlua::{Function, IntoLua, Lua, Result as LuaResult, Table, UserData, Value};
 
 use crate::lua_host::telemetry::{
-    log_lua_setglobal, log_push_cclosure, log_push_nil, log_push_number, log_push_object,
-    log_push_string, log_push_usertag, log_registered_constant, log_registered_global,
-    log_set_table_entry, next_fabricated_handle, normalize_handle, origin_fields_for_ptr,
-    ptr_to_handle, register_table_label,
+    log_registered_constant, log_registered_global, log_set_table_entry, normalize_handle,
+    origin_fields_for_ptr, ptr_to_handle, register_table_label,
 };
 
 #[derive(Clone)]
@@ -148,46 +146,10 @@ pub(super) fn set_global<'lua, T: IntoLua<'lua>>(
         register_table_label(table.to_pointer(), handle_label.clone());
     }
 
-    let mut origin = OriginFields::default();
-    match &value {
-        Value::Function(func) => {
-            origin = origin_fields_for_ptr(func.to_pointer());
-            log_push_cclosure("lua_pushCclosure", func.to_pointer(), 0, None);
-        }
-        Value::Nil => {
-            log_push_nil();
-        }
-        Value::Integer(num) => {
-            log_push_number(&format_number_for_log(*num as f64));
-        }
-        Value::Number(num) => {
-            log_push_number(&format_number_for_log(*num));
-        }
-        Value::String(text) => {
-            let bytes = text.as_bytes();
-            let rendered = String::from_utf8_lossy(bytes).into_owned();
-            let preview = truncate_for_log(&rendered, LOG_PREVIEW_MAX_LEN);
-            log_push_string(bytes.len(), preview);
-        }
-        Value::Table(_) => {
-            log_push_object(handle.clone(), value_fields.clone());
-        }
-        Value::UserData(_) => {
-            if let Some(tag) = value_fields.tag {
-                let fabricated = next_fabricated_handle();
-                log_push_usertag(fabricated.raw, tag, handle.clone());
-            }
-        }
-        _ => {}
-    }
-
-    log_lua_setglobal(
-        name,
-        handle.clone(),
-        Some(handle_label.clone()),
-        value_fields.clone(),
-        origin.clone(),
-    );
+    let origin = match &value {
+        Value::Function(func) => origin_fields_for_ptr(func.to_pointer()),
+        _ => OriginFields::default(),
+    };
 
     if matches!(value, Value::Function(_)) {
         log_registered_global(name, handle, Some(handle_label), 0, value_fields, origin);

@@ -5,12 +5,11 @@ use std::rc::Rc;
 use anyhow::{ensure, Context, Result};
 use mlua::{Function, Lua, MultiValue, RegistryKey, Value, Variadic};
 
-use super::dofile::execute_script;
 use super::util::{
     describe_callable_label, describe_value, function_provenance, function_source_hint, set_global,
 };
 use crate::lua_host::context::EngineContext;
-use crate::lua_host::telemetry::{log_boot_sequence_complete, log_dofile};
+use crate::lua_host::telemetry::log_boot_sequence_complete;
 use grim_telemetry_schema::trace_utils::LuaFunctionProvenance;
 
 pub(crate) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
@@ -22,17 +21,15 @@ pub(crate) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
         data_root.display()
     );
 
-    // Retail logs _system.lua via dofile; mirror that telemetry even though we execute directly.
-    log_dofile("_system.lua");
-
-    let path = if compiled.is_file() {
-        compiled
-    } else {
-        decompiled
-    };
-    let executed =
-        execute_script(lua, &path).with_context(|| format!("executing {}", path.display()))?;
-    ensure!(executed.is_some(), "failed to execute {}", path.display());
+    let globals = lua.globals();
+    let dofile: Function = globals
+        .get("dofile")
+        .context("dofile missing from Lua state")?;
+    // Execute via the Lua-facing dofile so telemetry, search order, and handling
+    // of compiled/decompiled variants match retail behavior.
+    let _: Value = dofile
+        .call("_system.lua")
+        .context("executing dofile(\"_system.lua\")")?;
     Ok(())
 }
 

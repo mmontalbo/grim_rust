@@ -11,7 +11,6 @@ pub(crate) use grim_telemetry_schema::trace_utils::origin_fields_for_ptr;
 use grim_telemetry_schema::trace_utils::{
     caller_origin_fields as trace_caller_origin_fields, handle_hex, register_tag_alias,
     semantic_set_table_entry, should_skip_caller_frame as common_should_skip_caller_frame,
-    tag_alias,
 };
 use grim_telemetry_schema::{
     BootSequenceTracker, EngineEvent, LuaEvent, LuaSemanticEvent, OriginFields, TelemetryConfig,
@@ -107,70 +106,14 @@ pub(crate) fn log_push_cclosure(
     });
 }
 
-#[allow(dead_code)]
 pub(crate) fn log_push_number(value: &str) {
     log_event(LuaEvent::PushNumber {
         value: value.to_string(),
     });
 }
 
-#[allow(dead_code)]
-pub(crate) fn log_push_nil() {
-    log_event(LuaEvent::PushNil {});
-}
-
-#[allow(dead_code)]
-pub(crate) fn log_push_string(len: usize, preview: String) {
-    log_event(LuaEvent::PushString { len, preview });
-}
-
-#[allow(dead_code)]
 pub(crate) fn log_push_object(handle: String, values: ValueFields) {
     log_event(LuaEvent::PushObject { handle, values });
-}
-
-pub(crate) fn log_push_from_preview(preview: &UpvaluePreview) {
-    match preview.kind {
-        ValueType::Nil => log_push_nil(),
-        ValueType::Number => {
-            if let Some(value) = preview.value.as_ref() {
-                log_push_number(value);
-            }
-        }
-        ValueType::String => {
-            if let Some(len) = preview
-                .value_len
-                .or_else(|| preview.preview.as_ref().map(|value| value.len()))
-            {
-                let text = preview
-                    .preview
-                    .clone()
-                    .or_else(|| preview.value.clone())
-                    .unwrap_or_default();
-                log_push_string(len, text);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub(crate) fn log_lua_setglobal(
-    name: &str,
-    handle: String,
-    label: Option<String>,
-    values: ValueFields,
-    origin: OriginFields,
-) {
-    let bind_handle = handle.clone();
-    let caller = caller_origin_fields();
-    log_event(LuaEvent::BindGlobal {
-        name: name.to_string(),
-        handle: bind_handle,
-        label,
-        values: values.clone(),
-        origin,
-        caller,
-    });
 }
 
 pub(crate) fn log_registered_global(
@@ -240,22 +183,10 @@ pub(crate) fn log_set_table_entry(
     value_handle: Option<(String, Option<String>, ValueFields)>,
 ) {
     let caller = caller_origin_fields();
-    // Retail telemetry records pushing the target table before setting entries.
     let table_fields = table_fields.unwrap_or_else(|| {
         let mut fields = ValueFields::default();
         fields.value_type = Some(ValueType::Table);
         fields
-    });
-    log_push_object(table_handle.clone(), table_fields.clone());
-    log_push_from_preview(&key);
-    if let Some((value_handle, _, value_fields)) = value_handle.clone() {
-        log_push_object(value_handle, value_fields);
-    } else {
-        log_push_from_preview(&value);
-    }
-    log_event(LuaEvent::SetTable {
-        note: note.clone(),
-        caller: caller.clone(),
     });
     let semantic_value_handle = value_handle.as_ref().map(|(handle, _, _)| handle.clone());
     let semantic_value_handle_label = value_handle
@@ -332,32 +263,6 @@ pub(crate) fn log_store_ref(
         label: label.clone(),
         value_fields,
         note: None,
-        origin,
-    });
-}
-
-pub(crate) fn log_set_tagmethod(
-    tag: i64,
-    event: &str,
-    handle: Option<String>,
-    values: ValueFields,
-    origin: OriginFields,
-) {
-    let tag_alias_value = tag_alias(tag as i32);
-    log_event(LuaSemanticEvent::SemanticSetTagmethod {
-        tag: tag as i32,
-        event_name: event.to_string(),
-        handle: handle.clone(),
-        values: values.clone(),
-        tag_alias: tag_alias_value.clone(),
-        origin: origin.clone(),
-    });
-    log_event(LuaEvent::SetTagmethod {
-        tag: tag as i32,
-        event_name: event.to_string(),
-        handle,
-        values,
-        tag_alias: tag_alias_value,
         origin,
     });
 }
