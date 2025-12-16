@@ -6,8 +6,6 @@ mod registry;
 mod util;
 
 pub(crate) use boot::{call_boot, load_system_script, override_boot_stubs, wrap_boot};
-#[cfg(test)]
-pub(crate) use bootstrap::install_globals;
 pub(crate) use bootstrap::{
     install_globals_post_system, install_globals_pre_system, install_package_path,
 };
@@ -19,7 +17,6 @@ mod tests {
 
     use mlua::{Function, Lua, LuaOptions, Result as LuaResult, StdLib, Value, Variadic};
 
-    use super::util::describe_value;
     use crate::lua_host::context::EngineContext;
 
     use super::*;
@@ -27,7 +24,9 @@ mod tests {
     fn setup_lua() -> Lua {
         let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default()).unwrap();
         let context = Rc::new(RefCell::new(EngineContext::new(true, true)));
-        install_globals(&lua, Path::new("."), context).unwrap();
+        install_package_path(&lua, Path::new(".")).unwrap();
+        install_globals_pre_system(&lua, Path::new("."), context.clone()).unwrap();
+        install_globals_post_system(&lua, context).unwrap();
         lua
     }
 
@@ -86,26 +85,42 @@ mod tests {
     }
 
     #[test]
-    fn index_fallback_applies_to_missing_globals() {
+    fn missing_globals_use_getglobal_fallback() {
         let lua = setup_lua();
         let globals = lua.globals();
         let setfallback: Function = globals.get("setfallback").unwrap();
-        let handler = lua
+        let index_called = Rc::new(RefCell::new(false));
+        let index_flag = index_called.clone();
+        let index_handler = lua
             .create_function(
-                |lua_ctx, (_table, key): (Value, Value)| -> LuaResult<Value> {
-                    let key_name = match key {
-                        Value::String(text) => text.to_str().unwrap_or("<key>").to_string(),
-                        other => describe_value(&other),
-                    };
-                    Ok(Value::String(
-                        lua_ctx.create_string(format!("fb::{key_name}"))?,
-                    ))
+                move |_, (_table, _key): (Value, Value)| -> LuaResult<Value> {
+                    *index_flag.borrow_mut() = true;
+                    Ok(Value::Nil)
                 },
             )
             .unwrap();
-        setfallback.call::<_, Value>(("index", handler)).unwrap();
+        setfallback
+            .call::<_, Value>(("index", index_handler))
+            .unwrap();
+
+        let getglobal_called = Rc::new(RefCell::new(false));
+        let getglobal_flag = getglobal_called.clone();
+        let getglobal_handler = lua
+            .create_function(
+                move |lua_ctx, (_table, _key): (Value, Value)| -> LuaResult<Value> {
+                    *getglobal_flag.borrow_mut() = true;
+                    Ok(Value::String(lua_ctx.create_string("from_getglobal")?))
+                },
+            )
+            .unwrap();
+        setfallback
+            .call::<_, Value>(("getglobal", getglobal_handler))
+            .unwrap();
+
         let value: String = lua.load("return missing_global_name").eval().unwrap();
-        assert_eq!(value, "fb::missing_global_name");
+        assert_eq!(value, "from_getglobal");
+        assert!(*getglobal_called.borrow());
+        assert!(!*index_called.borrow());
     }
 
     #[test]

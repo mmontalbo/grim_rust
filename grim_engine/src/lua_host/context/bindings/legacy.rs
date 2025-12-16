@@ -10,8 +10,8 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle, normalize_handle,
-    origin_fields_for_ptr, ptr_to_handle, register_table_label,
+    log_set_fallback, log_unref, next_fabricated_handle, normalize_handle, ptr_to_handle,
+    register_table_label,
 };
 
 use super::util::{
@@ -264,16 +264,12 @@ fn install_index_hook(
     let index_state = fallbacks.clone();
     let index_fb = lua.create_function(move |lua_ctx, (table, key): (Value, Value)| {
         // Avoid routing globals through the index fallback to prevent recursion
-        // when scripts probe table.parent, but fall back to the index handler
-        // when no getglobal override is present.
+        // when scripts probe table.parent; always route globals through the
+        // getglobal handler (default or override).
         let use_getglobal = matches!(&table, Value::Table(t) if t.to_pointer() == globals_ptr);
         let handler = {
             let state = index_state.borrow();
-            let event = if use_getglobal && state.fallbacks.contains_key("getglobal") {
-                "getglobal"
-            } else {
-                "index"
-            };
+            let event = if use_getglobal { "getglobal" } else { "index" };
             state.handler_for_event(lua_ctx, event)?
         };
         if let Some(func) = handler {
@@ -506,23 +502,12 @@ impl LegacyFallbacks {
         event: &str,
         handler: Function<'lua>,
     ) -> LuaResult<Option<Function<'lua>>> {
-        let already_set = self
-            .tag_methods
-            .get(&tag)
-            .map_or(false, |methods| methods.contains_key(event));
         let previous = self.get_tag_method(lua, tag, event)?;
-        let handle = ptr_to_handle(handler.to_pointer());
-        let mut values = value_fields_from_lua(&Value::Function(handler.clone()));
-        values.tag = Some(tag as i32);
-        let origin = origin_fields_for_ptr(handler.to_pointer());
         let key = lua.create_registry_value(handler)?;
         self.tag_methods
             .entry(tag)
             .or_default()
             .insert(event.to_string(), key);
-        if !(already_set && Self::is_bootstrap_fallback_event(event)) {
-            log_set_tagmethod(tag, event, Some(handle), values, origin);
-        }
         Ok(previous)
     }
 
