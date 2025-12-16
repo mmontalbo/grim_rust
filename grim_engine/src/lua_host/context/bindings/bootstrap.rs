@@ -9,8 +9,8 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_create_table, log_dofile, log_push_cclosure, log_push_object, log_push_usertag,
-    log_set_fallback, next_fabricated_handle, ptr_to_handle, register_tag,
+    log_create_table, log_dofile, log_set_fallback, next_fabricated_handle, ptr_to_handle,
+    register_tag,
 };
 use grim_telemetry_schema::{OriginFields, UpvaluePreview, ValueFields, ValueType};
 
@@ -504,7 +504,6 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
     set_global(lua, globals, "system", system.clone())?;
 
     // Mirror retail bootstrap: stash system in the registry, then set controls via lua_getref flow.
-    log_push_object(system_handle.clone(), system_fields.clone());
     let system_ref = store_registry_value(
         lua,
         Value::Table(system.clone()),
@@ -543,12 +542,6 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
         tag: None,
     };
     system = system_ref.fetch(lua, OriginFields::default(), None)?;
-    log_push_cclosure(
-        "lua_pushCclosure",
-        default_cam_change.to_pointer(),
-        0,
-        Some("DefaultCamChangeHandlerL"),
-    );
     set_table_entry_with_telemetry(
         &system,
         &system_handle,
@@ -570,12 +563,6 @@ fn install_system_table(lua: &Lua, globals: &Table) -> LuaResult<()> {
     };
     for key in ["axisHandler", "inputModeHandler", "buttonHandler"] {
         let system_for_handler: Table = system_ref.fetch(lua, OriginFields::default(), None)?;
-        log_push_cclosure(
-            "lua_pushCclosure",
-            default_control.to_pointer(),
-            0,
-            Some("DefaultControlHandlerL"),
-        );
         set_table_entry_with_telemetry(
             &system_for_handler,
             &system_handle,
@@ -1028,7 +1015,6 @@ fn install_actor_stubs(
         load_actor_ctx
             .borrow_mut()
             .log_event(format!("actor.load {name} -> {handle}"));
-        log_push_usertag(fabricated.raw, ACTOR_TAG, handle.clone());
         Ok(userdata)
     })?;
     set_global(lua, globals, "LoadActor", load_actor)?;
