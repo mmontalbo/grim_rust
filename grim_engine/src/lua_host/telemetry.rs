@@ -86,39 +86,6 @@ pub(crate) fn log_engine_exit(
     });
 }
 
-#[allow(dead_code)]
-pub(crate) fn log_push_cclosure(
-    label: &str,
-    func: *const c_void,
-    upvalues: i32,
-    symbol_label: Option<&str>,
-) {
-    let mut origin = origin_fields_for_ptr(func);
-    if let Some(symbol) = symbol_label {
-        origin.symbol = Some(symbol.to_string());
-    }
-    let caller = caller_origin_fields();
-    log_event(LuaEvent::PushCclosure {
-        name: label.to_string(),
-        func: ptr_to_handle(func),
-        upvalues,
-        origin,
-        caller,
-    });
-}
-
-#[allow(dead_code)]
-pub(crate) fn log_push_number(value: &str) {
-    log_event(LuaEvent::PushNumber {
-        value: value.to_string(),
-    });
-}
-
-#[allow(dead_code)]
-pub(crate) fn log_push_object(handle: String, values: ValueFields) {
-    log_event(LuaEvent::PushObject { handle, values });
-}
-
 pub(crate) fn log_registered_global(
     name: &str,
     handle: String,
@@ -150,31 +117,6 @@ pub(crate) fn log_registered_constant(
         label: label.clone(),
         values: values.clone(),
         origin: origin.clone(),
-    });
-}
-
-#[allow(dead_code)]
-pub(crate) fn log_push_usertag(id: i32, tag: i32, payload_hex: String) {
-    let mut values = ValueFields::default();
-    values.value_type = Some(ValueType::Userdata);
-    values.tag = Some(tag);
-    values.value = Some(payload_hex);
-    log_event(LuaEvent::PushUsertag {
-        id,
-        values,
-        caller: caller_origin_fields(),
-    });
-}
-
-#[allow(dead_code)]
-pub(crate) fn log_create_table(handle: String, mut values: ValueFields) {
-    if values.value_type.is_none() {
-        values.value_type = Some(ValueType::Table);
-    }
-    log_event(LuaEvent::CreateTable {
-        handle,
-        values,
-        caller: caller_origin_fields(),
     });
 }
 
