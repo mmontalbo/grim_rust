@@ -9,8 +9,8 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_create_table, log_dofile, log_push_cclosure, log_push_number, log_push_object,
-    log_push_usertag, log_set_fallback, next_fabricated_handle, ptr_to_handle, register_tag,
+    log_create_table, log_dofile, log_push_cclosure, log_push_object, log_push_usertag,
+    log_set_fallback, next_fabricated_handle, ptr_to_handle, register_tag,
 };
 use grim_telemetry_schema::{OriginFields, UpvaluePreview, ValueFields, ValueType};
 
@@ -103,7 +103,6 @@ fn install_constants_and_legacy<'lua>(
     let errorfb: Function = globals
         .get("error")
         .context("error handler missing from Lua state")?;
-    log_push_cclosure("lua_pushCclosure", errorfb.to_pointer(), 0, Some("errorfb"));
     bind_const_globals(lua, globals, &[("_TRIGMODE", GlobalConst::Str("deg"))])?;
     install_legacy_compat(lua, globals, context.clone())?;
     if let (Ok(settagmethod), Some(pow_fn)) = (
@@ -117,8 +116,6 @@ fn install_constants_and_legacy<'lua>(
                     .ok()
             }),
     ) {
-        log_push_cclosure("lua_pushCclosure", pow_fn.to_pointer(), 0, Some("math_pow"));
-        log_push_number("0");
         let _ = settagmethod.call::<_, Value>((-1, "pow", pow_fn));
     }
     install_legacy_math(lua, globals)?;
