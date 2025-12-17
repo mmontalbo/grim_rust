@@ -1,3 +1,10 @@
+//! Lua 3.1 compatibility shims: fallback/tag API, math RNG, and helper globals used by retail boot
+//! scripts. The legacy fallback system keeps three layers of handlers in one place:
+//! - defaults seeded to match retail Lua 3.1 behavior;
+//! - explicit fallbacks installed via `setfallback`/`seterrormethod`;
+//! - per-tag methods installed via `settagmethod`.
+//! Lookup order mirrors Lua 3.1: per-tag override → global fallback → default.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -20,6 +27,19 @@ use super::util::{
 };
 use crate::lua_host::context::EngineContext;
 
+/// Installs the Lua 3.1 fallback/tag compatibility layer expected by retail boot scripts.
+///
+/// Retail Lua exposed tag-scoped fallbacks (`setfallback`, `settagmethod`, etc.) instead of modern
+/// metatables. mlua does not expose that surface, so we recreate it here to let `_system.lua` and
+/// friends register the same handlers and produce the same telemetry:
+/// - seeds `LegacyFallbacks` defaults and publishes the legacy API (`setfallback`, `gettagmethod`,
+///   `settagmethod`, `seterrormethod`, `tag`);
+/// - attaches a global metatable/index hook and wraps `error` so `index`/`getglobal`/`error`
+///   fallbacks still fire;
+/// - wires the legacy ref helpers (`lua_ref`/`lua_unref`/`lua_getref`) through `EngineContext` and
+///   exposes the minimal `call` helper used by retail boot scripts.
+///
+/// Call before loading `_system.lua` so bootstrap scripts can install their fallbacks.
 pub(super) fn install_legacy_compat<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -77,6 +97,9 @@ fn coerce_number(value: &Value) -> Option<f64> {
     }
 }
 
+/// Mirrors Lua 3.1's `math.random`/`randomseed` backed by the MSVCRT LCG so output (and telemetry)
+/// matches retail captures. Installs both global functions and `math.random`/`math.randomseed` so
+/// all callers share the same state.
 pub(super) fn install_legacy_math<'lua>(lua: &'lua Lua, globals: &Table<'lua>) -> LuaResult<()> {
     let state = Rc::new(RefCell::new(1u32));
 
@@ -124,6 +147,12 @@ pub(super) fn install_legacy_math<'lua>(lua: &'lua Lua, globals: &Table<'lua>) -
     Ok(())
 }
 
+/// Registers the Lua 3.1-style fallback API and wires it to a shared `LegacyFallbacks` state.
+///
+/// Publishes the legacy surface (`setfallback`, `gettagmethod`, `settagmethod`, `seterrormethod`,
+/// `tag`) and routes them into a single registry so bootstrap scripts can install their handlers.
+/// Also exposes compatibility helpers for the engine (`lua_ref`/`lua_unref`/`lua_getref`) that go
+/// through `EngineContext` for consistent logging and ownership.
 fn install_fallback_globals<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -135,14 +164,15 @@ fn install_fallback_globals<'lua>(
     let setfallback =
         lua.create_function(move |lua_ctx, (event, handler): (String, Function)| {
             let event = event.to_ascii_lowercase();
+            let is_bootstrap_event = matches!(event.as_str(), "index" | "gettable" | "error");
             if !setfallback_state.borrow().is_known_event(&event)
                 && setfallback_ctx.borrow().verbose()
             {
                 eprintln!("[lua][setfallback] installing stubbed handler for {event}");
             }
             let mut state = setfallback_state.borrow_mut();
-            let suppress_fallback_log = LegacyFallbacks::is_bootstrap_fallback_event(&event)
-                && state.fallbacks.contains_key(&event);
+            let suppress_fallback_log =
+                is_bootstrap_event && state.fallbacks.contains_key(&event);
             let previous = state.set_fallback_for_all(lua_ctx, &event, handler.clone())?;
             let values = value_fields_from_lua(&Value::Function(handler.clone()));
             let handle = ptr_to_handle(handler.to_pointer());
@@ -252,6 +282,11 @@ fn install_fallback_globals<'lua>(
     Ok(())
 }
 
+/// Installs a global metatable that defers lookups/sets to the legacy fallback handlers.
+///
+/// Globals bypass the `__index` fallback and instead use the `getglobal` handler to mirror Lua 3.1
+/// behavior. Any table lacking a metatable receives the shared one so `index` fallback handlers fire
+/// consistently, and `__newindex` attaches the metatable to newly assigned tables as well.
 fn install_index_hook(
     lua: &Lua,
     globals: &Table,
@@ -306,6 +341,7 @@ fn install_index_hook(
     Ok(())
 }
 
+/// Wraps `error` so legacy error fallbacks observe errors before delegating to the original.
 fn install_error_wrapper<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -325,6 +361,12 @@ fn install_error_wrapper<'lua>(
     Ok(())
 }
 
+/// Tracks default and user-registered Lua 3.1 fallback/tag handlers.
+///
+/// Lua 3.1 allowed per-tag fallbacks that mirror modern metatables. This struct keeps those handlers
+/// in the registry, seeds defaults that match retail boot scripts, and provides helpers to dispatch
+/// them (`handler_for_event`/`get_tag_method`) or install new ones (`set_fallback_for_all`,
+/// `set_tag_method`).
 struct LegacyFallbacks {
     defaults: HashMap<String, RegistryKey>,
     fallbacks: HashMap<String, RegistryKey>,
@@ -332,6 +374,8 @@ struct LegacyFallbacks {
 }
 
 impl LegacyFallbacks {
+    // Tag ids mirror retail Lua 3.1; duplicates are intentional because multiple value kinds share
+    // a tag in that runtime.
     const TAG_NIL: i64 = -7;
     const TAG_BOOLEAN: i64 = -2;
     const TAG_NUMBER: i64 = -1;
@@ -351,90 +395,80 @@ impl LegacyFallbacks {
             tag_methods: HashMap::new(),
         };
 
-        state.install_default(
-            lua,
-            "gettable",
-            lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
-                Err(LuaError::RuntimeError(
-                    "indexed expression not a table".to_string(),
-                ))
-            })?,
-        )?;
-        state.install_default(
-            lua,
-            "settable",
-            lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
-                Err(LuaError::RuntimeError(
-                    "indexed expression not a table".to_string(),
-                ))
-            })?,
-        )?;
-        state.install_default(
-            lua,
-            "index",
-            lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
-        )?;
-        state.install_default(
-            lua,
-            "getglobal",
-            lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
-        )?;
-        state.install_default(
-            lua,
-            "arith",
-            lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
-                Err(LuaError::RuntimeError(
-                    "number expected in arithmetic operation".to_string(),
-                ))
-            })?,
-        )?;
-        state.install_default(
-            lua,
-            "order",
-            lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
-                Err(LuaError::RuntimeError(
-                    "incompatible types in comparison".to_string(),
-                ))
-            })?,
-        )?;
-        state.install_default(
-            lua,
-            "concat",
-            lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
-                Err(LuaError::RuntimeError(
-                    "string expected in concatenation".to_string(),
-                ))
-            })?,
-        )?;
-        state.install_default(
-            lua,
-            "gc",
-            lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
-        )?;
-        state.install_default(
-            lua,
-            "function",
-            lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
-                Err(LuaError::RuntimeError(
-                    "called expression not a function".to_string(),
-                ))
-            })?,
-        )?;
-        state.install_default(
-            lua,
-            "error",
-            lua.create_function(|_, args: Variadic<Value>| {
-                if let Some(Value::String(message)) = args.first() {
-                    eprintln!("[lua][error] {}", message.to_str()?);
-                }
-                Ok(Value::Nil)
-            })?,
-        )?;
+        let defaults = [
+            (
+                "gettable",
+                lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
+                    Err(LuaError::RuntimeError(
+                        "indexed expression not a table".to_string(),
+                    ))
+                })?,
+            ),
+            (
+                "settable",
+                lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
+                    Err(LuaError::RuntimeError(
+                        "indexed expression not a table".to_string(),
+                    ))
+                })?,
+            ),
+            ("index", lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?),
+            (
+                "getglobal",
+                lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
+            ),
+            (
+                "arith",
+                lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
+                    Err(LuaError::RuntimeError(
+                        "number expected in arithmetic operation".to_string(),
+                    ))
+                })?,
+            ),
+            (
+                "order",
+                lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
+                    Err(LuaError::RuntimeError(
+                        "incompatible types in comparison".to_string(),
+                    ))
+                })?,
+            ),
+            (
+                "concat",
+                lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
+                    Err(LuaError::RuntimeError(
+                        "string expected in concatenation".to_string(),
+                    ))
+                })?,
+            ),
+            ("gc", lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?),
+            (
+                "function",
+                lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
+                    Err(LuaError::RuntimeError(
+                        "called expression not a function".to_string(),
+                    ))
+                })?,
+            ),
+            (
+                "error",
+                lua.create_function(|_, args: Variadic<Value>| {
+                    if let Some(Value::String(message)) = args.first() {
+                        eprintln!("[lua][error] {}", message.to_str()?);
+                    }
+                    Ok(Value::Nil)
+                })?,
+            ),
+        ];
+
+        for (event, func) in defaults {
+            state.seed_default_handler(lua, event, func)?;
+        }
 
         Ok(state)
     }
 
-    fn install_default(&mut self, lua: &Lua, event: &str, func: Function) -> LuaResult<()> {
+    fn seed_default_handler(&mut self, lua: &Lua, event: &str, func: Function) -> LuaResult<()> {
         let key = lua.create_registry_value(func)?;
         self.defaults.insert(event.to_string(), key);
         Ok(())
@@ -442,10 +476,6 @@ impl LegacyFallbacks {
 
     fn is_known_event(&self, event: &str) -> bool {
         self.defaults.contains_key(event)
-    }
-
-    fn is_bootstrap_fallback_event(event: &str) -> bool {
-        matches!(event, "index" | "gettable" | "error")
     }
 
     fn handler_for_event<'lua>(
@@ -473,10 +503,12 @@ impl LegacyFallbacks {
         self.fallbacks.insert(event.to_string(), key);
 
         if event == "error" {
+            // Retail `setfallback.lua` installs a special error handler and does not broadcast it to
+            // other tags; mirror that quirk.
             return Ok(previous);
         }
 
-        for tag in Self::default_tags() {
+        for tag in Self::broadcast_tags_in_retail_order() {
             let func = handler.clone();
             self.set_tag_method(lua, tag, event, func)?;
         }
@@ -557,7 +589,7 @@ impl LegacyFallbacks {
         }
     }
 
-    fn default_tags() -> Vec<i64> {
+    fn broadcast_tags_in_retail_order() -> Vec<i64> {
         // Mirror retail's setfallback.lua ordering: 0, tag(0), tag(""), tag({}),
         // tag(function() end), tag(settagmethod), tag(nil).
         vec![
