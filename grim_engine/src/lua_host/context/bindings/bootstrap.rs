@@ -78,7 +78,7 @@ fn install_constants_and_legacy<'lua>(
     }
     install_legacy_math(lua, globals)?;
     set_global(lua, globals, "PI", std::f32::consts::PI as f64)?;
-    // Run GC via Lua to mirror runtime behavior; no direct telemetry emission here.
+    // Run GC via Lua to mirror runtime behavior.
     if let Ok(collectgarbage) = globals.get::<_, Function>("collectgarbage") {
         let _: Value = collectgarbage.call(())?;
     } else {
