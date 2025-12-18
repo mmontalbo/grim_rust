@@ -1,3 +1,11 @@
+//! `dofile` wrapper and fallbacks that mirror retail lookup and stub missing scripts.
+//!
+//! The intro boot path expects a handful of retail Lua files to exist. When
+//! those are absent in a local dev install, we provide lightweight stubs so the
+//! minimal host can advance while still logging parity-friendly telemetry. File
+//! resolution also mirrors retail: compiled first, then decompiled, with
+//! basename fallbacks and legacy Lua normalization for decompiled chunks.
+
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +16,7 @@ use mlua::{Error as LuaError, Lua, MultiValue, Result as LuaResult, Value};
 
 use crate::lua_host::context::EngineContext;
 
+/// Normalize a path to a lowercase basename for matching stubbed modules.
 fn normalized_name(path: &str) -> String {
     path.replace('\\', "/")
         .rsplit('/')
@@ -268,6 +277,7 @@ fn stub_achievement_definitions<'lua>(
     stub_checkfirst(lua, "@achievement_definitions.lua(stub)", file_name)
 }
 
+/// Handle well-known boot-time modules with in-process stubs so the intro can continue without assets.
 pub(super) fn handle_special_dofile<'lua>(
     lua: &'lua Lua,
     path: &str,
@@ -301,6 +311,7 @@ pub(super) fn handle_special_dofile<'lua>(
     }
 }
 
+/// Expand a requested file into the set of compiled/decompiled variants retail would try.
 pub(super) fn add_variants(file: &str, variants: &mut Vec<PathBuf>) {
     let mut push_unique = |path: PathBuf| {
         if !variants.contains(&path) {
@@ -337,6 +348,7 @@ pub(super) fn add_variants(file: &str, variants: &mut Vec<PathBuf>) {
     push_unique(PathBuf::from(format!("{file}.decompiled.lua")));
 }
 
+/// Compute candidate file paths mirroring retail `dofile` search order.
 pub(super) fn candidate_paths(path: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if Path::new(path).is_absolute() {
@@ -350,6 +362,7 @@ pub(super) fn candidate_paths(path: &str) -> Vec<PathBuf> {
     candidates
 }
 
+/// Load and execute a Lua chunk, handling compiled/decompiled detection and returning the first result.
 pub(super) fn execute_script<'lua>(lua: &'lua Lua, path: &Path) -> LuaResult<Option<Value<'lua>>> {
     if !path.is_file() {
         return Ok(None);

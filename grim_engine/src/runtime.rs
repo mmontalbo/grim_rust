@@ -1,16 +1,19 @@
 use anyhow::{Error, Result};
 
-use crate::cli::RunLuaArgs;
+use crate::cli::EngineArgs;
 use crate::lua_host::{log_engine_exit, run_boot_sequence};
 
-pub fn execute(args: RunLuaArgs) -> Result<()> {
-    let RunLuaArgs {
+const EXIT_MARKERS: [&str; 4] = ["thread '", "stack traceback", "runtime error", "panic"];
+
+/// Execute the minimal intro boot sequence and record a structured exit event.
+pub fn run_intro(args: EngineArgs) -> Result<()> {
+    let EngineArgs {
         data_root,
         headless,
         verbose,
     } = args;
 
-    let result = (|| -> Result<()> { run_boot_sequence(&data_root, verbose, headless) })();
+    let result = run_boot_sequence(&data_root, verbose, headless);
 
     match result {
         Ok(()) => {
@@ -26,20 +29,15 @@ pub fn execute(args: RunLuaArgs) -> Result<()> {
     }
 }
 
+/// Surface a concise cause string from an `anyhow` chain for telemetry.
 fn format_exit_cause(err: &Error) -> Option<String> {
     let dump = format!("{err:?}");
-    let markers = ["thread '", "stack traceback", "runtime error", "panic"];
-    let best: Option<usize> = if let Some(idx) = dump.rfind("Caused by:") {
-        Some(idx)
-    } else {
-        let mut fallback: Option<usize> = None;
-        for marker in markers {
-            if let Some(idx) = dump.rfind(marker) {
-                fallback = Some(fallback.map_or(idx, |prev| prev.max(idx)));
-            }
-        }
-        fallback
-    };
+    let best = dump.rfind("Caused by:").or_else(|| {
+        EXIT_MARKERS
+            .iter()
+            .filter_map(|marker| dump.rfind(marker))
+            .max()
+    });
     let snippet = best.map(|idx| &dump[idx..]).unwrap_or(&dump);
     let lines: Vec<String> = snippet
         .lines()

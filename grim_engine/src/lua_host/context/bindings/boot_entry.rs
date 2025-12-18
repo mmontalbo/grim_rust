@@ -1,9 +1,15 @@
+//! Glue around the retail `_system.lua` boot path.
+//!
+//! These helpers load the system script via `dofile`, wrap `BOOT` to emit a boot
+//! completion signal, and stub out the script scheduler functions so the intro
+//! flow can advance without the full engine runtime.
+
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
 use anyhow::{ensure, Context, Result};
-use mlua::{Function, Lua, MultiValue, RegistryKey, Value, Variadic};
+use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Value, Variadic};
 
 use super::util::{
     describe_callable_label, describe_value, function_provenance, function_source_hint, set_global,
@@ -12,6 +18,7 @@ use crate::lua_host::context::EngineContext;
 use crate::lua_host::telemetry::log_boot_sequence_complete;
 use grim_telemetry_schema::trace_utils::LuaFunctionProvenance;
 
+/// Load the retail system script using the Lua-level `dofile` for parity.
 pub(crate) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
     let compiled = data_root.join("_system.lua");
     let decompiled = data_root.join("_system.decompiled.lua");
@@ -33,6 +40,7 @@ pub(crate) fn load_system_script(lua: &Lua, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Wrap retail `BOOT` so we can log when it completes and avoid double-logging non-game scripts.
 pub(crate) fn wrap_boot(lua: &Lua, data_root: &Path) -> Result<()> {
     let globals = lua.globals();
     let boot: Function = globals
@@ -57,6 +65,7 @@ pub(crate) fn wrap_boot(lua: &Lua, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Stub out script scheduler functions used by `_system.lua` and early boot scripts.
 pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
 
@@ -73,43 +82,8 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
         })?,
     )?;
 
-    let start_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "start_script",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            if args.is_empty() {
-                return Ok(0u32);
-            }
-            let label = describe_callable_label(args.first().unwrap());
-            let handle = {
-                let mut state = start_ctx.borrow_mut();
-                state.start_script(label)
-            };
-            start_ctx.borrow_mut().complete_script(handle);
-            Ok(handle)
-        })?,
-    )?;
-
-    let single_ctx = context.clone();
-    set_global(
-        lua,
-        &globals,
-        "single_start_script",
-        lua.create_function(move |_, args: Variadic<Value>| {
-            if args.is_empty() {
-                return Ok(0u32);
-            }
-            let label = describe_callable_label(args.first().unwrap());
-            let handle = {
-                let mut state = single_ctx.borrow_mut();
-                state.start_script(label)
-            };
-            single_ctx.borrow_mut().complete_script(handle);
-            Ok(handle)
-        })?,
-    )?;
+    install_start_stub(lua, &globals, "start_script", context.clone())?;
+    install_start_stub(lua, &globals, "single_start_script", context.clone())?;
 
     set_global(
         lua,
@@ -145,6 +119,34 @@ pub(crate) fn override_boot_stubs(lua: &Lua, context: Rc<RefCell<EngineContext>>
     Ok(())
 }
 
+fn install_start_stub(
+    lua: &Lua,
+    globals: &Table,
+    name: &str,
+    context: Rc<RefCell<EngineContext>>,
+) -> Result<()> {
+    let start_ctx = context.clone();
+    set_global(
+        lua,
+        globals,
+        name,
+        lua.create_function(move |_, args: Variadic<Value>| {
+            if args.is_empty() {
+                return Ok(0u32);
+            }
+            let label = describe_callable_label(args.first().unwrap());
+            let handle = {
+                let mut state = start_ctx.borrow_mut();
+                state.start_script(label)
+            };
+            start_ctx.borrow_mut().complete_script(handle);
+            Ok(handle)
+        })?,
+    )?;
+    Ok(())
+}
+
+/// Invoke `BOOT(false, nil)` like retail and emit boot completion telemetry.
 pub(crate) fn call_boot(lua: &Lua, _context: Rc<RefCell<EngineContext>>) -> Result<()> {
     let globals = lua.globals();
     let boot: Function = globals

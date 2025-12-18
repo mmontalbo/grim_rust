@@ -16,19 +16,22 @@ Anything else that previously lived in this crate (timeline dumps, hotspot
 demos, coverage analysis, regression tests) is out of scope for the current
 milestone.
 
+## Module Map
+- `src/lib.rs`: public surface for parsing CLI args and running the intro (`parse_args`, `run_intro`).
+- `src/lua_host/context/bindings/pre_system.rs`: pre-`_system.lua` setup (legacy globals, search paths, stubs).
+- `src/lua_host/context/bindings/boot_entry.rs`: wraps and invokes `BOOT`, plus boot-time script stubs.
+- `src/lua_host/telemetry.rs`: semantic logging wired to match retail captures.
+
 ## Command Line
 
 ```
 cargo run -p grim_engine -- \
     [--data-root <path>] \
-    [--lab-root <path>] \
     [--headless] \
     [--verbose]
 ```
 
 - `--data-root` defaults to `extracted/DATA000`.
-- `--lab-root` defaults to `dev-install/` when present and is used to locate
-  retail movie assets.
 - `--headless` prints emitted engine events to stdout.
 - `--verbose` enables extra logging from the Lua host.
 

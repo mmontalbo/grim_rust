@@ -1,3 +1,9 @@
+//! Lua host glue for running the minimal intro boot path.
+//!
+//! The host sets up an `mlua` runtime with the safe standard library, installs
+//! just enough globals and stubs to make the retail boot scripts happy, and
+//! emits telemetry as the intro sequence progresses.
+
 mod context;
 mod legacy_lua;
 mod telemetry;
@@ -7,15 +13,7 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 use anyhow::{Context as AnyhowContext, Result};
 use mlua::{Lua, LuaOptions, StdLib};
 
-pub fn log_engine_exit(
-    status: &str,
-    note: Option<&str>,
-    code: Option<i32>,
-    signal: Option<i32>,
-    cause: Option<&str>,
-) {
-    telemetry::log_engine_exit(status, note, code, signal, cause);
-}
+pub use telemetry::log_engine_exit;
 
 /// Runs the minimal boot sequence needed for parity captures and returns once BOOT completes.
 pub fn run_boot_sequence(data_root: &Path, verbose: bool, headless: bool) -> Result<()> {

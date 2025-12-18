@@ -1,3 +1,9 @@
+//! Shared host-side state and bindings used while running the intro scripts.
+//!
+//! The `EngineContext` mirrors just enough of the retail engine runtime to keep
+//! the boot scripts happy: it tracks stubbed script handles, recorded events,
+//! and registry values used by the Lua compatibility layer.
+
 mod bindings;
 mod scripts;
 
@@ -11,6 +17,7 @@ use grim_telemetry_schema::OriginFields;
 use mlua::{FromLua, Lua, Result as LuaResult, Value};
 use scripts::{ScriptRuntime, ScriptRuntimeAdapter};
 
+/// Minimal state we expose to Lua bindings while the intro sequence runs.
 pub(super) struct EngineContext {
     verbose: bool,
     headless: bool,
@@ -34,12 +41,13 @@ impl EngineContext {
         self.verbose
     }
 
+    /// Record an engine event for later inspection and optionally print it when headless.
     pub(super) fn log_event(&mut self, event: impl Into<String>) {
         let message = event.into();
-        self.events.push(message.clone());
         if self.headless {
             eprintln!("[grim_engine] {message}");
         }
+        self.events.push(message);
     }
 
     fn script_runtime(&mut self) -> ScriptRuntimeAdapter<'_> {

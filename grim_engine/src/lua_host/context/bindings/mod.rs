@@ -1,12 +1,19 @@
-mod boot;
-mod bootstrap;
+//! Bindings that mirror the retail Lua surface needed during intro boot.
+//!
+//! Each submodule installs a focused slice of the retail runtime (pre-system
+//! globals, legacy fallbacks, registry helpers, `_system.lua` loader) so the
+//! minimal host can execute the intro scripts without pulling in the full
+//! engine.
+
+mod boot_entry;
 mod dofile;
 mod legacy;
+mod pre_system;
 mod registry;
 mod util;
 
-pub(crate) use boot::{call_boot, load_system_script, override_boot_stubs, wrap_boot};
-pub(crate) use bootstrap::{
+pub(crate) use boot_entry::{call_boot, load_system_script, override_boot_stubs, wrap_boot};
+pub(crate) use pre_system::{
     install_globals_post_system, install_globals_pre_system, install_package_path,
 };
 pub(crate) use registry::{store_registry_value, PinnedRegistryKeys, RefRegistry};

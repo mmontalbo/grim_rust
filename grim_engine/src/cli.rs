@@ -1,3 +1,9 @@
+//! Command-line surface for the minimal intro runner.
+//!
+//! The flags intentionally mirror the narrow runtime we still support: point
+//! at extracted data, optionally run headless, and toggle verbose logging from
+//! the Lua host. Anything more belongs in a resurrected tool, not this binary.
+
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -18,16 +24,21 @@ struct Args {
     verbose: bool,
 }
 
+/// Parsed CLI arguments forwarded to the runtime layer.
 #[derive(Debug, Clone)]
-pub struct RunLuaArgs {
+pub struct EngineArgs {
+    /// Path to the extracted DATA000 directory.
     pub data_root: PathBuf,
+    /// Print emitted events instead of talking to a viewer.
     pub headless: bool,
+    /// Enable extra logging from the Lua host.
     pub verbose: bool,
 }
 
-pub fn parse() -> RunLuaArgs {
+/// Parse CLI flags into the stable argument struct used by `runtime`.
+pub fn parse_args() -> EngineArgs {
     let args = Args::parse();
-    RunLuaArgs {
+    EngineArgs {
         data_root: args.data_root,
         headless: args.headless,
         verbose: args.verbose,

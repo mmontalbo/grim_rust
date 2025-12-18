@@ -1,3 +1,9 @@
+//! Minimal script scheduler bookkeeping used by stubbed boot functions.
+//!
+//! The real engine tracks script handles and lifecycle; we mirror just enough to
+//! log start/complete events and hand back stable handles when boot scripts call
+//! `start_script`/`single_start_script`.
+
 use std::collections::BTreeMap;
 
 #[derive(Debug)]

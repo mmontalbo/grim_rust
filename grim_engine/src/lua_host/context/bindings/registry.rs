@@ -1,3 +1,9 @@
+//! Registry helpers that mirror retail `lua_ref`/`lua_getref` behavior and telemetry.
+//!
+//! Retail Lua stores handles in the registry with specific ids/labels. The
+//! minimal host preserves that flow so boot scripts can fetch the same handles
+//! and telemetry consumers see comparable reference traffic.
+
 use grim_telemetry_schema::OriginFields;
 use mlua::{FromLua, Lua, RegistryKey, Result as LuaResult, Value};
 use std::collections::HashMap;
@@ -17,6 +23,7 @@ pub(crate) struct RegistryRef {
 }
 
 impl RegistryRef {
+    /// Emit a load event before returning the stored value.
     pub(crate) fn log_fetch(&self, origin: OriginFields, note: Option<String>) {
         log_load_ref(
             self.reference,
@@ -38,6 +45,7 @@ impl RegistryRef {
     }
 }
 
+/// Store a value in the registry with normalized handles/labels and telemetry.
 pub(crate) fn store_registry_value<'lua>(
     lua: &'lua Lua,
     value: Value<'lua>,
@@ -85,6 +93,7 @@ pub(crate) struct PinnedRegistryKeys {
 }
 
 impl PinnedRegistryKeys {
+    /// Keep a registry key alive for process lifetime to mirror retail behavior.
     pub(crate) fn push(&mut self, key: RegistryKey) {
         self.keys.push(key);
     }
@@ -104,6 +113,7 @@ pub(crate) struct RefRegistry {
 }
 
 impl RefRegistry {
+    /// Start with the first non-zero handle to match retail sequencing.
     pub(crate) fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -117,6 +127,7 @@ impl RefRegistry {
         handle
     }
 
+    /// Reserve a specific ref id if requested; otherwise allocate the next handle.
     fn reserve_reference(&mut self, preferred: Option<i32>) -> i32 {
         match preferred {
             Some(ref_id) if ref_id > 0 => {
@@ -150,6 +161,7 @@ impl RefRegistry {
         Ok(reference)
     }
 
+    /// Fetch a stored reference, logging semantic events on both hits and misses.
     pub(crate) fn fetch_ref<'lua, T: FromLua<'lua>>(
         &self,
         lua: &'lua Lua,
@@ -166,6 +178,7 @@ impl RefRegistry {
         Ok(None)
     }
 
+    /// Remove a stored reference; returns true if it existed.
     pub(crate) fn remove(&mut self, reference: i32) -> bool {
         self.entries.remove(&reference).is_some()
     }

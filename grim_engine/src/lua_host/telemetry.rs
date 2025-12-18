@@ -1,3 +1,10 @@
+//! Telemetry facade for the minimal engine host.
+//!
+//! This module centralizes logging so the rest of the host can emit retail-like
+//! semantic events (tags, refs, globals, boot lifecycle) without importing the
+//! underlying schema helpers directly. Keeping the surface small lets us swap
+//! telemetry backends without touching callers.
+
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
@@ -69,7 +76,7 @@ pub(crate) fn log_dofile(path: &str) {
     });
 }
 
-pub(crate) fn log_engine_exit(
+pub fn log_engine_exit(
     status: &str,
     note: Option<&str>,
     code: Option<i32>,
@@ -236,6 +243,34 @@ pub(crate) fn log_set_fallback(
         values,
         origin,
         caller,
+    });
+}
+
+pub(crate) fn log_set_tagmethod(
+    tag: i32,
+    event_name: &str,
+    handle: Option<String>,
+    values: ValueFields,
+    target_ptr: Option<*const c_void>,
+    tag_alias: Option<String>,
+) {
+    let origin = target_ptr.map_or_else(OriginFields::default, origin_fields_for_ptr);
+    let semantic_event = LuaSemanticEvent::SemanticSetTagmethod {
+        tag,
+        event_name: event_name.to_string(),
+        handle: handle.clone(),
+        values: values.clone(),
+        tag_alias: tag_alias.clone(),
+        origin: origin.clone(),
+    };
+    log_event(semantic_event);
+    log_event(LuaEvent::SetTagmethod {
+        tag,
+        event_name: event_name.to_string(),
+        handle,
+        values,
+        tag_alias,
+        origin,
     });
 }
 

@@ -1,3 +1,9 @@
+//! Shared helpers for binding globals with telemetry and retail-parity tagging.
+//!
+//! This module concentrates the small utilities needed to publish globals,
+//! classify function provenance, and record semantic table mutations so boot
+//! scripts look like retail runs to downstream tooling.
+
 use std::{cell::RefCell, path::Path};
 
 use grim_telemetry_schema::{
@@ -21,6 +27,7 @@ pub(crate) struct TaggedHandle {
 }
 
 impl TaggedHandle {
+    /// Create a userdata marker tagged with the given Lua tag id.
     pub(crate) fn new(tag: i32) -> Self {
         Self { tag }
     }
@@ -36,6 +43,7 @@ pub(crate) struct ColorHandle {
 }
 
 impl ColorHandle {
+    /// Encode RGB into the retail 0xRRGGBB packed format for telemetry parity.
     pub(crate) fn new(r: u8, g: u8, b: u8) -> Self {
         let encoded = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
         Self { encoded }

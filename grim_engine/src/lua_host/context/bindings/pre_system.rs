@@ -1,3 +1,10 @@
+//! Pre-system bootstrap to match the retail engine surface.
+//!
+//! This module installs the small set of globals, stubs, and search paths needed
+//! for the intro boot scripts to run under our pared-down host. Most helpers
+//! exist to preserve retail Lua 3.1 behavior (e.g. legacy I/O, concat fallback,
+//! tag registration) so telemetry stays comparable and scripts don't diverge.
+
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -22,6 +29,7 @@ use crate::lua_host::context::EngineContext;
 
 const ACTOR_TAG: i32 = 0x52544341; // 'ACTR'
 
+/// Mirror retail Lua search paths so `dofile` resolves DATA files before the default path.
 pub(crate) fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
     let globals = lua.globals();
     let package: Table = globals
@@ -36,6 +44,11 @@ pub(crate) fn install_package_path(lua: &Lua, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Pre-_system.lua bootstrap that installs legacy globals, constants, and runtime shims.
+///
+/// Retail boots with Lua 3.1-era globals and tag tables already available. The
+/// minimal host recreates just enough of that surface so the retail scripts
+/// (and telemetry expectations) line up before `_system.lua` runs.
 pub(crate) fn install_globals_pre_system(
     lua: &Lua,
     data_root: &Path,
@@ -54,6 +67,11 @@ pub(crate) fn install_globals_pre_system(
     Ok(())
 }
 
+/// Install constants, legacy helpers, and math/runtime fallbacks expected before scripts run.
+///
+/// The goal is parity with retail boot: Lua 3.1 identifiers, IO/misc tags, and
+/// legacy math behavior (e.g. `pow` tagmethod) must exist before `_system.lua`
+/// defines additional globals or stashes registry refs.
 fn install_constants_and_legacy<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -87,6 +105,7 @@ fn install_constants_and_legacy<'lua>(
     Ok(())
 }
 
+/// Bind runtime helpers (`dofile`, `PrintDebug`, sector constants) required during boot.
 fn install_runtime_bindings<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -98,6 +117,7 @@ fn install_runtime_bindings<'lua>(
     Ok(())
 }
 
+/// Install stubbed globals that boot scripts expect before system tables exist.
 fn install_stubbed_globals<'lua>(
     lua: &'lua Lua,
     globals: &Table<'lua>,
@@ -113,11 +133,18 @@ pub(crate) fn install_globals_post_system(
     context: Rc<RefCell<EngineContext>>,
 ) -> Result<()> {
     let globals = lua.globals();
+    // Post-_system.lua helpers: mirror retail aliases and stubs that scripts
+    // bind after the system tables exist.
     install_basic_functions_post_system(lua, &globals, context.clone())?;
     install_stubbed_tables(lua, &globals, context)?;
     Ok(())
 }
 
+/// Install legacy helpers and fallbacks needed before `_system.lua` runs.
+///
+/// These mirrors keep boot-time telemetry identical to retail: global aliases,
+/// concat fallback tagging, and the burst of registry refs that precedes other
+/// globals are all replayed here.
 fn install_basic_functions_pre_system(
     lua: &Lua,
     globals: &Table,
@@ -264,6 +291,7 @@ fn install_basic_functions_pre_system(
     Ok(())
 }
 
+/// Install the post-system subset of aliases/stubs the boot scripts still rely on.
 fn install_basic_functions_post_system(
     lua: &Lua,
     globals: &Table,
