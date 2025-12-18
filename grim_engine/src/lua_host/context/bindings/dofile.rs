@@ -133,26 +133,28 @@ fn stub_sets<'lua>(lua: &'lua Lua) -> LuaResult<Option<Value<'lua>>> {
         r#"
 CheckFirstTime("_sets.lua")
 system.setTable = system.setTable or {}
-if not system.setTable["mo.set"] then
-    system.setTable["mo.set"] = {
+local set = system.setTable["mo.set"]
+if not set then
+    set = {
         setFile = "mo.set",
         shrinkable = false,
         boxes_shrunk = false,
     }
-    function system.setTable["mo.set"]:switch_to_set()
-        system.currentSet = self
-        return self
-    end
-    function system.setTable["mo.set"]:short_name()
-        return "mo"
-    end
-    function system.setTable["mo.set"]:CommonCameraChange(prevSetup, nextSetup)
-    end
-    function system.setTable["mo.set"]:CommonPostCameraChange(newSetup)
-    end
+    system.setTable["mo.set"] = set
 end
-system.currentSet = system.currentSet or system.setTable["mo.set"]
-return system.setTable["mo.set"]
+function set:switch_to_set()
+    system.currentSet = self
+    return self
+end
+function set:short_name()
+    return "mo"
+end
+function set:CommonCameraChange(prevSetup, nextSetup)
+end
+function set:CommonPostCameraChange(newSetup)
+end
+system.currentSet = system.currentSet or set
+return set
 "#,
     )
 }
