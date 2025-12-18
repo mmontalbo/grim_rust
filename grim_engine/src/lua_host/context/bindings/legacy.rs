@@ -17,8 +17,8 @@ use mlua::{
 };
 
 use crate::lua_host::telemetry::{
-    log_set_fallback, log_unref, next_fabricated_handle, normalize_handle, ptr_to_handle,
-    register_table_label,
+    log_set_fallback, log_set_tagmethod, log_unref, next_fabricated_handle, normalize_handle,
+    ptr_to_handle, register_table_label,
 };
 
 use super::util::{
@@ -171,8 +171,7 @@ fn install_fallback_globals<'lua>(
                 eprintln!("[lua][setfallback] installing stubbed handler for {event}");
             }
             let mut state = setfallback_state.borrow_mut();
-            let suppress_fallback_log =
-                is_bootstrap_event && state.fallbacks.contains_key(&event);
+            let suppress_fallback_log = is_bootstrap_event && state.fallbacks.contains_key(&event);
             let previous = state.set_fallback_for_all(lua_ctx, &event, handler.clone())?;
             let values = value_fields_from_lua(&Value::Function(handler.clone()));
             let handle = ptr_to_handle(handler.to_pointer());
@@ -412,7 +411,10 @@ impl LegacyFallbacks {
                     ))
                 })?,
             ),
-            ("index", lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?),
+            (
+                "index",
+                lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
+            ),
             (
                 "getglobal",
                 lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
@@ -441,7 +443,10 @@ impl LegacyFallbacks {
                     ))
                 })?,
             ),
-            ("gc", lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?),
+            (
+                "gc",
+                lua.create_function(|_, _: Variadic<Value>| Ok(Value::Nil))?,
+            ),
             (
                 "function",
                 lua.create_function(|_, _: Variadic<Value>| -> LuaResult<Value> {
@@ -535,11 +540,21 @@ impl LegacyFallbacks {
         handler: Function<'lua>,
     ) -> LuaResult<Option<Function<'lua>>> {
         let previous = self.get_tag_method(lua, tag, event)?;
-        let key = lua.create_registry_value(handler)?;
+        let key = lua.create_registry_value(handler.clone())?;
         self.tag_methods
             .entry(tag)
             .or_default()
             .insert(event.to_string(), key);
+        let values = value_fields_from_lua(&Value::Function(handler.clone()));
+        let handle = ptr_to_handle(handler.to_pointer());
+        log_set_tagmethod(
+            tag as i32,
+            event,
+            Some(handle),
+            values,
+            Some(handler.to_pointer()),
+            None,
+        );
         Ok(previous)
     }
 
