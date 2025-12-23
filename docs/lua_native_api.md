@@ -32,7 +32,7 @@ This document tracks the native API we need to expose from the engine to the Lua
 - Builds the `system` table, logs creation, stores it as ref 0, then retrieves and attaches `controls`, default handler closures for `camChangeHandler`/`axisHandler`/`inputModeHandler`/`buttonHandler`, `setTable`, and `currentActor` (with `set_selected` / `default` / `put_in_set` stubs) to mirror retail sequencing.
 - Provides stubbed tables for prefs (`system_prefs`), cutscenes (`cut_scene.logos`/`intro`), loading/boot menus, concept unlocks, and `footsteps`; movie helpers drive the simplified fullscreen movie state machine.
 - Boot stubs wrap script scheduling and playback helpers (`start_script`, `single_start_script`, `stop_script`, `wait_for_script`, movie functions) but currently no real script runner or asset streaming.
-- `dofile` supports retail path variants and short-circuits special files (e.g. `_controls.lua`, menu scripts) to keep intro bootstrap moving while we fill in missing native behaviours.
+- `dofile` supports retail path variants (compiled first, decompiled fallback) with legacy normalization for decompiled chunks, uses case-insensitive lookup to mirror retail filesystem behavior, and errors if no candidate script can be loaded.
 
 ## Compatibility goals and how to validate
 - **Match registrations:** The set of `registered_global` / `registered_constant` names, upvalues, and push sequences in `grim_engine` should match the retail trace captured by `grim_analysis`.

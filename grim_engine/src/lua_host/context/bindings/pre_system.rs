@@ -6,7 +6,8 @@
 //! tag registration) so telemetry stays comparable and scripts don't diverge.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
@@ -18,7 +19,7 @@ use mlua::{
 use crate::lua_host::telemetry::{log_dofile, log_set_fallback, ptr_to_handle, register_tag};
 use grim_telemetry_schema::{OriginFields, UpvaluePreview, ValueFields, ValueType};
 
-use super::dofile::{candidate_paths, execute_script, handle_special_dofile};
+use super::dofile::{candidate_paths, execute_script, resolve_case_insensitive};
 use super::legacy::{install_legacy_compat, install_legacy_math};
 use super::util::{
     set_global, set_table_entry_with_telemetry, value_fields_from_lua, value_to_string,
@@ -426,20 +427,17 @@ fn install_dofile(
 ) -> Result<()> {
     let root = data_root.to_path_buf();
     let verbose = context.borrow().verbose();
-    let dofile_context = context.clone();
-    let wrapped_dofile = lua.create_function(move |lua_ctx, path: String| -> LuaResult<Value> {
+    let case_cache: Rc<RefCell<HashMap<PathBuf, HashMap<String, PathBuf>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let wrapped_dofile = lua.create_function({
+        let case_cache = case_cache.clone();
+        move |lua_ctx, path: String| -> LuaResult<Value> {
         log_dofile(&path);
-        if let Some(value) = handle_special_dofile(lua_ctx, &path, dofile_context.clone())? {
-            if verbose {
-                println!("[lua][dofile] handled {} via host", path);
-            }
-            return Ok(value);
-        }
-
         let mut tried = Vec::new();
         for candidate in candidate_paths(&path) {
-            let absolute = if candidate.is_absolute() {
-                candidate
+            let is_absolute = candidate.is_absolute();
+            let absolute = if is_absolute {
+                candidate.clone()
             } else {
                 root.join(&candidate)
             };
@@ -450,16 +448,42 @@ fn install_dofile(
                 }
                 return Ok(value);
             }
+            let resolved = {
+                let mut cache = case_cache.borrow_mut();
+                if is_absolute {
+                    absolute
+                        .strip_prefix(&root)
+                        .ok()
+                        .and_then(|relative| resolve_case_insensitive(&root, relative, &mut cache))
+                } else {
+                    resolve_case_insensitive(&root, &candidate, &mut cache)
+                }
+            };
+            if let Some(resolved) = resolved {
+                if resolved != absolute {
+                    tried.push(resolved.clone());
+                }
+                if let Some(value) = execute_script(lua_ctx, &resolved)? {
+                    if verbose {
+                        println!("[lua][dofile] loaded {}", resolved.display());
+                    }
+                    return Ok(value);
+                }
+            }
         }
 
         if verbose {
-            println!("[lua][dofile] skipped {}", path);
+            println!("[lua][dofile] missing {}", path);
             for attempt in tried {
                 println!("  tried {}", attempt.display());
             }
         }
 
-        Ok(Value::Nil)
+        Err(LuaError::RuntimeError(format!(
+            "dofile: cannot open {}",
+            path
+        )))
+    }
     })?;
     // Avoid logging an extra semantic bind here so ordering matches retail tagmethod burst.
     with_suppressed_registered_globals(|| set_global(lua, globals, "dofile", wrapped_dofile))?;
